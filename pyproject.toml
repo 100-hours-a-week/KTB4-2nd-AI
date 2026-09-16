@@ -1,0 +1,52 @@
+[project]
+name = "yeodam-ai"
+version = "0.1.0"
+description = "여담 AI 서버, 여행 사진 정리 파이프라인"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "httpx>=0.27",
+    "pydantic>=2.8",
+    "pydantic-settings>=2.4",
+    "numpy>=1.26",
+    "torch>=2.4",
+    "transformers>=4.50",
+    "qdrant-client>=1.19",
+    "boto3>=1.35",
+    "pillow>=10.4",
+    "imagehash>=4.3",
+    "opencv-python-headless>=4.10",
+    "scikit-learn>=1.5",
+    "pyyaml>=6.0",
+    "huggingface-hub>=0.25",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.6",
+]
+
+[tool.uv]
+package = false
+
+# torch는 CPU 휠만. 기본 PyPI를 쓰면 CUDA 번들이 딸려와 이미지가 2GB 이상 커짐. GPU 프로필은 v2에서 별도 인덱스
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
