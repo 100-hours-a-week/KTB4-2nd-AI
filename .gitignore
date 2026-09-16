@@ -8,3 +8,4 @@ __pycache__/
 data/
 models/
 evaluation/datasets/
+CLAUDE.md
