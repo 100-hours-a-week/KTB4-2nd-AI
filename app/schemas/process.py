@@ -164,13 +164,13 @@ class FailedAttachment(BaseModel):
 
 
 class ClockOffset(BaseModel):
-    """기기별 적용한 시계 보정
-
-    days는 현행 명세. offset_seconds로 바꿀지 파이프라인 담당 확인 대기
-    """
+    """기기별 적용한 시계 보정"""
 
     device_model: str
     days: int
+
+    # 오프셋 결정하는데 근거가 된 사진 쌍의 수
+    # (몇 쌍 이상일 때 보정을 적용하는지 thresholds.yaml에 정의)
     matched_pairs: int = Field(ge=0)
 
 
@@ -179,3 +179,14 @@ class ProcessResult(BaseModel):
     unclassified: list[UnclassifiedAttachment]
     failed: list[FailedAttachment] = Field(default_factory=list)
     clock_offsets: list[ClockOffset] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _attachment_ids_unique(self) -> Self:
+        """사진 하나는 폴더, 미분류, 실패 중 한 곳에만. 겹치면 파이프라인 버그"""
+        ids = [a.trip_attachment_id for p in self.places for a in p.attachments]
+        ids += [u.trip_attachment_id for u in self.unclassified]
+        ids += [f.trip_attachment_id for f in self.failed]
+        duplicates = sorted({i for i in ids if ids.count(i) > 1})
+        if duplicates:
+            raise ValueError(f"trip_attachment_id가 두 곳 이상에 있음: {duplicates}")
+        return self

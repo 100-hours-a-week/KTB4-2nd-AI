@@ -10,9 +10,10 @@ from typing import Any
 
 
 class ErrorCode(StrEnum):
-    """API 명세의 오류 코드. 마지막 둘은 명세 표에 없는 내부 코드"""
+    """API 명세의 오류 코드. UNAUTHORIZED는 명세 표에 추가 예정, 마지막 둘은 내부 코드"""
 
     INVALID_REQUEST = "INVALID_REQUEST"
+    UNAUTHORIZED = "UNAUTHORIZED"
     DUPLICATE_TASK = "DUPLICATE_TASK"
     TASK_NOT_CANCELABLE = "TASK_NOT_CANCELABLE"
     TASK_NOT_FOUND = "TASK_NOT_FOUND"
@@ -31,6 +32,7 @@ class ErrorCode(StrEnum):
 # HTTP 응답으로 나갈 수 있는 코드와 상태. 없는 코드는 작업 FAILED 전용이며 AppError로 쓰면 500
 HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.INVALID_REQUEST: 422,
+    ErrorCode.UNAUTHORIZED: 401,
     ErrorCode.DUPLICATE_TASK: 409,
     ErrorCode.TASK_NOT_CANCELABLE: 409,
     ErrorCode.TASK_NOT_FOUND: 404,
@@ -42,6 +44,7 @@ HTTP_STATUS: dict[ErrorCode, int] = {
 # 기본 메시지. 백엔드에 그대로 전달되는 문장이라 명세의 예시 표기를 따름
 DEFAULT_MESSAGE: dict[ErrorCode, str] = {
     ErrorCode.INVALID_REQUEST: "요청 형식이 올바르지 않습니다.",
+    ErrorCode.UNAUTHORIZED: "인증 키가 없거나 올바르지 않습니다.",
     ErrorCode.DUPLICATE_TASK: "같은 여행의 작업이 진행 중입니다.",
     ErrorCode.TASK_NOT_CANCELABLE: "이미 종료된 작업은 취소할 수 없습니다.",
     ErrorCode.TASK_NOT_FOUND: "작업 기록이 없습니다. 다시 요청해 주세요.",
