@@ -47,16 +47,11 @@ class ErrorBody(BaseModel):
     detail: dict[str, Any] = Field(default_factory=dict)
 
 
-class ProcessAccepted(BaseModel):
-    """POST 202 응답"""
-
-    trip_id: int
-    status: TaskStatus
-    total_attachments: int
-
-
 class TaskStatusResponse(BaseModel):
-    """GET 200 응답. result는 COMPLETED일 때만, error는 FAILED일 때만"""
+    """POST와 GET 200 응답. result는 COMPLETED일 때만, error는 FAILED일 때만
+
+    v1 POST는 완료까지 기다렸다가 이 모양으로 반환. 202 접수 응답은 v2
+    """
 
     trip_id: int
     status: TaskStatus

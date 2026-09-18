@@ -36,7 +36,7 @@ class Period(RequestModel):
 
 
 class Region(RequestModel):
-    """여행 지역 좌표, 상속 좌표의 지역 검증에만 사용"""
+    """여행 지역 좌표. v1 미사용, v2 이후 지역 검증용으로 계약에 유지"""
 
     latitude: float
     longitude: float
