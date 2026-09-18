@@ -25,4 +25,4 @@
 - [ ] 대상 브랜치가 `main`인가
 - [ ] `uv run pytest` 통과
 - [ ] `uv run ruff check .`, `uv run ruff format --check .` 경고 없음
-- [ ] 접점(`run()` 시그니처, `EmbeddingEngine`, `PipelineContext`, 예외 클래스, `thresholds.yaml` 키)을 바꿨다면 상대를 리뷰어로 지정했는가
+- [ ] 인터페이스(`run()` 시그니처, `EmbeddingEngine`, `PipelineContext`, 예외 클래스, `thresholds.yaml` 키)을 바꿨다면 상대를 리뷰어로 지정했는가
