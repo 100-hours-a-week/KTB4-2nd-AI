@@ -34,7 +34,7 @@ def run(
         DOWNLOADING  ctx.images로 사본 bytes 확보, PIL로 디코딩. 안 열리는 사진은 DecodeFailed(ids)
         EMBEDDING    16장 배치로 ctx.engine.encode_images, 배치마다 ctx.qdrant.upsert
         CLOCK        device_model로 기기별 묶음, 유사도 쌍으로 기기별 단일 오프셋 산출과 적용
-        LOCATING     기간 밖 분리, GPS 앵커, 유사도 상속, 지역 거리 검증
+        LOCATING     기간 밖 분리, GPS 앵커, 유사도 상속
         CLUSTERING   haversine DBSCAN, 재방문은 한 폴더
         FILTERING    라플라시안 BLURRY, pHash DUPLICATED, 원래 폴더 place_id 연결
         FINALIZING   대표컷은 폴더 평균 임베딩 최근접, first/last_taken_at, ProcessResult 조립
