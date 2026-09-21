@@ -67,6 +67,8 @@ def setup_logging(level: str = "INFO") -> None:
         uv_logger = logging.getLogger(name)
         uv_logger.handlers[:] = []
         uv_logger.propagate = True
+    # httpx는 요청마다 INFO 한 줄. 워커 콜백이 작업당 수십 번이라 WARNING부터만
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def get_logger(name: str) -> logging.Logger:

@@ -10,10 +10,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, Request
-from fastapi.encoders import jsonable_encoder
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI
 
 from app.api.routers import health, internal, process
 from app.api.routers.health import qdrant_ready
@@ -22,7 +19,7 @@ from app.api.services.task_store import TaskStore
 from app.api.services.watchdog import watchdog_loop
 from app.api.services.worker_client import WorkerClient, WorkerClientProtocol
 from app.core.config import Settings, get_settings
-from app.core.errors import AppError, ErrorCode
+from app.core.http_errors import register_error_handlers
 from app.core.logging import get_logger, setup_logging
 
 log = get_logger(__name__)
@@ -65,17 +62,7 @@ def create_app(
     app.include_router(internal.router)
     app.include_router(health.router)
 
-    @app.exception_handler(AppError)
-    async def app_error_handler(_: Request, exc: AppError) -> JSONResponse:
-        """deps, 서비스, 라우터 어디서 던져도 명세의 오류 본문으로"""
-        return JSONResponse(status_code=exc.http_status, content=exc.to_body())
-
-    @app.exception_handler(RequestValidationError)
-    async def validation_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
-        """FastAPI 기본 422 본문 {detail: [...]}을 명세의 {error: {...}}로"""
-        err = AppError(ErrorCode.INVALID_REQUEST, detail={"errors": jsonable_encoder(exc.errors())})
-        return JSONResponse(status_code=err.http_status, content=err.to_body())
-
+    register_error_handlers(app)
     return app
 
 
