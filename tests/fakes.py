@@ -1,6 +1,12 @@
-"""테스트 대역. 카드 3은 FakeClock과 FakeWorkerClient, 카드 4가 fake_run과 FakeEngine을 추가"""
+"""테스트 대역
+
+FakeClock, FakeWorkerClient는 api 테스트, FakeCallback은 워커 테스트.
+FakeEngine과 fake_run은 컨테이너에서도 써야 해서 app/engines/fake.py,
+app/pipeline/fake_run.py에 있음
+"""
 
 import asyncio
+import threading
 
 from app.api.services.task_service import TaskService
 from app.api.services.worker_client import SubmitResult, WorkerUnavailable
@@ -114,3 +120,31 @@ class FakeWorkerClient:
     async def aclose(self) -> None:
         for job in self._jobs.values():
             job.cancel()
+
+
+class FakeCallback:
+    """CallbackProtocol 대역. 호출을 기록하고 result나 failed가 오면 done을 set
+
+    테스트가 wait()로 러너 스레드가 끝나기를 기다림
+    """
+
+    def __init__(self) -> None:
+        self.progress_calls: list[tuple[int, ProcessStep, int, int]] = []
+        self.results: list[tuple[int, ProcessResult]] = []
+        self.failures: list[tuple[int, ErrorBody]] = []
+        self.done = threading.Event()
+
+    def progress(self, trip_id: int, step: ProcessStep, done: int, total: int) -> None:
+        self.progress_calls.append((trip_id, step, done, total))
+
+    def result(self, trip_id: int, result: ProcessResult) -> None:
+        self.results.append((trip_id, result))
+        self.done.set()
+
+    def failed(self, trip_id: int, error: ErrorBody) -> None:
+        self.failures.append((trip_id, error))
+        self.done.set()
+
+    def wait(self, timeout: float = 5.0) -> None:
+        assert self.done.wait(timeout), "러너가 제한 시간 안에 끝나지 않음"
+        self.done.clear()
