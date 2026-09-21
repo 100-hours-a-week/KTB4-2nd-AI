@@ -1,0 +1,14 @@
+# 파이프라인 임계값, 모델별. 인터페이스 3
+# 키 8개는 steps/가 ctx.thresholds["키"]로 읽음. 이름을 바꾸면 steps/와 여기를 같이
+# 값은 파이프라인 담당이 평가셋으로 측정해 교체. 아래는 v1_구현.md §8의 초안이며 "측정 필요"는 임시값
+# FAKE_PIPELINE=1이면 이 파일을 읽지 않음
+
+siglip2-so400m-naflex:
+  inherit_min_sim: 0.5              # LOCATING. GPS 없는 사진이 좌표를 물려받는 코사인 유사도 하한. 측정 필요
+  dbscan_eps_m: 200                 # CLUSTERING. DBSCAN eps, 미터. 초안 도심 200, 자연 5000
+  min_samples: 1                    # CLUSTERING. 1이면 사진 한 장도 폴더
+  blur_var_min: 100.0               # FILTERING. 긴 변 300px 라플라시안 분산 하한, 미만이면 BLURRY. 측정 필요
+  phash_max_dist: 5                 # FILTERING. pHash 해밍 거리 상한, 이하면 DUPLICATED. 측정 필요
+  clock_pair_min_sim: 0.6           # CLOCK. 기준 기기와 대상 기기 사진을 쌍으로 묶는 유사도 하한. 측정 필요
+  clock_min_pairs: 3                # CLOCK. 오프셋 적용에 필요한 최소 쌍 수
+  clock_offset_tolerance_sec: 1800  # CLOCK. 쌍별 오프셋 후보가 이 범위 안에 모여야 일관된 값으로 인정
