@@ -13,7 +13,7 @@ uv run uvicorn app.worker_main:app --port 8002
 uv run uvicorn app.main:app --port 8000
 ```
 
-`fetch_model.py`는 임베딩 가중치를 `models/.raw/`에 받아 bf16으로 변환한 2.3GB를 `models/siglip2`에 둠. git에는 없음
+`fetch_model.py`는 임베딩 가중치를 `models/.raw/`에 받아 vision 타워만 bf16으로 변환한 0.9GB를 `models/siglip2`에 둠. git에는 없음
 
 ## 검사
 
@@ -38,7 +38,7 @@ CI 워크플로와 사람이 같은 명령을 씀. 워크플로는 이 표의 �
 | 이미지 빌드 | `docker buildx build --platform linux/amd64 -f docker/Dockerfile -t ghcr.io/100-hours-a-week/yeodam-ai-worker:sha-$GITHUB_SHA .` | ✓ push 없음 | ✓ |
 | 이미지 push | `docker push ghcr.io/100-hours-a-week/yeodam-ai-worker:sha-$GITHUB_SHA` | | ✓ |
 
-- 가중치 캐시는 `models/siglip2` 디렉터리, 키는 `--cache-key` 출력(`siglip2-so400m-naflex-<revision 12자>-bf16`). revision은 `scripts/fetch_model.py`의 `MODELS`에 고정, dtype이나 `--vision-only`가 바뀌면 키도 바뀜
+- 가중치 캐시는 `models/siglip2` 디렉터리, 키는 `--cache-key` 출력(`siglip2-so400m-naflex-<revision 12자>-bf16-vision`). revision은 `scripts/fetch_model.py`의 `MODELS`에 고정, dtype이나 `--full`이 바뀌면 키도 바뀜
 - `runtime_check.py`는 엔진 적재, 1장 임베딩, Qdrant 연결을 확인. 워커 엔트리와 엔진 클래스가 머지된 뒤 추가
 - 이미지 태그는 `sha-{전체 커밋 해시}`. 클라우드 CD는 이 태그를 pull만 하고 다시 빌드하지 않음
 

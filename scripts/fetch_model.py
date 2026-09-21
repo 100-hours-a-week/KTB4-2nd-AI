@@ -1,18 +1,20 @@
 """임베딩 모델 가중치 준비. Docker 빌드 전과 로컬 개발에서 한 번 실행
 
-HF 저장소를 커밋 해시로 고정해 models/.raw/에 원본을 받고, bf16으로 변환한 결과를
-models/siglip2에 씀.
+HF 저장소를 커밋 해시로 고정해 models/.raw/에 원본을 받고, vision 타워만 bf16으로 변환한
+결과를 models/siglip2에 씀.
 가중치는 git에 없고(.gitignore의 models/) Dockerfile이 COPY models/siglip2로 이미지에 넣음.
 워크플로는 --cache-key 출력을 캐시 키로 써서 같은 revision과 변환 방식이면 다시 만들지 않음
 
 bf16인 이유: 파이프라인 담당의 실측(200장 373초)과 임계값이 bf16 기준. 이미지에 든 가중치가
-잰 것과 같아야 함. fp32 4.5GB가 2.3GB로 줄어 워커 RAM도 그만큼 줄어듦
+잰 것과 같아야 함
+vision만인 이유: v1은 텍스트 인코딩이 없고 v2 검색은 다른 모델이라 text 타워(bf16 1.4GB)를
+영영 안 씀. 엔진은 Siglip2VisionModel로 적재(9/21 파이프라인 담당 확정). 결과 0.9GB.
+이 파일은 Siglip2Model이나 AutoModel로는 열 수 없음, text 텐서가 없음
 
 사용
-    uv run scripts/fetch_model.py                    models/siglip2에 bf16 전체 모델
-    uv run scripts/fetch_model.py --vision-only      text 타워 제외, 0.9GB
-                                                     엔진이 Siglip2VisionModel로 적재할 때만
-    uv run scripts/fetch_model.py --dtype fp32       변환 없이 원본 그대로
+    uv run scripts/fetch_model.py                    models/siglip2에 bf16 vision 타워
+    uv run scripts/fetch_model.py --full             text 타워 포함, 2.3GB
+    uv run scripts/fetch_model.py --dtype fp32       dtype 변환 없이
     uv run scripts/fetch_model.py --cache-key        캐시 키만 출력하고 종료
     uv run scripts/fetch_model.py --force            결과가 있어도 다시 만듦
 """
@@ -55,7 +57,7 @@ def variant(name: str, dtype: str, vision_only: bool) -> str:
 
 
 def cache_key(name: str, dtype: str, vision_only: bool) -> str:
-    """워크플로 캐시 키. 모델 이름, revision 앞 12자, dtype, vision-only면 -vision"""
+    """워크플로 캐시 키. 모델 이름, revision 앞 12자, dtype, vision만이면 -vision"""
     key = f"{name}-{MODELS[name]['revision'][:12]}-{dtype}"
     return key + "-vision" if vision_only else key
 
@@ -136,22 +138,19 @@ def main(argv: list[str] | None = None) -> int:
         help="Settings.EMBED_MODEL 값, 기본은 환경 변수 EMBED_MODEL 또는 siglip2-so400m-naflex",
     )
     parser.add_argument("--dtype", default="bf16", choices=sorted(DTYPES), help="기본 bf16")
-    parser.add_argument(
-        "--vision-only",
-        action="store_true",
-        help="text 타워 제외. 엔진이 vision 클래스로 적재할 때만",
-    )
+    parser.add_argument("--full", action="store_true", help="text 타워 포함. 기본은 vision만")
     parser.add_argument("--dest", type=Path, help="결과 경로, 기본은 모델별 models/ 아래")
     parser.add_argument("--force", action="store_true", help="결과가 있어도 다시 만듦")
     parser.add_argument("--cache-key", action="store_true", help="캐시 키만 출력하고 종료")
     args = parser.parse_args(argv)
 
+    vision_only = not args.full
     if args.cache_key:
-        print(cache_key(args.model, args.dtype, args.vision_only))
+        print(cache_key(args.model, args.dtype, vision_only))
         return 0
 
     dest = args.dest or Path(MODELS[args.model]["dest"])
-    build(args.model, dest, args.dtype, args.vision_only, force=args.force)
+    build(args.model, dest, args.dtype, vision_only, force=args.force)
     return 0
 
 
