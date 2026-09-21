@@ -11,6 +11,7 @@ dependencies = [
     "pydantic-settings>=2.4",
     "numpy>=1.26",
     "torch>=2.4",
+    "torchvision>=0.19",
     "transformers>=4.50",
     "qdrant-client>=1.19",
     "boto3>=1.35",
@@ -31,7 +32,8 @@ dev = [
 [tool.uv]
 package = false
 
-# torch는 CPU 휠만. 기본 PyPI를 쓰면 CUDA 번들이 딸려와 이미지가 2GB 이상 커짐. GPU 프로필은 v2에서 별도 인덱스
+# torch와 torchvision은 CPU 휠만. 기본 PyPI를 쓰면 CUDA 번들이 딸려와 이미지가 2GB 이상 커짐. GPU 프로필은 v2에서 별도 인덱스
+# torchvision은 transformers 5의 기본(fast) 이미지 프로세서가 요구, 9/21
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
@@ -39,6 +41,7 @@ explicit = true
 
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
 
 [tool.ruff]
 line-length = 100
