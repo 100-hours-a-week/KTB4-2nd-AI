@@ -27,6 +27,8 @@ class ErrorCode(StrEnum):
     CANCELED = "CANCELED"
     # 명세에는 failed[].reason 값으로만 있음. v1은 디코딩 실패도 작업 전체 FAILED라 오류 코드로도 씀
     DECODE_FAILED = "DECODE_FAILED"
+    # 워커 POST /jobs가 실행 중일 때 409. api → worker 내부 계약, 백엔드 응답에는 안 나감
+    WORKER_BUSY = "WORKER_BUSY"
 
 
 # HTTP 응답으로 나갈 수 있는 코드와 상태. 없는 코드는 작업 FAILED 전용이며 AppError로 쓰면 500
@@ -39,6 +41,7 @@ HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.RATE_LIMITED: 429,
     ErrorCode.MODEL_NOT_READY: 503,
     ErrorCode.INTERNAL_ERROR: 500,
+    ErrorCode.WORKER_BUSY: 409,
 }
 
 # 기본 메시지. 백엔드에 그대로 전달되는 문장이라 명세의 예시 표기를 따름
@@ -56,6 +59,7 @@ DEFAULT_MESSAGE: dict[ErrorCode, str] = {
     ErrorCode.INTERNAL_ERROR: "내부 오류가 발생했습니다.",
     ErrorCode.CANCELED: "작업이 취소되었습니다.",
     ErrorCode.DECODE_FAILED: "이미지 디코딩에 실패했습니다.",
+    ErrorCode.WORKER_BUSY: "워커가 다른 작업을 실행 중입니다.",
 }
 
 
