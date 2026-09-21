@@ -4,20 +4,49 @@
 Qdrant 컬렉션 이름과 차원이 엔진에서 나오기 때문
 """
 
+import time
 from collections.abc import Callable
+
+import httpx
 
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.engines.base import EmbeddingEngine
 from app.engines.fake import FakeEngine
 from app.infra.images import ImageSource, LocalDirImageSource, S3ImageSource
-from app.infra.qdrant import QdrantStore
+from app.infra.qdrant import MEMORY, QdrantStore
 from app.pipeline.context import PipelineContext, load_thresholds
 from app.pipeline.fake_run import fake_run
 from app.pipeline.run import CancelCheck, ProgressCallback
 from app.schemas.process import ProcessRequest, ProcessResult
 
 RunFn = Callable[[ProcessRequest, PipelineContext, ProgressCallback, CancelCheck], ProcessResult]
+
+log = get_logger(__name__)
+
+
+def wait_for_qdrant(url: str, timeout: float = 60.0, interval: float = 1.0) -> None:
+    """Qdrant /readyz가 200이 될 때까지 대기. 워커 기동 때 한 번
+
+    supervisord가 qdrant와 worker를 같이 띄우므로 워커가 먼저 붙으면 연결 실패로 죽음.
+    :memory:는 대기 없음
+    """
+    if url == MEMORY:
+        return
+    deadline = time.monotonic() + timeout
+    attempt = 0
+    while True:
+        try:
+            if httpx.get(f"{url}/readyz", timeout=2.0).status_code == 200:
+                return
+        except httpx.HTTPError:
+            pass
+        attempt += 1
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"Qdrant {url}가 {timeout:.0f}초 안에 준비되지 않음")
+        if attempt % 10 == 0:
+            log.info("Qdrant 대기", extra={"url": url, "attempt": attempt})
+        time.sleep(interval)
 
 
 def build_engine(settings: Settings) -> EmbeddingEngine:
@@ -52,6 +81,7 @@ def build_context(
     if images is None:
         images = build_images(settings)
     if qdrant is None:
+        wait_for_qdrant(settings.QDRANT_URL)
         qdrant = QdrantStore(settings.QDRANT_URL, engine.model_version, engine.dim)
     thresholds = (
         {}
