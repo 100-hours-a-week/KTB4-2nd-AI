@@ -125,11 +125,34 @@ async def test_delete_during_post_releases_post_as_canceled(
 
     res = await client.delete("/trips/77/process", headers=AUTH)
     assert res.status_code == 200
-    assert res.json() == {"trip_id": 77, "status": "CANCELED"}
+    assert res.json() == {"trip_id": 77, "execution_id": None, "status": "CANCELED"}
 
     data = (await post).json()
     assert data["status"] == "CANCELED"
     assert data["result"] is None and data["error"] is None
+
+
+async def test_execution_id_is_echoed_in_every_response(
+    client: httpx.AsyncClient, fake: FakeWorkerClient
+):
+    """백엔드가 보낸 execution_id를 POST, GET, DELETE 응답에 그대로. 없으면 null"""
+    payload = {**body(), "execution_id": "run-1"}
+    post = asyncio.create_task(client.post("/trips/77/process", json=payload, headers=AUTH))
+    while 77 not in fake.submitted:
+        await asyncio.sleep(0)
+
+    res = await client.get("/trips/77/process", headers=AUTH)
+    assert res.json()["execution_id"] == "run-1"
+
+    fake.finish(77)
+    assert (await post).json()["execution_id"] == "run-1"
+
+    post = asyncio.create_task(client.post("/trips/78/process", json=payload, headers=AUTH))
+    while 78 not in fake.submitted:
+        await asyncio.sleep(0)
+    res = await client.delete("/trips/78/process", headers=AUTH)
+    assert res.json() == {"trip_id": 78, "execution_id": "run-1", "status": "CANCELED"}
+    await post
 
 
 async def test_duplicate_post_is_409(client: httpx.AsyncClient, fake: FakeWorkerClient):
