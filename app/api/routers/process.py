@@ -40,4 +40,6 @@ async def cancel_process(trip_id: int, service: ServiceDep) -> CancelResponse:
     task = await service.cancel(trip_id)
     if task.status is TaskStatus.PROCESSING:
         task = await service.wait_done(trip_id)
-    return CancelResponse(trip_id=trip_id, status=task.status)
+    return CancelResponse(
+        trip_id=trip_id, execution_id=task.request.execution_id, status=task.status
+    )

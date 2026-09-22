@@ -54,6 +54,7 @@ class TaskStatusResponse(BaseModel):
     """
 
     trip_id: int
+    execution_id: str | None = None
     status: TaskStatus
     progress: Progress
     current_step: ProcessStep | None = None
@@ -73,4 +74,5 @@ class CancelResponse(BaseModel):
     """DELETE 200 응답"""
 
     trip_id: int
+    execution_id: str | None = None
     status: TaskStatus
