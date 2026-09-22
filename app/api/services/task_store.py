@@ -33,6 +33,7 @@ class Task:
         done = self.total if self.status is TaskStatus.COMPLETED else self.done
         return TaskStatusResponse(
             trip_id=self.trip_id,
+            execution_id=self.request.execution_id,
             status=self.status,
             progress=Progress(done=done, total=self.total),
             current_step=self.current_step,

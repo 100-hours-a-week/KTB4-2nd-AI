@@ -60,6 +60,8 @@ class ExistingPlace(RequestModel):
 
 
 class ProcessRequest(RequestModel):
+    # 백엔드가 실행마다 새로 발급, 늦게 도착한 이전 실행의 응답을 걸러내는 용도. AI는 그대로 돌려줌
+    execution_id: str | None = None
     trip_name: str = Field(min_length=1, max_length=10)
     period: Period
     regions: list[Region] = Field(min_length=1, max_length=10)
