@@ -22,7 +22,10 @@ class SiglipNaflexEngine(EmbeddingEngine):
             .to(device)
             .eval()
         )
-        self.processor = AutoImageProcessor.from_pretrained(model_path, local_files_only=True)
+        # 모델에 동봉된 기본값 256 대신 사진당 최대 1024패치를 사용한다.
+        self.processor = AutoImageProcessor.from_pretrained(
+            model_path, local_files_only=True, max_num_patches=1024
+        )
 
     def encode_images(self, images: list[Image.Image]) -> np.ndarray:
         if not images:

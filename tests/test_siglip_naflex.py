@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import torch
 from PIL import Image
-from transformers import BatchFeature
+from transformers import BatchFeature, Siglip2ImageProcessor
 
 from app.engines import siglip_naflex
 from app.engines.siglip_naflex import SiglipNaflexEngine
@@ -26,12 +26,25 @@ def test_loads_local_vision_model_in_bfloat16(monkeypatch: pytest.MonkeyPatch, t
     subject = SiglipNaflexEngine(tmp_path, device="cpu", batch_size=2)
 
     load_model.assert_called_once_with(tmp_path, local_files_only=True, dtype=torch.bfloat16)
-    load_processor.assert_called_once_with(tmp_path, local_files_only=True)
+    load_processor.assert_called_once_with(tmp_path, local_files_only=True, max_num_patches=1024)
     model.to.assert_called_once_with("cpu")
     model.eval.assert_called_once_with()
     assert subject.model is model
     assert subject.processor is processor
     assert subject.batch_size == 2
+
+
+def test_processor_overrides_saved_patch_limit(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    Siglip2ImageProcessor(max_num_patches=256).save_pretrained(tmp_path)
+    monkeypatch.setattr(siglip_naflex.Siglip2VisionModel, "from_pretrained", Mock())
+
+    subject = SiglipNaflexEngine(tmp_path)
+    inputs = subject.processor(images=[Image.new("RGB", (1024, 768))], return_tensors="pt")
+
+    assert subject.processor.max_num_patches == 1024
+    assert inputs["pixel_values"].shape == (1, 1024, 768)
+    assert inputs["pixel_attention_mask"].shape == (1, 1024)
+    assert 256 < inputs["pixel_attention_mask"].sum().item() <= 1024
 
 
 @pytest.fixture(params=[torch.float64, torch.bfloat16], ids=["float64", "bfloat16"])
