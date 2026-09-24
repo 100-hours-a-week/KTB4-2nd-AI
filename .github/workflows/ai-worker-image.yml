@@ -75,4 +75,30 @@ jobs:
             echo "AI_DIGEST=${{ steps.build.outputs.digest }}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          
+
+      - name: Notify Cloud release manifest
+        env:
+          GH_TOKEN: ${{ secrets.CLOUD_RELEASE_TOKEN }}
+          IMAGE: ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          jq -n \
+            --arg component ai \
+            --arg source_repository "${GITHUB_REPOSITORY}" \
+            --arg source_sha "${GITHUB_SHA}" \
+            --arg image "${IMAGE}" \
+            --arg digest "${DIGEST}" \
+            '{
+              event_type: "image-published",
+              client_payload: {
+                component: $component,
+                source_repository: $source_repository,
+                source_sha: $source_sha,
+                image: $image,
+                digest: $digest
+              }
+            }' |
+            gh api \
+              --method POST \
+              repos/100-hours-a-week/KTB4-2nd-Cloud/dispatches \
+              --input -
