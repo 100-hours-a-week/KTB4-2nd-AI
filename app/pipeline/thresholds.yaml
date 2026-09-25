@@ -10,5 +10,6 @@ siglip2-so400m-naflex:
   blur_var_min: 100.0               # FILTERING. 긴 변 300px 라플라시안 분산 하한, 미만이면 BLURRY. 측정 필요
   phash_max_dist: 5                 # FILTERING. pHash 해밍 거리 상한, 이하면 DUPLICATED. 측정 필요
   clock_pair_min_sim: 0.6           # CLOCK. 기준 기기와 대상 기기 사진을 쌍으로 묶는 유사도 하한. 측정 필요
-  clock_min_pairs: 3                # CLOCK. 오프셋 적용에 필요한 최소 쌍 수
-  clock_offset_tolerance_sec: 1800  # CLOCK. 쌍별 오프셋 후보가 이 범위 안에 모여야 일관된 값으로 인정
+  clock_min_pairs: 3                # CLOCK. 사진 재사용 없는 상호 유일 최고 유사도 쌍의 최소 수
+  # CLOCK. 같은 정수 일수 후보 안에서 초 단위 오프셋의 중앙값 ± 허용 오차인 쌍만 집계
+  clock_offset_tolerance_sec: 1800  # 0 이상 반일 미만. 실제 시각에는 정수 일수만 적용
