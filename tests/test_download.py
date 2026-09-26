@@ -71,3 +71,28 @@ def test_download_failure_passes_through(photo_dir):
         load_images([attachment(101, "ok.jpg"), attachment(102, "missing.jpg")], src)
 
     assert info.value.keys == ["missing.jpg"]
+
+
+@pytest.mark.parametrize("missing_blob", [False, True])
+def test_partial_decode_releases_images_on_failure(photo_dir, monkeypatch, missing_blob):
+    converted = []
+    convert = Image.Image.convert
+
+    def capture(image, *args, **kwargs):
+        result = convert(image, *args, **kwargs)
+        converted.append(result)
+        return result
+
+    class Source:
+        def get_many(self, keys):
+            blobs = {"ok.jpg": (photo_dir / "ok.jpg").read_bytes()}
+            if not missing_blob:
+                blobs["bad.jpg"] = b"broken"
+            return blobs
+
+    monkeypatch.setattr(Image.Image, "convert", capture)
+    with pytest.raises(KeyError if missing_blob else DecodeFailed):
+        load_images([attachment(1, "ok.jpg"), attachment(2, "bad.jpg")], Source())
+    assert len(converted) == 1
+    with pytest.raises(ValueError):
+        converted[0].getpixel((0, 0))
