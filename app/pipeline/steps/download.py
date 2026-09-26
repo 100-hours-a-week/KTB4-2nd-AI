@@ -20,16 +20,18 @@ def load_images(
 
     failed_ids: list[int] = []
     result: dict[int, Image.Image] = {}
-    for a in attachments:
-        data = blobs[a.analyze_storage_key]
-        try:
-            img = Image.open(io.BytesIO(data))
-            img = img.convert("RGB")
-            result[a.trip_attachment_id] = img
-        except OSError:
-            failed_ids.append(a.trip_attachment_id)
-
-    if failed_ids:
-        raise DecodeFailed(failed_ids)
-
-    return result
+    try:
+        for a in attachments:
+            data = blobs[a.analyze_storage_key]
+            try:
+                with Image.open(io.BytesIO(data)) as img:
+                    result[a.trip_attachment_id] = img.convert("RGB")
+            except (OSError, ValueError):
+                failed_ids.append(a.trip_attachment_id)
+        if failed_ids:
+            raise DecodeFailed(failed_ids)
+        return result
+    except Exception:
+        for image in result.values():
+            image.close()
+        raise
