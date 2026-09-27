@@ -62,10 +62,11 @@ def test_real_pixels_detect_blur_and_exact_duplicate_without_mutation():
 @pytest.mark.parametrize(
     "size,expected",
     [
-        ((600, 400), (200, 300)),
-        ((400, 600), (300, 200)),
+        ((1600, 900), (576, 1024)),
+        ((900, 1600), (1024, 576)),
+        ((1024, 768), (768, 1024)),
         ((80, 40), (40, 80)),
-        ((1000, 1), (1, 300)),
+        ((2000, 1), (1, 1024)),
     ],
 )
 def test_measure_resizes_without_upscaling_or_changing_input(monkeypatch, size, expected):
