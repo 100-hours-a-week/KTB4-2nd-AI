@@ -15,11 +15,11 @@ from app.schemas.process import Issue
 
 
 def _measure(image: Image.Image) -> tuple[float, imagehash.ImageHash]:
-    """긴 변 최대 300px에서 분산을 측정하고, 원래 이미지에서 64비트 pHash를 구한다."""
+    """긴 변 최대 1024px에서 분산을 측정하고, 원래 이미지에서 64비트 pHash를 구한다."""
     rgb = np.asarray(image.convert("RGB"))
     height, width = rgb.shape[:2]
-    if max(width, height) > 300:
-        scale = 300 / max(width, height)
+    if max(width, height) > 1024:
+        scale = 1024 / max(width, height)
         rgb = cv2.resize(
             rgb,
             (max(1, round(width * scale)), max(1, round(height * scale))),
