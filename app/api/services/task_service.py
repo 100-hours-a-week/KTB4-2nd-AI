@@ -23,11 +23,24 @@ from app.api.services.task_store import Task, TaskStore
 from app.api.services.worker_client import SubmitResult, WorkerClientProtocol, WorkerUnavailable
 from app.core.config import Settings
 from app.core.errors import DEFAULT_MESSAGE, AppError, ErrorCode
-from app.core.logging import get_logger
+from app.core.logging import (
+    FAILURE_CALLBACK,
+    FAILURE_INTERNAL,
+    FAILURE_QUEUE,
+    FAILURE_WORKER_DISPATCH,
+    get_logger,
+)
 from app.schemas.process import ProcessRequest, ProcessResult
 from app.schemas.task import TERMINAL_STATUSES, ErrorBody, ProcessStep, TaskStatus
 
 log = get_logger(__name__)
+
+# 종료 상태를 클라우드 관측 계약의 result 값으로
+JOB_RESULTS = {
+    TaskStatus.COMPLETED: "success",
+    TaskStatus.FAILED: "failure",
+    TaskStatus.CANCELED: "canceled",
+}
 
 
 def _error(code: ErrorCode, detail: dict | None = None) -> ErrorBody:
@@ -80,7 +93,20 @@ class TaskService:
         )
         self._store.put(task)
         self._waiters[trip_id] = asyncio.Event()  # 새 시도마다 새 Event, 이전 것은 이미 set됨
-        log.info("접수", extra={"trip_id": trip_id, "total": task.total})
+        log.info(
+            "사진 정리 작업을 접수했습니다.",
+            extra={
+                "event": "ai_job",
+                "result": "started",
+                "trip_id": trip_id,
+                "job_id": request.execution_id,
+                "attachment_count": task.total,
+                "with_gps": sum(1 for a in request.attachments if a.latitude is not None),
+                "with_taken_at": sum(1 for a in request.attachments if a.taken_at is not None),
+                "devices": len({a.device_model for a in request.attachments if a.device_model}),
+                "regions": len(request.regions),
+            },
+        )
         await self._dispatch_next()
         return task
 
@@ -154,9 +180,19 @@ class TaskService:
                 continue
             assert task.last_callback is not None and task.started_at is not None
             if now - task.last_callback > self._settings.WORKER_DEAD_SEC:
-                self._finish(task, TaskStatus.FAILED, error=_error(ErrorCode.WORKER_DEAD))
+                self._finish(
+                    task,
+                    TaskStatus.FAILED,
+                    error=_error(ErrorCode.WORKER_DEAD),
+                    failure_stage=FAILURE_CALLBACK,
+                )
             elif now - task.started_at > self._settings.TASK_TIMEOUT_SEC:
-                self._finish(task, TaskStatus.FAILED, error=_error(ErrorCode.TIMEOUT))
+                self._finish(
+                    task,
+                    TaskStatus.FAILED,
+                    error=_error(ErrorCode.TIMEOUT),
+                    failure_stage=FAILURE_INTERNAL,
+                )
         await self._dispatch_next()
 
     # ---------- 헬스, routers/health가 부름 ----------
@@ -190,10 +226,12 @@ class TaskService:
         status: TaskStatus,
         result: ProcessResult | None = None,
         error: ErrorBody | None = None,
+        failure_stage: str | None = None,
     ) -> None:
         """종료 상태를 쓰는 유일한 곳
 
-        다섯 종료 경로(성공, 워커 실패, 취소, 사망, 타임아웃)가 전부 여기로
+        다섯 종료 경로(성공, 워커 실패, 취소, 사망, 타임아웃)가 전부 여기로.
+        failure_stage는 단계 밖에서 끊긴 경우만 채움, 파이프라인 안의 실패는 워커가 남김
         """
         task.status = status
         task.result = result
@@ -202,11 +240,17 @@ class TaskService:
         task.finished_at = self._clock()
         self._store.last_activity = task.finished_at
         log.info(
-            "종료",
+            "사진 정리 작업이 종료되었습니다.",
             extra={
+                "event": "ai_job",
+                "result": JOB_RESULTS[status],
                 "trip_id": task.trip_id,
+                "job_id": task.request.execution_id,
+                "attachment_count": task.total,
+                "duration_ms": round((task.finished_at - task.created_at) * 1000),
+                "failure_stage": failure_stage,
+                "error_code": error.code.value if error else None,
                 "status": status.value,
-                "code": error.code.value if error else None,
             },
         )
         waiter = self._waiters.get(task.trip_id)
@@ -230,20 +274,54 @@ class TaskService:
                 try:
                     result = await self._worker.submit(task.trip_id, task.request)
                 except WorkerUnavailable as e:
-                    log.error("워커 위임 실패", extra={"trip_id": task.trip_id, "reason": str(e)})
+                    log.error(
+                        "워커에 작업을 위임하지 못했습니다.",
+                        extra={
+                            "event": "ai_job_dispatch",
+                            "result": "failure",
+                            "trip_id": task.trip_id,
+                            "job_id": task.request.execution_id,
+                            "failure_stage": FAILURE_WORKER_DISPATCH,
+                            "error_code": ErrorCode.WORKER_DEAD.value,
+                            "queue_depth": self._store.count(TaskStatus.QUEUED),
+                            "active_tasks": self._store.count(TaskStatus.PROCESSING),
+                            "reason": str(e),
+                        },
+                    )
                     self._finish(
                         task,
                         TaskStatus.FAILED,
                         error=_error(ErrorCode.WORKER_DEAD, detail={"reason": str(e)}),
+                        failure_stage=FAILURE_WORKER_DISPATCH,
                     )
                     continue
                 if result is not SubmitResult.ACCEPTED:
                     log.info(
-                        "워커 미수락, 대기 유지", extra={"trip_id": task.trip_id, "reason": result}
+                        "워커가 작업을 받지 않아 대기열에 유지합니다.",
+                        extra={
+                            "event": "ai_job_dispatch",
+                            "result": "failure",
+                            "trip_id": task.trip_id,
+                            "job_id": task.request.execution_id,
+                            "failure_stage": FAILURE_QUEUE,
+                            "queue_depth": self._store.count(TaskStatus.QUEUED),
+                            "active_tasks": self._store.count(TaskStatus.PROCESSING),
+                            "reason": result.value,
+                        },
                     )
                     return
                 now = self._clock()
                 task.status = TaskStatus.PROCESSING
                 task.started_at = now
                 task.last_callback = now
-                log.info("위임", extra={"trip_id": task.trip_id})
+                log.info(
+                    "워커에 작업을 위임했습니다.",
+                    extra={
+                        "event": "ai_job_dispatch",
+                        "result": "success",
+                        "trip_id": task.trip_id,
+                        "job_id": task.request.execution_id,
+                        "queue_depth": self._store.count(TaskStatus.QUEUED),
+                        "active_tasks": self._store.count(TaskStatus.PROCESSING),
+                    },
+                )

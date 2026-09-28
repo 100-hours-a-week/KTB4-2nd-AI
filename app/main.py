@@ -6,11 +6,12 @@ create_app이 팩토리. 운영은 인자 없이, 테스트는 Settings와 FakeW
 
 import asyncio
 import time
+import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 from app.api.routers import health, internal, process
 from app.api.routers.health import qdrant_ready
@@ -20,9 +21,11 @@ from app.api.services.watchdog import watchdog_loop
 from app.api.services.worker_client import WorkerClient, WorkerClientProtocol
 from app.core.config import Settings, get_settings
 from app.core.http_errors import register_error_handlers
-from app.core.logging import get_logger, setup_logging
+from app.core.logging import bind_request, get_logger, setup_logging
 
 log = get_logger(__name__)
+
+REQUEST_ID_HEADER = "X-Request-ID"
 
 
 def create_app(
@@ -34,7 +37,7 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # 기동. yield 앞은 uvicorn이 요청을 받기 전, 뒤는 종료 신호 뒤
         cfg = settings or get_settings()
-        setup_logging(cfg.LOG_LEVEL)
+        setup_logging(cfg.LOG_LEVEL, cfg.RELEASE)
         http = httpx.AsyncClient(timeout=2.0)
         worker_client = worker or WorkerClient(cfg.WORKER_URL)
         service = TaskService(TaskStore(boot_time=time.monotonic()), worker_client, cfg)
@@ -46,7 +49,16 @@ def create_app(
 
         watchdog = asyncio.create_task(watchdog_loop(service, cfg.WATCHDOG_INTERVAL_SEC))
         log.info(
-            "api 기동", extra={"max_concurrent": cfg.MAX_CONCURRENT, "max_queue": cfg.MAX_QUEUE}
+            "api 프로세스 기동",
+            extra={
+                "event": "ai_service_startup",
+                "result": "success",
+                "process_role": "api",
+                "model": cfg.EMBED_MODEL,
+                "fake_pipeline": cfg.FAKE_PIPELINE,
+                "max_concurrent": cfg.MAX_CONCURRENT,
+                "max_queue": cfg.MAX_QUEUE,
+            },
         )
         try:
             yield
@@ -58,6 +70,20 @@ def create_app(
             await http.aclose()
 
     app = FastAPI(title="여담 AI", lifespan=lifespan)
+
+    @app.middleware("http")
+    async def request_context(request: Request, call_next):  # type: ignore[no-untyped-def]
+        """백엔드가 보낸 요청 식별자를 맥락에 심고 응답 헤더로 되돌려줌
+
+        헤더가 없으면 생성. 백엔드가 전달을 붙이기 전까지는 AI 로그끼리만 묶임.
+        요청마다 태스크 맥락이 따로라 해제는 필요 없음
+        """
+        request_id = request.headers.get(REQUEST_ID_HEADER) or uuid.uuid4().hex
+        bind_request(request_id)
+        response = await call_next(request)
+        response.headers[REQUEST_ID_HEADER] = request_id
+        return response
+
     app.include_router(process.router)
     app.include_router(internal.router)
     app.include_router(health.router)

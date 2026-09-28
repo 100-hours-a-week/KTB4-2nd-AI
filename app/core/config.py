@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     THRESHOLDS_PATH: Path = Path("app/pipeline/thresholds.yaml")
     FAKE_PIPELINE: bool = False
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+    # 배포 식별자. 클라우드가 이미지 SHA를 런타임 환경 변수로 주입, 미설정이면 unknown
+    RELEASE: str = "unknown"
 
     @model_validator(mode="after")
     def _require_bucket_for_s3(self) -> Self:

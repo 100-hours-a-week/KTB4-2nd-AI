@@ -6,13 +6,20 @@
 from fastapi import APIRouter, Request
 
 from app.core.errors import AppError, ErrorCode
+from app.core.logging import bind_job, bind_request, bind_trip
 from app.schemas.internal import JobAccepted, JobRequest, ReadyResponse
 
 router = APIRouter(tags=["jobs"])
 
+REQUEST_ID_HEADER = "X-Request-ID"
+
 
 @router.post("/jobs", status_code=202, response_model=JobAccepted)
 async def submit_job(body: JobRequest, request: Request) -> JobAccepted:
+    """api가 보낸 식별자를 맥락에 심은 뒤 접수. 러너가 copy_context로 스레드까지 가져감"""
+    bind_request(request.headers.get(REQUEST_ID_HEADER))
+    bind_trip(body.trip_id)
+    bind_job(body.request.execution_id)
     state = request.app.state
     if not state.model_loaded:
         raise AppError(ErrorCode.MODEL_NOT_READY)
