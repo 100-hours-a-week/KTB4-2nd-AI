@@ -205,7 +205,7 @@ class Runner:
         else:
             assert result is not None
             close_step("success")
-            self._callback.result(trip_id, result)
+            # 콜백보다 먼저 남김. 콜백이 실패해도 실행 기록은 남아야 함
             log.info(
                 "워커가 파이프라인 실행을 마쳤습니다.",
                 extra={
@@ -217,6 +217,7 @@ class Runner:
                 },
             )
             self._log_detail(result)
+            self._callback.result(trip_id, result)
         clear_context()
 
     def _log_detail(self, result: ProcessResult) -> None:
