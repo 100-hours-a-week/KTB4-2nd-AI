@@ -6,8 +6,10 @@ supervisord가 재시작.
 백그라운드 적재는 실패가 "영원히 starting"이라는 조용한 실패가 되어 택하지 않음
 """
 
+import platform
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from importlib.metadata import PackageNotFoundError, version
 
 from fastapi import FastAPI
 
@@ -22,6 +24,20 @@ from app.worker.runner import Runner
 
 log = get_logger(__name__)
 
+# 로컬과 배포 환경의 결과가 갈릴 때 대조할 항목
+FINGERPRINT_PACKAGES = ("torch", "transformers", "numpy", "opencv-python-headless", "scikit-learn")
+
+
+def _versions() -> dict[str, str]:
+    """설치된 패키지 버전. 없으면 생략해 기동을 막지 않음"""
+    found = {}
+    for name in FINGERPRINT_PACKAGES:
+        try:
+            found[name] = version(name)
+        except PackageNotFoundError:
+            continue
+    return found
+
 
 def create_app(
     settings: Settings | None = None,
@@ -32,7 +48,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         cfg = settings or get_settings()
-        setup_logging(cfg.LOG_LEVEL)
+        setup_logging(cfg.LOG_LEVEL, cfg.RELEASE)
         app.state.model_loaded = False
         app.state.model_name = cfg.EMBED_MODEL
 
@@ -45,8 +61,20 @@ def create_app(
         app.state.model_name = loaded_engine.model_version
         app.state.model_loaded = True
         log.info(
-            "worker 기동",
-            extra={"model": loaded_engine.model_version, "fake": cfg.FAKE_PIPELINE},
+            "worker 프로세스가 기동했습니다.",
+            extra={
+                "event": "ai_service_startup",
+                "result": "success",
+                "process_role": "worker",
+                "model": loaded_engine.model_version,
+                "fake_pipeline": cfg.FAKE_PIPELINE,
+                "device": cfg.EMBED_DEVICE,
+                "model_path": str(cfg.MODEL_PATH),
+                "arch": platform.machine(),
+                "python": platform.python_version(),
+                "packages": _versions(),
+                "thresholds": ctx.thresholds,
+            },
         )
         try:
             yield

@@ -10,8 +10,11 @@ from typing import Protocol
 
 import httpx
 
+from app.core.logging import current_request
 from app.schemas.internal import JobRequest, ReadyResponse
 from app.schemas.process import ProcessRequest
+
+REQUEST_ID_HEADER = "X-Request-ID"
 
 
 class SubmitResult(StrEnum):
@@ -44,10 +47,15 @@ class WorkerClient:
     def __init__(self, base_url: str, timeout: float = 2.0) -> None:
         self._client = httpx.AsyncClient(base_url=base_url, timeout=timeout)
 
+    def _headers(self) -> dict[str, str]:
+        """요청 식별자를 워커까지 넘겨 프로세스 경계를 건너도 같은 값으로 묶이게 함"""
+        request_id = current_request()
+        return {REQUEST_ID_HEADER: request_id} if request_id else {}
+
     async def submit(self, trip_id: int, request: ProcessRequest) -> SubmitResult:
         body = JobRequest(trip_id=trip_id, request=request).model_dump(mode="json")
         try:
-            res = await self._client.post("/jobs", json=body)
+            res = await self._client.post("/jobs", json=body, headers=self._headers())
         except httpx.HTTPError as e:
             raise WorkerUnavailable(str(e)) from e
         if res.status_code == 202:
@@ -61,13 +69,13 @@ class WorkerClient:
     async def cancel(self, trip_id: int) -> None:
         """워커가 404(이미 끝남)를 주거나 연결이 안 돼도 무시. 죽은 워커는 watchdog이 정리"""
         try:
-            await self._client.post(f"/jobs/{trip_id}/cancel")
+            await self._client.post(f"/jobs/{trip_id}/cancel", headers=self._headers())
         except httpx.HTTPError:
             pass
 
     async def ready(self) -> ReadyResponse | None:
         try:
-            res = await self._client.get("/ready")
+            res = await self._client.get("/ready", headers=self._headers())
             res.raise_for_status()
             return ReadyResponse.model_validate(res.json())
         except (httpx.HTTPError, ValueError):

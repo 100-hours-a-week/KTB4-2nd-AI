@@ -5,18 +5,21 @@
 result 실패는 할 수 있는 게 없음. api는 콜백이 120초 끊기면 WORKER_DEAD로 정리하고 백엔드가 재POST
 """
 
+import logging
 import time
 from typing import Protocol
 
 import httpx
 from pydantic import BaseModel
 
-from app.core.logging import get_logger
+from app.core.logging import FAILURE_CALLBACK, current_request, get_logger
 from app.schemas.internal import FailedIn, ProgressIn, ResultIn
 from app.schemas.process import ProcessResult
 from app.schemas.task import ErrorBody, ProcessStep
 
 log = get_logger(__name__)
+
+REQUEST_ID_HEADER = "X-Request-ID"
 
 
 class CallbackProtocol(Protocol):
@@ -52,35 +55,58 @@ class CallbackClient:
         self._post(trip_id, "failed", FailedIn.model_validate(error.model_dump()))
 
     def _post(self, trip_id: int, kind: str, body: BaseModel) -> None:
-        """204면 끝. 404는 api가 재기동돼 task가 없는 것이라 중단. 5xx와 연결 실패는 재시도"""
+        """204면 끝. 404는 api가 재기동돼 task가 없는 것이라 중단. 5xx와 연결 실패는 재시도
+
+        본문과 URL 전체는 남기지 않고 종류와 시도 횟수와 상태 코드만 기록
+        """
         path = f"/internal/trips/{trip_id}/{kind}"
         payload = body.model_dump(mode="json")
+        request_id = current_request()
+        headers = {REQUEST_ID_HEADER: request_id} if request_id else {}
+        status: int | None = None
         for attempt in range(self._retries):
             try:
-                response = self._client.post(path, json=payload)
+                response = self._client.post(path, json=payload, headers=headers)
             except httpx.HTTPError as e:
                 log.warning(
-                    "콜백 연결 실패", extra={"trip_id": trip_id, "kind": kind, "reason": str(e)}
+                    "콜백 전송에 실패했습니다.",
+                    extra={"trip_id": trip_id, "callback_type": kind, "reason": str(e)},
                 )
             else:
-                if response.status_code < 500:
-                    if response.status_code != 204:
-                        log.warning(
-                            "콜백 거절",
-                            extra={
-                                "trip_id": trip_id,
-                                "kind": kind,
-                                "status": response.status_code,
-                            },
-                        )
+                status = response.status_code
+                if status < 500:
+                    log.log(
+                        logging.INFO if status == 204 else logging.WARNING,
+                        "콜백을 전송했습니다.",
+                        extra={
+                            "event": "ai_callback",
+                            "result": "success" if status == 204 else "failure",
+                            "trip_id": trip_id,
+                            "callback_type": kind,
+                            "attempt_count": attempt + 1,
+                            "status": status,
+                            "failure_stage": None if status == 204 else FAILURE_CALLBACK,
+                        },
+                    )
                     return
                 log.warning(
-                    "콜백 서버 오류",
-                    extra={"trip_id": trip_id, "kind": kind, "status": response.status_code},
+                    "콜백을 받은 서버가 오류를 반환했습니다.",
+                    extra={"trip_id": trip_id, "callback_type": kind, "status": status},
                 )
             if attempt < self._retries - 1:
                 time.sleep(self._backoff * (2**attempt))
-        log.error("콜백 포기", extra={"trip_id": trip_id, "kind": kind})
+        log.error(
+            "콜백 전송을 포기했습니다.",
+            extra={
+                "event": "ai_callback",
+                "result": "failure",
+                "trip_id": trip_id,
+                "callback_type": kind,
+                "attempt_count": self._retries,
+                "status": status,
+                "failure_stage": FAILURE_CALLBACK,
+            },
+        )
 
     def close(self) -> None:
         self._client.close()
