@@ -10,6 +10,7 @@ import numpy as np
 
 from app.core.errors import DecodeFailed, PipelineCancelled, PipelineError
 from app.pipeline.context import PipelineContext
+from app.pipeline.observability import log_snapshot
 from app.pipeline.progress import ProgressReporter
 from app.pipeline.state import build_photo_states
 from app.pipeline.steps.clock import correct_clocks
@@ -121,6 +122,7 @@ def run(
                 progress.report(ProcessStep.DOWNLOADING, min(start + 16, total))
             if failed_ids:
                 raise DecodeFailed(failed_ids)
+            log_snapshot(ctx.log, ProcessStep.DOWNLOADING, photos)
 
             check_cancel()
             progress.report(ProcessStep.EMBEDDING, 0)
@@ -143,6 +145,7 @@ def run(
                     photo.embedding = vector
                 check_cancel()
                 progress.report(ProcessStep.EMBEDDING, min(start + 16, total))
+            log_snapshot(ctx.log, ProcessStep.EMBEDDING, photos)
 
             def stage(step, operation):
                 check_cancel()
@@ -150,6 +153,7 @@ def run(
                 check_cancel()
                 value = operation()
                 check_cancel()
+                log_snapshot(ctx.log, step, photos)
                 progress.report(step, total)
                 return value
 
