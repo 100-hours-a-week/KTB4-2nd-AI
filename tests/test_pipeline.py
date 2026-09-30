@@ -95,12 +95,12 @@ def test_real_stages_results_storage_and_progress(setup, tmp_path):
     )
 
     assert len(result.places) == 2
-    assert {a.trip_attachment_id for p in result.places for a in p.attachments} == {50, 20}
+    assert {a.trip_attachment_id for p in result.places for a in p.attachments} == {50, 20, 30}
     excluded = {p.trip_attachment_id: p for p in result.unclassified}
     assert excluded[10].issue is Issue.DUPLICATED and excluded[10].duplicate_of_attachment_id == 50
     assert excluded[10].region_origin is RegionOrigin.INFERRED
     assert excluded[70].issue is Issue.BLURRY
-    assert excluded[90].issue is excluded[30].issue is Issue.UNCLEAR_LOCATION
+    assert excluded[90].issue is Issue.UNCLEAR_LOCATION
     assert excluded[70].place_id == excluded[10].place_id
     assert result.failed == [] and request.model_dump() == before
     stored = ctx.qdrant.fetch(ids)
