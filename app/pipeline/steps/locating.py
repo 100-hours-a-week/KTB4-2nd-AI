@@ -1,10 +1,12 @@
-"""LOCATING: 기간 판정 후 이번 요청의 원본 GPS에서만 좌표를 상속한다."""
+"""LOCATING: 이번 요청의 원본 GPS에서만 좌표를 상속한다."""
 
 import numpy as np
 
 from app.core.errors import PipelineError
 from app.pipeline.state import PhotoState, TimeStatus
-from app.schemas.process import KST, Issue, Period, RegionOrigin
+from app.schemas.process import Issue, Period, RegionOrigin
+
+# from app.schemas.process import KST  # 기간 판정 원복 시 함께 복구
 
 
 def _embedding(photo: PhotoState) -> np.ndarray:
@@ -23,8 +25,7 @@ def _embedding(photo: PhotoState) -> np.ndarray:
 def locate_photos(photos: list[PhotoState], period: Period, *, inherit_min_sim: float) -> None:
     """CLOCK 완료 상태를 받아 좌표와 출처 및 issue를 갱신한다.
 
-    기간은 KST 날짜로 양 끝을 포함한다. UNKNOWN 시각은 기간 밖으로 보지 않는다.
-    기간 밖 사진은 좌표가 있어도 UNCLEAR_LOCATION이며 참조에서 제외한다.
+    기간 유효성은 검사한다. 임시로 기간 밖 사진도 위치 판정에 포함한다.
     v1의 regions와 외부 저장소는 사용하지 않는다. 동점은 작은 사진 ID를 우선한다.
     """
     if not np.isfinite(inherit_min_sim) or not -1 <= inherit_min_sim <= 1:
@@ -45,11 +46,12 @@ def locate_photos(photos: list[PhotoState], period: Period, *, inherit_min_sim: 
     for photo in photos:
         if photo.issue is not None:
             continue
-        if photo.taken_at is not None:
-            day = photo.taken_at.astimezone(KST).date()
-            if not period.start_date <= day <= period.end_date:
-                photo.issue = Issue.UNCLEAR_LOCATION
-                continue
+        # 긴급 핫픽스: 기간 밖 사진도 포함한다. 원복 시 아래 분기와 KST import를 복구한다.
+        # if photo.taken_at is not None:
+        #     day = photo.taken_at.astimezone(KST).date()
+        #     if not period.start_date <= day <= period.end_date:
+        #         photo.issue = Issue.UNCLEAR_LOCATION
+        #         continue
         if photo.source.has_gps:
             photo.latitude = photo.source.latitude
             photo.longitude = photo.source.longitude
