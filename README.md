@@ -4,6 +4,8 @@
 
 ## 로컬 실행
 
+v2 검색 담당자의 GPU 없는 개발은 [검색 파이프라인 인계 안내](docs/search-handoff.md)를 따른다. 일반 실행과 mock 전용 실행을 구분한다.
+
 ```
 uv sync
 cp .env.example .env
@@ -41,6 +43,8 @@ CI 워크플로와 사람이 같은 명령을 씀. 워크플로는 이 표의 �
 - 가중치 캐시는 `models/siglip2` 디렉터리, 키는 `--cache-key` 출력(`siglip2-so400m-naflex-<revision 12자>-bf16-vision`). revision은 `scripts/fetch_model.py`의 `MODELS`에 고정, dtype이나 `--full`이 바뀌면 키도 바뀜
 - `runtime_check.py`는 엔진 적재, 1장 임베딩, Qdrant 연결을 확인. 워커 엔트리와 엔진 클래스가 머지된 뒤 추가
 - 이미지 태그는 `sha-{전체 커밋 해시}`. 클라우드 CD는 이 태그를 pull만 하고 다시 빌드하지 않음
+
+V2 개발은 단기 브랜치에서 CI와 리뷰를 거쳐 `main`으로 통합한다. `main` 이미지 생성은 운영 배포를 뜻하지 않는다. Cloud 공지 기준 V2 스테이징 경로는 준비 중이며, 운영은 마지막 정상 V1 이미지 조합을 유지한다. PR에는 필요한 API·환경 변수·이미지 버전·선행 작업을 명시하고 스테이징에서 FE·BE·AI 조합을 검증한 뒤 운영 적용을 판단한다.
 
 ## 컨테이너 기동 확인
 

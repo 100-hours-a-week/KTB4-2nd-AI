@@ -13,8 +13,9 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, Request
 
-from app.api.routers import health, internal, process
+from app.api.routers import health, internal, process, query
 from app.api.routers.health import qdrant_ready
+from app.api.services.query_service import QueryService
 from app.api.services.task_service import TaskService
 from app.api.services.task_store import TaskStore
 from app.api.services.watchdog import watchdog_loop
@@ -32,6 +33,7 @@ def create_app(
     settings: Settings | None = None,
     worker: WorkerClientProtocol | None = None,
     qdrant_probe: Callable[[], Awaitable[bool]] | None = None,
+    query_service: QueryService | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -45,6 +47,7 @@ def create_app(
         app.state.settings = cfg
         app.state.worker = worker_client
         app.state.task_service = service
+        app.state.query_service = query_service
         app.state.qdrant_ready = qdrant_probe or (lambda: qdrant_ready(http, cfg.QDRANT_URL))
 
         watchdog = asyncio.create_task(watchdog_loop(service, cfg.WATCHDOG_INTERVAL_SEC))
@@ -87,6 +90,7 @@ def create_app(
     app.include_router(process.router)
     app.include_router(internal.router)
     app.include_router(health.router)
+    app.include_router(query.router)
 
     register_error_handlers(app)
     return app

@@ -1,0 +1,22 @@
+{
+  "query": "작년 가을 속초에서 뭐 먹었지?",
+  "intent": "QUESTION",
+  "visual_query": "먹은 음식",
+  "candidates": [
+    {
+      "trip_attachment_id": 412,
+      "analyze_storage_key": "trips/31/analyze/q1.jpg",
+      "taken_at": "2025-10-04T12:31:00+09:00",
+      "place_name": "속초중앙시장",
+      "trip_name": "속초 가을"
+    },
+    {
+      "trip_attachment_id": 415,
+      "analyze_storage_key": "trips/31/analyze/q4.jpg",
+      "taken_at": "2025-10-04T18:02:00+09:00",
+      "place_name": "동명항",
+      "trip_name": "속초 가을"
+    }
+  ],
+  "limit": 30
+}
