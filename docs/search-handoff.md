@@ -1,123 +1,119 @@
 # v2 검색 파이프라인 개발 안내
 
-2026-10-11, [작업 이슈 #54](https://github.com/100-hours-a-week/KTB4-2nd-AI/issues/54).
-HTTP 진입점과 외부 의존성을 교체할 수 있는 개발 뼈대다. 실제 모델·Qdrant 검색·S3·Kafka 연결은 포함하지 않는다.
+검색 API와 로컬에서 실행할 수 있는 mock이 준비되어 있습니다. 검색 담당자는 `app/search/pipeline.py`를 시작점으로 질의 해석, 검색 결과 선별, 사진을 근거로 한 답변 생성을 구현하면 됩니다. VLM과 임베딩 모델, Qdrant, S3의 실제 연결은 서버 담당자와 맞춰서 진행합니다.
 
-## 바로 실행
+## 검색 흐름과 수정할 코드
 
-저장소 루트에서 실행한다. Python 3.12와 프로젝트 의존성이 필요하다.
+```text
+BE → POST /query/parse → 질문에서 의도와 검색 조건 추출
+BE → 권한, 날짜, 지역에 따라 전체 여행에서 후보 사진 선별
+BE → POST /query/search → 후보 안에서 사진 검색 → QUESTION이면 답변 생성
+```
+
+검색 대상은 사용자의 전체 여행입니다. 사진 접근 권한과 DB 필터는 BE에서 처리하고, AI는 전달받은 후보 안에서만 검색합니다. 검색 결과를 폴더로 묶는 작업도 BE에서 담당합니다. 검색은 동기 HTTP로 처리하므로 Kafka나 작업 상태 저장소 없이 개발을 시작할 수 있습니다.
+
+| 파일 | 역할과 작업 내용 |
+| --- | --- |
+| [app/search/pipeline.py](../app/search/pipeline.py) | `parse()`와 `search()`에 검색 처리 순서를 구현합니다. 검색 임계값과 답변용 사진 선택 로직을 추가할 위치입니다. |
+| [app/search/context.py](../app/search/context.py) | 파이프라인에서 호출할 외부 기능의 인터페이스입니다. `SearchContext`로 필요한 구현을 전달받습니다. |
+| [app/search/mock.py](../app/search/mock.py) | 실제 모델 없이 API 흐름을 확인하는 구현입니다. 실제 구현을 연결하는 방식의 예제로 참고할 수 있습니다. |
+| [app/schemas/query.py](../app/schemas/query.py) | 요청과 응답 형식입니다. 외부 계약이 바뀌는 수정은 서버 담당자와 먼저 맞춥니다. |
+| [tests/test_query.py](../tests/test_query.py) | 검색 흐름과 예외 처리를 검증하는 테스트입니다. 로직을 추가할 때 관련 사례를 함께 보강합니다. |
+
+HTTP 라우터와 `QueryService`는 서버 담당자가 관리합니다. 인증, 요청 전체의 시간 제한, HTTP 오류 변환, 로그, 최종 응답 검증이 이 범위에 포함됩니다.
+
+## 구현할 내용
+
+### 1. 질의 해석
+
+`parse()`는 `context.vlm.interpret(request)`를 호출합니다. 검색 담당자는 이 인터페이스에 맞춰 프롬프트와 모델 출력 검증을 구현합니다. VLM에 요청을 전송하는 공통 클라이언트는 서버 담당자와 연결합니다.
+
+- 질문을 사진 검색인 `SEARCH`와 사진에 근거한 질문인 `QUESTION`으로 구분합니다.
+- 날짜 범위, 지역명, 사진 내용 조건인 `visual_query`를 추출합니다.
+- 상대 날짜는 BE가 보낸 `reference_date`를 기준으로 해석합니다.
+- 출력 형식과 날짜 범위를 검증하고 `ParseResponse`를 반환합니다.
+
+현재는 VLM 호출 실패, 잘못된 모델 출력, 해석 시간 초과가 발생하면 `parsed=false`로 반환합니다. 이때 `intent`는 `SEARCH`, `visual_query`는 원질문이며 날짜와 지역 조건은 `null`입니다.
+
+### 2. 사진 검색과 결과 선별
+
+`search()`에는 텍스트 임베딩, 후보 범위를 제한한 벡터 검색, 점수 정렬, 중복 제거, 반환 개수 제한까지 연결되어 있습니다. 여기에 검색 임계값과 답변용 근거 사진을 고르는 로직을 추가합니다.
+
+- `visual_query`를 임베딩하고, 값이 `null`이면 원질문을 사용합니다.
+- Qdrant 질의 자체를 `candidate_ids`로 제한합니다. 전체 사진을 검색한 뒤 결과에서 후보만 걸러내는 방식으로 대체하지 않습니다.
+- 후보 밖 ID가 반환되면 이미지에 접근하거나 VLM에 전달하기 전에 차단합니다.
+- `SEARCH`는 `limit`까지 반환하고 답변을 생성하지 않습니다. `QUESTION`은 `SearchOptions.question_k`를 사용하며 기본값은 5장입니다.
+
+현재는 유사도 임계값 없이 점수순으로 결과를 반환합니다. 실제 임베딩 모델과 한국어 질의셋으로 평가한 뒤 임계값과 근거 사진 수를 조정해야 합니다. 벡터가 없는 사진은 검색 중 다시 임베딩하지 않으며, 누락을 알리는 방식은 추가 협의가 필요합니다.
+
+### 3. 사진을 근거로 한 답변
+
+`QUESTION`에서는 선택한 사진의 URL과 메타데이터를 `Evidence`로 묶어 `context.vlm.answer(query, evidence)`에 전달합니다. 검색 담당자는 답변 프롬프트와 출력 검증을 구현합니다. 사진이나 제공된 메타데이터로 확인할 수 없는 사실을 답변에 추가하지 않도록 처리합니다.
+
+답변 생성에 실패해도 검색한 사진 목록은 유지합니다. 근거가 없으면 `NO_EVIDENCE`, VLM이나 이미지 접근에 실패하면 `VLM_UNAVAILABLE`, 답변 시간이 초과되면 `TIMEOUT`을 `answer_error`로 반환합니다.
+
+## 외부 기능 연결
+
+모델이나 클라이언트를 파이프라인의 전역 변수로 생성하지 않고 `context`를 통해 호출합니다. 서버 담당자가 실제 구현으로 `SearchContext`를 구성하고 `QueryService`에 연결합니다.
+
+| 인터페이스 | 입력과 반환값 | 연결할 때 맞출 내용 |
+| --- | --- | --- |
+| `VLMClient.interpret` | `ParseRequest` → `ParseResponse` | 질의 해석 프롬프트와 출력 검증 |
+| `TextEmbedder.encode_text` | 텍스트 → `list[float]` | 이미지 벡터와 같은 모델, 차원, 정규화 기준 |
+| `CandidateSearcher.search` | 벡터, `candidate_ids`, `limit` → `list[SearchHit]` | Qdrant 컬렉션과 후보 ID 필터 |
+| `ImageResolver.resolve` | 분석용 S3 키 → 이미지 URL | 선택한 사진의 사본 URL과 유효시간 |
+| `VLMClient.answer` | 원질문, `list[Evidence]` → 문자열 | 사진과 메타데이터에 근거한 답변 |
+
+실제 연결은 `QueryService(SearchContext(...))`를 만들어 `app.main.create_app(query_service=...)`에 전달합니다. 클라이언트 생성과 종료는 서버 담당자가 처리합니다. GPU 추론이나 동기 I/O를 비동기 함수 안에서 직접 실행하면 다른 요청과 시간 제한 처리가 지연될 수 있으므로, 비동기 워커 호출 등으로 연결합니다.
+
+외부 라이브러리의 오류는 연결 코드에서 다음 예외로 변환합니다.
+
+| 상황 | 파이프라인에 전달할 예외 | 현재 API 동작 |
+| --- | --- | --- |
+| 임베딩 또는 벡터 검색 사용 불가 | `ModelUnavailable` | 503 `MODEL_NOT_READY` |
+| VLM 또는 답변용 이미지 접근 실패 | `VLMUnavailable` | 질의 해석은 대체 결과, 답변은 사진 목록과 `answer_error` 반환 |
+| 모델 출력 검증 실패 | `InvalidModelOutput` | 질의 해석은 대체 결과, 답변은 `VLM_UNAVAILABLE` 반환 |
+| 시간 초과 | `TimeoutError` | 해석은 대체 결과, 답변은 `answer_error=TIMEOUT`, 검색 단계나 전체 요청은 504 `TIMEOUT` |
+
+예상하지 못한 내부 오류와 후보 밖 ID 반환은 500으로 처리합니다. 취소 예외를 삼키거나 제한 없이 재시도하지 않습니다. `SearchOptions`의 기본 시간 제한은 해석 5초, 검색 5초, 답변 10초, 전체 요청 30초입니다. 개발용 값이므로 실제 모델 연결 후 BE와 함께 조정해야 합니다. 원격 GPU 작업은 HTTP 요청이 취소되어도 계속 실행될 수 있습니다.
+
+## 로컬 실행
+
+Python 3.12 환경에서 저장소 루트를 기준으로 실행합니다.
 
 ```bash
 uv sync --frozen
 API_KEY=local-demo uv run uvicorn app.search_dev:create_app --factory --host 127.0.0.1 --port 8000
 ```
 
-별도 터미널에서 아래 예시를 실행하거나 `http://127.0.0.1:8000/docs`를 연다.
+`http://127.0.0.1:8000/docs`에서 요청 형식을 확인하거나 별도 터미널에서 예제를 실행합니다.
 
 ```bash
 curl --fail-with-body http://127.0.0.1:8000/query/parse \
   -H 'Authorization: Bearer local-demo' -H 'Content-Type: application/json' \
-  -H 'X-Request-ID: demo-parse' --data-binary @docs/examples/query-parse.json
+  --data-binary @docs/examples/query-parse.json
 
 curl --fail-with-body http://127.0.0.1:8000/query/search \
   -H 'Authorization: Bearer local-demo' -H 'Content-Type: application/json' \
-  -H 'X-Request-ID: demo-search' --data-binary @docs/examples/query-search.json
+  --data-binary @docs/examples/query-search.json
 ```
 
-mock은 `?`가 있으면 QUESTION, 없으면 SEARCH로 분류하고 날짜·지역은 해석하지 않는다. 후보 입력 순서대로 `1, 0.5, 0.333…` 점수를 부여하며 답변에는 `[MOCK]`를 붙인다. 이 값은 의미 유사도와 품질 점수가 아니다. 분석용 키의 실제 파일도 읽지 않는다.
+mock은 질문에 `?`가 있으면 `QUESTION`, 없으면 `SEARCH`로 분류합니다. 날짜와 지역은 해석하지 않고, 후보 입력 순서대로 점수를 매기며, 답변에는 `[MOCK]`를 붙입니다. 실제 모델이나 이미지에 접근하지 않으므로 API 흐름을 확인하는 용도로 사용합니다.
 
-일반 `app.main:app`은 검색 의존성을 주입하지 않으면 인증된 검색 요청에 `503 MODEL_NOT_READY`를 반환한다. `FAKE_PIPELINE`은 v1 정리 설정이므로 검색 mock을 켜지 않는다. mock은 위 개발 전용 엔트리에서만 명시적으로 연결한다. 개발 앱도 기존 앱 팩토리를 재사용하므로 v1 라우트가 함께 보이며 `/health`는 기존 worker·Qdrant를 점검한다. 검색 mock만 실행한 환경의 준비 여부는 위 검색 요청으로 확인한다.
+일반 `app.main:app`은 검색 구현이 연결되지 않으면 503을 반환합니다. `FAKE_PIPELINE` 설정은 검색 mock을 켜지 않습니다. 위 개발 앱의 `/health`도 기존 worker와 Qdrant를 점검하므로, mock 실행 여부는 검색 API 요청으로 확인합니다.
 
-## 구현 경계
+## API 연결 시 확인할 사항
 
-```text
-BE → query 라우터 → QueryService → pipeline.parse / pipeline.search
-                                      ↓ SearchContext
-                       VLM / TextEmbedder / CandidateSearcher / ImageResolver
-```
+현재 스키마는 기존 API 설계의 제안 필드를 반영한 상태입니다. **`reference_date`, `parsed`, 검색 요청의 `query`와 `candidates` 형식은 BE와 최종 확인이 필요합니다.** 기존 `candidate_attachment_ids` 요청을 자동으로 변환하지 않습니다.
 
-| 담당 | 파일·진입점 | 채울 내용 |
-| --- | --- | --- |
-| 검색 담당 | `app/search/pipeline.py`의 `parse(request, context, options)`, `search(...)` | 의도 분류, 날짜·지역 정규화, 검색 컷오프, 답변용 근거 선택, 실패 처리 |
-| 검색 담당 | `SearchContext.vlm`의 실제 구현 | `interpret`·`answer` 프롬프트와 모델 출력 검증. 공통 HTTP 전송 클라이언트는 서버 담당과 연결 |
-| 서버 담당 | `app/api/routers/query.py`, `app/api/services/query_service.py`, `app/schemas/query.py` | HTTP 계약, 인증, 시간 제한, 외부 오류 변환, 후보 범위와 출력 검증 |
-| 서버 담당 | `app/search/context.py`의 어댑터 구현·앱 조립 | VLM 전송, GPU 텍스트 임베딩, Qdrant 후보 필터, S3 사본 URL, 연결 자원 수명 |
-| 공동 | `tests/test_query.py` | 경계 회귀 검증. 실제 검색 품질은 별도 질의셋으로 평가 |
+- 질문은 2~100자입니다. 후보에는 사진 ID, 분석용 S3 키, 촬영 시각, 장소명, 여행명이 들어갑니다. 촬영 시각과 장소명, 여행명은 `null`을 허용하지만 필드는 보내야 합니다. 촬영 시각이 있으면 시간대 오프셋이 필요합니다.
+- 중복 후보 ID와 정의하지 않은 필드는 422로 처리합니다. `limit`은 생략하면 30이며 1~50의 정수만 허용하고 `null`은 허용하지 않습니다.
+- 후보 수에 여행당 200장 제한을 적용하지 않습니다. 사용자 전체 여행에서 검색하므로 후보 상한과 요청 크기는 BE와 별도로 정해야 합니다.
+- 해석 실패 시 조건 없이 검색을 계속할지, 벡터 누락을 어떻게 알릴지, 검색 시간 초과를 504로 반환할지 함께 확인해야 합니다.
 
-검색 담당자는 모듈 전역에서 모델이나 클라이언트를 생성하지 않고 `context`를 사용한다. 실제 연결은 `QueryService(SearchContext(...))`를 구성해 `app.main.create_app(query_service=...)`에 주입한다. HTTP 클라이언트의 재사용·종료는 앱 조립부가 책임진다. 동기 GPU 추론이나 블로킹 I/O를 async 함수에서 직접 실행하지 않는다. 별도 워커의 비동기 호출 등으로 연결해야 시간 제한과 다른 요청 처리가 동작한다.
+실제 연결 전에는 임베딩 워커의 텍스트 API, Qdrant 컬렉션, VLM 주소와 인증 방식, 모델 이름, S3 접근 권한과 URL 유효시간을 서버 담당자와 맞춥니다. 로컬 mock 실행에는 `API_KEY`만 필요하며 실제 연결용 환경 변수는 아직 정해지지 않았습니다.
 
-## 의존성 계약
-
-| 인터페이스 | 입력 → 출력 | 구현 시 지킬 규칙 |
-| --- | --- | --- |
-| `VLMClient.interpret` | `ParseRequest` → `ParseResponse` | BE가 준 reference_date 사용. 실제 출력의 스키마·날짜 순서 검증 |
-| `TextEmbedder.encode_text` | 텍스트 → `list[float]` | 이미지 벡터와 같은 임베딩 모델·차원·정규화 기준 |
-| `CandidateSearcher.search` | 벡터, candidate_ids, limit → `list[SearchHit]` | Qdrant 질의 자체를 후보 ID로 제한. 전체 검색 후 사후 필터만 하는 구현은 금지 |
-| `ImageResolver.resolve` | 분석용 S3 키 → 이미지 URL | 선별된 사진만 접근. 신뢰된 버킷의 사본 URL을 발급하고 유효시간 관리 |
-| `VLMClient.answer` | 원질문, `list[Evidence]` → 문자열 | Evidence는 사진 메타데이터와 URL. 근거 밖 사실을 보완하지 않도록 프롬프트·검증 구현 |
-
-외부 SDK의 예외는 어댑터에서 변환한다. 임베딩·벡터 의존성 사용 불가는 `ModelUnavailable`, VLM·답변 이미지 접근 실패는 `VLMUnavailable`, 모델 출력 검증 실패는 `InvalidModelOutput`, 시간 초과는 `TimeoutError`다. 취소를 삼키거나 무제한 재시도하지 않는다. 예상하지 못한 프로그래밍 오류는 공통 500으로 노출된다.
-
-## 개발 초안 API
-
-기존 AI·BE 제공 설계를 따라 구현했다. 원문에서 제안으로 표시된 **reference_date, parsed, query, candidates는 최종 BE 합의가 확인되지 않았다.** 이 개발 뼈대의 동작을 확정 계약으로 간주하지 않는다. 이전 candidate_attachment_ids 계약과의 자동 호환은 제공하지 않는다.
-
-| 경로 | 요청 | 응답 |
-| --- | --- | --- |
-| POST `/query/parse` | query 2~100자, reference_date 날짜 | intent, nullable date_from/date_to/region_names/visual_query, parsed |
-| POST `/query/search` | query 2~100자, intent, nullable visual_query, candidates, limit | attachments(ID·score), nullable answer/answer_error |
-
-- 검색 범위는 사용자의 전체 여행이다. BE가 권한·날짜·지역으로 후보를 확정하며 AI는 후보 안에서만 검색한다. 폴더 구성은 BE 담당이다.
-- 후보는 사진 ID, analyze_storage_key와 nullable taken_at/place_name/trip_name을 담는다. null 시각을 허용하지만 값이 있으면 오프셋이 필요하다. 중복 ID·알 수 없는 필드는 422로 거부한다.
-- 후보 개수에 여행당 200장 제한을 적용하지 않았다. 전체 사용자 후보 상한·본문 크기·페이지 전략은 미정이다. 수만 건 성능을 검증하지 않았다.
-- limit은 생략 시 30, 정수 1~50이고 null을 허용하지 않는다. SEARCH의 반환 상한이다. QUESTION은 개발 옵션 question_k(기본 5)를 사용한다.
-- visual_query가 null이면 원질문으로 임베딩한다. SEARCH는 현재 초안에서 답변을 생성하지 않는다.
-- 벡터 검색 결과를 점수 내림차순으로 정렬하고 중복 사진은 최고 점수 하나만 남긴다. 실제 컷오프는 아직 구현하지 않았다.
-- 누락 벡터는 어댑터가 반환한 사진만 사용하는 개발 동작이다. 검색 중 재임베딩하지 않으며 누락을 BE에 알릴 방식은 미정이다.
-
-QUESTION 정상 예시(mock):
-
-```json
-{"attachments":[{"trip_attachment_id":412,"score":1.0},{"trip_attachment_id":415,"score":0.5}],"answer":"[MOCK] 근거 사진 2장으로 답변 경로를 확인했습니다.","answer_error":null}
-```
-
-빈 SEARCH 후보 예시:
-
-```json
-{"attachments":[],"answer":null,"answer_error":null}
-```
-
-답변 생성만 실패한 예시:
-
-```json
-{"attachments":[{"trip_attachment_id":412,"score":1.0}],"answer":null,"answer_error":"VLM_UNAVAILABLE"}
-```
-
-## 실패·시간 제한·관측
-
-| 상황 | 개발 뼈대의 동작 |
-| --- | --- |
-| 인증 실패 / 잘못된 입력 | 401 UNAUTHORIZED / 422 INVALID_REQUEST |
-| 해석 의존성 실패·출력 오류·해석 시간 초과 | 200, parsed=false, SEARCH와 원질문 visual_query, 나머지 조건 null |
-| 빈 후보 또는 반환 벡터 없음 | SEARCH는 빈 결과, QUESTION은 200 + NO_EVIDENCE |
-| 임베딩·벡터 사용 불가 | 503 MODEL_NOT_READY |
-| 검색 단계 또는 전체 요청 시간 초과 | 504 TIMEOUT. HTTP 매핑은 개발 처리안이며 BE 확인 필요 |
-| 답변 VLM·이미지 실패 / 답변 시간 초과 | 200 + VLM_UNAVAILABLE / TIMEOUT, 검색 사진 유지 |
-| 후보 밖 ID 또는 예상하지 못한 내부 오류 | 500 INTERNAL_ERROR. 후보 밖 이미지는 접근 전에 차단 |
-
-오류 본문은 공통 `{ "error": { "code", "message", "detail" } }`를 사용한다. `SearchOptions` 기본값은 해석 5초, 검색 5초, 답변 10초, 전체 요청 30초다. 실측이나 서비스 SLA가 아닌 개발용 중단 기준이다. 실제 어댑터의 연결·읽기 시간 제한과 BE·프록시 제한도 맞춰야 한다.
-
-`X-Request-ID`가 응답과 JSON 로그에 연결된다. `ai_query`에는 operation, result(success/fallback/partial/error), duration_ms가 기록된다. 원질문·후보 키·사진 URL을 로그에 담지 않는다. 서버의 비동기 취소가 원격 GPU 연산 중단까지 보장하지는 않는다.
-
-## 남은 조율과 배포 의존성
-
-1. BE·검색: 제안 필드 채택, SEARCH 답변 여부, 해석 실패 시 조건 없는 검색의 UX, 후보 규모·본문 크기, 누락 벡터 처리, 504와 답변 오류 코드.
-2. AI·Cloud: 임베딩 워커의 텍스트 API, 모델·벡터 차원·컬렉션, VLM 주소·인증·모델 이름, S3 버킷·권한·URL 유효시간. 실제 연결용 환경 변수 이름은 이 뼈대에서 임의 확정하지 않았다.
-3. 개발 실행에는 API_KEY만 필수다. 실제 검색용 VLM·임베딩·Qdrant·S3 연결 및 자원 종료를 앱 조립부에 구현해야 한다. Kafka와 작업 상태 저장소는 동기 검색의 선행 조건이 아니다.
-4. 단기 브랜치에서 CI·리뷰 후 main으로 통합하며 별도 dev 브랜치는 만들지 않는다. main의 이미지 생성은 운영 배포가 아니다. 운영은 마지막 정상 V1 이미지 조합을 유지한다.
-5. V2 스테이징 배포 경로는 Cloud 공지 기준 준비 중이다. PR·공유에 필요한 API·환경 변수·이미지 버전·선행 작업을 기재하고, FE·BE·AI 조합 검증 뒤 운영 적용을 판단한다. 이 뼈대만으로 V2 운영 배포를 요청하지 않는다.
-
-## 검증 명령과 한계
+## 테스트와 인계
 
 ```bash
 uv run pytest tests/test_query.py tests/test_api.py -q
@@ -126,4 +122,6 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-mock 테스트는 인증, 스키마, 빈 후보, 후보 범위, 답변 부분 실패, 시간 제한과 기존 정리 API 회귀를 다룬다. 실제 모델 해석·검색 정확도, 한국어 질의 품질, 수만 후보 전송, 혼합 GPU 부하, 스테이징 통합·운영 검증은 별도 수행해야 한다.
+파이프라인을 수정할 때 빈 후보, 후보 밖 결과, 답변만 실패하는 경우, 시간 초과에 대한 처리를 유지합니다. 실제 모델을 연결한 뒤에는 한국어 질의셋으로 해석과 검색 품질을 평가하고, 후보가 많을 때의 처리 시간도 별도로 확인합니다. mock 테스트만으로 이 품질과 성능을 확인할 수는 없습니다.
+
+PR에는 연결에 필요한 API와 환경 변수, 이미지 버전, 선행 작업을 적습니다. 변경은 단기 브랜치에서 리뷰 후 `main`에 통합하며, 운영 배포는 스테이징에서 FE와 BE를 함께 검증한 뒤 진행합니다.
