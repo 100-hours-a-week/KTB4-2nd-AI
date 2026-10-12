@@ -1,6 +1,7 @@
 """연결 확인 전용. 네트워크·모델·파일 접근 없이 실행하며 의미 검색을 하지 않는다."""
 
 import json
+from typing import Any
 
 from app.infra.vlm import ChatMessage
 from app.schemas.query import SearchHit
@@ -9,8 +10,13 @@ from app.search.context import SearchContext
 
 class MockVLM:
     async def chat(
-        self, messages: list[ChatMessage], image_urls: list[str], max_tokens: int
+        self,
+        messages: list[ChatMessage],
+        image_urls: list[str],
+        max_tokens: int,
+        response_format: dict[str, Any] | None = None,
     ) -> str:
+        # response_format은 받지만 모의 응답의 생성이나 검증에 사용하지 않는다.
         if image_urls:
             return f"[MOCK] 근거 사진 {len(image_urls)}장으로 답변 경로를 확인했습니다."
         query = json.loads(messages[-1]["content"])["query"]

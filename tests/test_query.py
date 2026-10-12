@@ -3,6 +3,7 @@
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from dataclasses import replace
 
 import httpx
@@ -61,12 +62,12 @@ class FailingVLM(MockVLM):
     def __init__(self, error):
         self.error = error
 
-    async def chat(self, messages, image_urls, max_tokens):
+    async def chat(self, messages, image_urls, max_tokens, response_format=None):
         raise self.error
 
 
 class SlowVLM(MockVLM):
-    async def chat(self, messages, image_urls, max_tokens):
+    async def chat(self, messages, image_urls, max_tokens, response_format=None):
         await asyncio.sleep(60)
         raise AssertionError("시간 제한으로 취소되어야 함")
 
@@ -111,6 +112,30 @@ async def test_mock_parse_search_question_without_network(monkeypatch):
         assert len(response.json()["attachments"]) == 2
         assert response.json()["answer"].startswith("[MOCK]")
         assert response.json()["answer_error"] is None
+
+
+@pytest.mark.parametrize("image_urls", [[], ["https://example.invalid/photo.jpg"]])
+async def test_mock_chat_accepts_optional_response_format_without_changing_output(image_urls):
+    vlm = MockVLM()
+    messages = [{"role": "user", "content": json.dumps({"query": "바다 사진?"})}]
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {"name": "query_parse", "schema": ParseResponse.model_json_schema()},
+    }
+    original_format = deepcopy(response_format)
+
+    original = await vlm.chat(messages, image_urls, max_tokens=512)
+    without_format = await vlm.chat(messages, image_urls, max_tokens=512, response_format=None)
+    with_format = await vlm.chat(
+        messages, image_urls, max_tokens=512, response_format=response_format
+    )
+
+    assert original == without_format == with_format
+    assert response_format == original_format
+    if image_urls:
+        assert original.startswith("[MOCK]")
+    else:
+        assert ParseResponse.model_validate_json(original).parsed is True
 
 
 async def test_unconfigured_server_does_not_use_mock():
@@ -379,7 +404,7 @@ def test_response_extra_fields_remain_forbidden(model, payload):
 )
 async def test_invalid_vlm_text_uses_parse_fallback(output):
     class VLM:
-        async def chat(self, messages, image_urls, max_tokens):
+        async def chat(self, messages, image_urls, max_tokens, response_format=None):
             return output
 
     context = replace(create_mock_context(), vlm=VLM())
@@ -394,7 +419,7 @@ async def test_invalid_vlm_text_uses_parse_fallback(output):
 
 async def test_vlm_implementation_bug_is_not_treated_as_invalid_model_text():
     class VLM:
-        async def chat(self, messages, image_urls, max_tokens):
+        async def chat(self, messages, image_urls, max_tokens, response_format=None):
             # 전송 클라이언트 내부의 오류이며 반환된 모델 텍스트의 검증 실패가 아니다.
             return ParseResponse.model_validate({})
 
@@ -409,9 +434,11 @@ async def test_shared_chat_receives_search_prompts_and_only_selected_images():
     calls = []
 
     class VLM(MockVLM):
-        async def chat(self, messages, image_urls, max_tokens):
-            calls.append((messages, image_urls, max_tokens))
-            return await super().chat(messages, image_urls, max_tokens)
+        async def chat(self, messages, image_urls, max_tokens, response_format=None):
+            calls.append((messages, image_urls, max_tokens, response_format))
+            return await super().chat(
+                messages, image_urls, max_tokens, response_format=response_format
+            )
 
     class Images(MockImages):
         async def resolve(self, storage_key):
@@ -428,7 +455,8 @@ async def test_shared_chat_receives_search_prompts_and_only_selected_images():
             "/query/parse", json={"query": "바다 사진?", "reference_date": "2026-10-11"}
         )
         assert response.status_code == 200
-        messages, urls, budget = calls[0]
+        messages, urls, budget, response_format = calls[0]
+        assert response_format is None
         assert urls == [] and budget > 0
         assert [item["role"] for item in messages] == ["system", "user"]
         assert json.loads(messages[-1]["content"])["reference_date"] == "2026-10-11"
@@ -436,7 +464,8 @@ async def test_shared_chat_receives_search_prompts_and_only_selected_images():
         payload["candidates"][1]["place_name"] = "협재해수욕장"
         response = await client.post("/query/search", json=payload)
         assert response.status_code == 200
-        messages, urls, budget = calls[1]
+        messages, urls, budget, response_format = calls[1]
+        assert response_format is None
         data = json.loads(messages[-1]["content"])
         assert data["query"] == payload["query"]
         assert [item["trip_attachment_id"] for item in data["photos"]] == [2]
