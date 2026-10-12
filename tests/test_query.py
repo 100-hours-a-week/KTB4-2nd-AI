@@ -1,17 +1,20 @@
 """모델 품질이 아닌 검색 HTTP 계약과 외부 의존성 실패 경계를 검증한다."""
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from dataclasses import replace
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from app.api.services.query_service import QueryService
 from app.core.config import Settings
+from app.infra.vlm import VLMUnavailable
 from app.main import create_app
-from app.schemas.query import SearchHit
-from app.search.context import InvalidModelOutput, ModelUnavailable, SearchOptions, VLMUnavailable
+from app.schemas.query import ParseResponse, SearchHit, SearchResponse
+from app.search.context import InvalidModelOutput, ModelUnavailable, SearchOptions
 from app.search.mock import MockEmbedder, MockImages, MockVLM, create_mock_context
 
 pytestmark = pytest.mark.anyio
@@ -58,15 +61,12 @@ class FailingVLM(MockVLM):
     def __init__(self, error):
         self.error = error
 
-    async def interpret(self, request):
-        raise self.error
-
-    async def answer(self, query, evidence):
+    async def chat(self, messages, image_urls, max_tokens):
         raise self.error
 
 
 class SlowVLM(MockVLM):
-    async def answer(self, query, evidence):
+    async def chat(self, messages, image_urls, max_tokens):
         await asyncio.sleep(60)
         raise AssertionError("시간 제한으로 취소되어야 함")
 
@@ -147,7 +147,6 @@ async def test_authentication(route, body):
         {"limit": True},
         {"query": "x"},
         {"intent": "OTHER"},
-        {"candidate_attachment_ids": [1]},
     ],
 )
 async def test_invalid_search_input(updates):
@@ -162,7 +161,6 @@ async def test_invalid_search_input(updates):
     [
         {"query": "사진", "reference_date": "invalid"},
         {"query": "사진"},
-        {"query": "사진", "reference_date": "2026-10-11", "trip_id": 1},
     ],
 )
 async def test_invalid_parse_input(body):
@@ -314,3 +312,169 @@ async def test_missing_vectors_question_returns_no_evidence():
         response = await client.post("/query/search", json=search_body("QUESTION"))
         assert response.status_code == 200
         assert response.json()["answer_error"] == "NO_EVIDENCE"
+
+
+async def test_request_extra_fields_are_ignored_without_changing_scope():
+    async with client_for(create_mock_context()) as client:
+        response = await client.post(
+            "/query/parse",
+            json={"query": "사진", "reference_date": "2026-10-11", "trip_id": 1},
+        )
+        assert response.status_code == 200
+        assert "trip_id" not in response.json()
+        payload = search_body() | {"candidate_attachment_ids": [999], "new_field": "unused"}
+        payload["candidates"][0]["new_field"] = "unused"
+        response = await client.post("/query/search", json=payload)
+        assert response.status_code == 200
+        assert [item["trip_attachment_id"] for item in response.json()["attachments"]] == [1, 2]
+        del payload["candidates"]
+        assert (await client.post("/query/search", json=payload)).status_code == 422
+
+
+@pytest.mark.parametrize(
+    "model,payload",
+    [
+        (
+            ParseResponse,
+            {
+                "intent": "SEARCH",
+                "date_from": None,
+                "date_to": None,
+                "region_names": None,
+                "visual_query": None,
+                "parsed": True,
+                "unexpected": 1,
+            },
+        ),
+        (SearchResponse, {"attachments": [], "unexpected": 1}),
+        (
+            SearchResponse,
+            {"attachments": [{"trip_attachment_id": 1, "score": 0.9, "unexpected": 1}]},
+        ),
+    ],
+)
+def test_response_extra_fields_remain_forbidden(model, payload):
+    with pytest.raises(ValidationError) as error:
+        model.model_validate(payload)
+    assert error.value.errors()[0]["type"] == "extra_forbidden"
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "not json",
+        '{"intent":"OTHER"}',
+        json.dumps(
+            {
+                "intent": "SEARCH",
+                "date_from": None,
+                "date_to": None,
+                "region_names": None,
+                "visual_query": None,
+                "parsed": True,
+                "extra": 1,
+            }
+        ),
+    ],
+)
+async def test_invalid_vlm_text_uses_parse_fallback(output):
+    class VLM:
+        async def chat(self, messages, image_urls, max_tokens):
+            return output
+
+    context = replace(create_mock_context(), vlm=VLM())
+    async with client_for(context) as client:
+        response = await client.post(
+            "/query/parse", json={"query": "지난달 바다", "reference_date": "2026-10-11"}
+        )
+        assert response.status_code == 200
+        assert response.json()["parsed"] is False
+        assert response.json()["visual_query"] == "지난달 바다"
+
+
+async def test_vlm_implementation_bug_is_not_treated_as_invalid_model_text():
+    class VLM:
+        async def chat(self, messages, image_urls, max_tokens):
+            # 전송 클라이언트 내부의 오류이며 반환된 모델 텍스트의 검증 실패가 아니다.
+            return ParseResponse.model_validate({})
+
+    async with client_for(replace(create_mock_context(), vlm=VLM())) as client:
+        response = await client.post(
+            "/query/parse", json={"query": "바다 사진", "reference_date": "2026-10-11"}
+        )
+        assert response.status_code == 500
+
+
+async def test_shared_chat_receives_search_prompts_and_only_selected_images():
+    calls = []
+
+    class VLM(MockVLM):
+        async def chat(self, messages, image_urls, max_tokens):
+            calls.append((messages, image_urls, max_tokens))
+            return await super().chat(messages, image_urls, max_tokens)
+
+    class Images(MockImages):
+        async def resolve(self, storage_key):
+            return f"https://example.invalid/{storage_key}"
+
+    context = replace(
+        create_mock_context(),
+        vlm=VLM(),
+        images=Images(),
+        vectors=FixedVectors([SearchHit(trip_attachment_id=2, score=0.9)]),
+    )
+    async with client_for(context) as client:
+        response = await client.post(
+            "/query/parse", json={"query": "바다 사진?", "reference_date": "2026-10-11"}
+        )
+        assert response.status_code == 200
+        messages, urls, budget = calls[0]
+        assert urls == [] and budget > 0
+        assert [item["role"] for item in messages] == ["system", "user"]
+        assert json.loads(messages[-1]["content"])["reference_date"] == "2026-10-11"
+        payload = search_body("QUESTION")
+        payload["candidates"][1]["place_name"] = "협재해수욕장"
+        response = await client.post("/query/search", json=payload)
+        assert response.status_code == 200
+        messages, urls, budget = calls[1]
+        data = json.loads(messages[-1]["content"])
+        assert data["query"] == payload["query"]
+        assert [item["trip_attachment_id"] for item in data["photos"]] == [2]
+        assert data["photos"][0]["image_number"] == 1
+        assert data["photos"][0]["place_name"] == "협재해수욕장"
+        assert "analyze_storage_key" not in data["photos"][0]
+        assert urls == ["https://example.invalid/trips/1/1.jpg"] and budget > 0
+
+
+async def test_query_logs_distinguish_empty_results_failures_and_parse_outcomes(monkeypatch):
+    from app.api.services import query_service
+
+    events = []
+    monkeypatch.setattr(query_service.log, "info", lambda message, *, extra: events.append(extra))
+    async with client_for(create_mock_context()) as client:
+        await client.post("/query/parse", json={"query": "사진?", "reference_date": "2026-10-11"})
+        await client.post("/query/search", json=search_body(count=0))
+    failing = replace(create_mock_context(), vlm=FailingVLM(VLMUnavailable("private URL")))
+    async with client_for(failing) as client:
+        await client.post("/query/parse", json={"query": "사진?", "reference_date": "2026-10-11"})
+        await client.post("/query/search", json=search_body("QUESTION"))
+    invalid = replace(
+        create_mock_context(), vectors=FixedVectors([SearchHit(trip_attachment_id=999, score=1)])
+    )
+    async with client_for(invalid) as client:
+        await client.post("/query/search", json=search_body())
+    observed = [
+        (e["result"], e["intent"], e["candidate_count"], e["returned_count"], e["parsed"])
+        for e in events
+    ]
+    assert observed == [
+        ("success", "QUESTION", None, None, True),
+        ("success", "SEARCH", 0, 0, None),
+        ("fallback", "SEARCH", None, None, False),
+        ("partial", "QUESTION", 2, 2, None),
+        ("error", "SEARCH", 2, None, None),
+    ]
+    assert all(e["event"] == "ai_query" and e["duration_ms"] >= 0 for e in events)
+    serialized = json.dumps(events, ensure_ascii=False)
+    assert "사진?" not in serialized and "private URL" not in serialized
+    assert "trips/1/" not in serialized

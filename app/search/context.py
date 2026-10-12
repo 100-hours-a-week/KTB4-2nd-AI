@@ -3,15 +3,12 @@
 from dataclasses import dataclass
 from typing import Protocol
 
-from app.schemas.query import ParseRequest, ParseResponse, SearchCandidate, SearchHit
+from app.infra.vlm import VlmClient
+from app.schemas.query import SearchCandidate, SearchHit
 
 
 class ModelUnavailable(Exception):
     """임베딩 또는 벡터 검색 의존성을 사용할 수 없음."""
-
-
-class VLMUnavailable(Exception):
-    """VLM 또는 답변용 이미지 접근 실패. 어댑터에서 외부 예외를 변환한다."""
 
 
 class InvalidModelOutput(Exception):
@@ -22,12 +19,6 @@ class InvalidModelOutput(Exception):
 class Evidence:
     candidate: SearchCandidate
     image_url: str
-
-
-class VLMClient(Protocol):
-    async def interpret(self, request: ParseRequest) -> ParseResponse: ...
-
-    async def answer(self, query: str, evidence: list[Evidence]) -> str: ...
 
 
 class TextEmbedder(Protocol):
@@ -50,7 +41,7 @@ class ImageResolver(Protocol):
 
 @dataclass(frozen=True)
 class SearchContext:
-    vlm: VLMClient
+    vlm: VlmClient
     embedder: TextEmbedder
     vectors: CandidateSearcher
     images: ImageResolver

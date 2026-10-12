@@ -1,4 +1,4 @@
-"""동기 검색 HTTP. Kafka와 작업 상태 저장소를 거치지 않는다."""
+"""동기 검색 HTTP. 작업 큐와 작업 상태 저장소를 거치지 않는다."""
 
 from typing import Annotated
 

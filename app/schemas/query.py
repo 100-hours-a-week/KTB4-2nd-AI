@@ -1,4 +1,4 @@
-"""v2 검색 개발 계약. 제안 필드와 미확정 정책은 docs/search-handoff.md 참고."""
+"""v2 검색 API 스키마. BE 요청의 추가 필드는 무시하고 응답은 엄격하게 검증한다."""
 
 from datetime import date
 from typing import Annotated, Literal, Self
@@ -10,16 +10,20 @@ AttachmentId = Annotated[int, Field(strict=True, gt=0)]
 QueryText = Annotated[str, Field(min_length=2, max_length=100)]
 
 
-class QueryModel(BaseModel):
+class QueryRequestModel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+
+class QueryResponseModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class ParseRequest(QueryModel):
+class ParseRequest(QueryRequestModel):
     query: QueryText
     reference_date: date
 
 
-class ParseResponse(QueryModel):
+class ParseResponse(QueryResponseModel):
     intent: Intent
     date_from: date | None
     date_to: date | None
@@ -34,7 +38,7 @@ class ParseResponse(QueryModel):
         return self
 
 
-class SearchCandidate(QueryModel):
+class SearchCandidate(QueryRequestModel):
     trip_attachment_id: AttachmentId
     analyze_storage_key: str = Field(min_length=1)
     taken_at: AwareDatetime | None
@@ -42,7 +46,7 @@ class SearchCandidate(QueryModel):
     trip_name: str | None
 
 
-class SearchRequest(QueryModel):
+class SearchRequest(QueryRequestModel):
     query: QueryText
     intent: Intent
     visual_query: str | None
@@ -57,12 +61,12 @@ class SearchRequest(QueryModel):
         return self
 
 
-class SearchHit(QueryModel):
+class SearchHit(QueryResponseModel):
     trip_attachment_id: AttachmentId
     score: float = Field(allow_inf_nan=False)
 
 
-class SearchResponse(QueryModel):
+class SearchResponse(QueryResponseModel):
     attachments: list[SearchHit]
     answer: str | None = None
     answer_error: Literal["VLM_UNAVAILABLE", "TIMEOUT", "NO_EVIDENCE"] | None = None

@@ -2,13 +2,14 @@
 
 import asyncio
 
+from app.infra.vlm import VLMUnavailable
 from app.schemas.query import ParseRequest, ParseResponse, SearchRequest, SearchResponse
+from app.search import prompts
 from app.search.context import (
     Evidence,
     InvalidModelOutput,
     SearchContext,
     SearchOptions,
-    VLMUnavailable,
 )
 
 
@@ -28,7 +29,12 @@ async def parse(
 ) -> ParseResponse:
     try:
         async with asyncio.timeout(options.parse_timeout_sec):
-            return await context.vlm.interpret(request)
+            output = await context.vlm.chat(
+                prompts.parse_messages(request),
+                image_urls=[],
+                max_tokens=prompts.PARSE_MAX_TOKENS,
+            )
+            return prompts.parse_output(output)
     except (VLMUnavailable, InvalidModelOutput, TimeoutError):
         return parse_fallback(request)
 
@@ -72,7 +78,11 @@ async def search(
                 )
                 for hit in selected
             ]
-            answer = await context.vlm.answer(request.query, evidence)
+            answer = await context.vlm.chat(
+                prompts.answer_messages(request.query, evidence),
+                image_urls=[item.image_url for item in evidence],
+                max_tokens=prompts.ANSWER_MAX_TOKENS,
+            )
             if not answer.strip():
                 raise InvalidModelOutput("빈 답변")
             return SearchResponse(attachments=selected, answer=answer)

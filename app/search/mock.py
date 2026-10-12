@@ -1,22 +1,30 @@
 """연결 확인 전용. 네트워크·모델·파일 접근 없이 실행하며 의미 검색을 하지 않는다."""
 
-from app.schemas.query import ParseRequest, ParseResponse, SearchHit
-from app.search.context import Evidence, SearchContext
+import json
+
+from app.infra.vlm import ChatMessage
+from app.schemas.query import SearchHit
+from app.search.context import SearchContext
 
 
 class MockVLM:
-    async def interpret(self, request: ParseRequest) -> ParseResponse:
-        return ParseResponse(
-            intent="QUESTION" if "?" in request.query else "SEARCH",
-            date_from=None,
-            date_to=None,
-            region_names=None,
-            visual_query=request.query,
-            parsed=True,
+    async def chat(
+        self, messages: list[ChatMessage], image_urls: list[str], max_tokens: int
+    ) -> str:
+        if image_urls:
+            return f"[MOCK] 근거 사진 {len(image_urls)}장으로 답변 경로를 확인했습니다."
+        query = json.loads(messages[-1]["content"])["query"]
+        return json.dumps(
+            {
+                "intent": "QUESTION" if "?" in query else "SEARCH",
+                "date_from": None,
+                "date_to": None,
+                "region_names": None,
+                "visual_query": query,
+                "parsed": True,
+            },
+            ensure_ascii=False,
         )
-
-    async def answer(self, query: str, evidence: list[Evidence]) -> str:
-        return f"[MOCK] 근거 사진 {len(evidence)}장으로 답변 경로를 확인했습니다."
 
 
 class MockEmbedder:

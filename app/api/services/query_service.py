@@ -28,6 +28,10 @@ class QueryService:
     ) -> ParseResponse | SearchResponse:
         started = time.monotonic()
         outcome = "error"
+        intent = request.intent if isinstance(request, SearchRequest) else None
+        candidate_count = len(request.candidates) if isinstance(request, SearchRequest) else None
+        returned_count = None
+        parsed = None
         try:
             async with asyncio.timeout(self.options.request_timeout_sec):
                 if isinstance(request, ParseRequest):
@@ -40,10 +44,15 @@ class QueryService:
                     )
                     self._validate_result(request, result)
                 outcome = "success"
-                if isinstance(result, ParseResponse) and not result.parsed:
-                    outcome = "fallback"
-                if isinstance(result, SearchResponse) and result.answer_error:
-                    outcome = "partial"
+                if isinstance(result, ParseResponse):
+                    intent = result.intent
+                    parsed = result.parsed
+                    if not parsed:
+                        outcome = "fallback"
+                else:
+                    returned_count = len(result.attachments)
+                    if result.answer_error:
+                        outcome = "partial"
                 return result
         except AppError:
             raise
@@ -62,6 +71,10 @@ class QueryService:
                     "event": "ai_query",
                     "operation": operation,
                     "result": outcome,
+                    "intent": intent,
+                    "candidate_count": candidate_count,
+                    "returned_count": returned_count,
+                    "parsed": parsed,
                     "duration_ms": round((time.monotonic() - started) * 1000, 2),
                 },
             )
