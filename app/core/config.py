@@ -8,7 +8,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     WORKER_URL: str = "http://127.0.0.1:8002"
     API_URL: str = "http://127.0.0.1:8000"
     QDRANT_URL: str = "http://127.0.0.1:6333"
+
+    # v2 VLM. 미설정이면 기존 v1 기동에 영향이 없고, 클라이언트 생성 시 필수값을 확인한다.
+    VLM_BASE_URL: str | None = None
+    VLM_MODEL: str | None = None
+    VLM_API_KEY: SecretStr | None = None
+    VLM_CONNECT_TIMEOUT_SEC: float = Field(default=5.0, gt=0, allow_inf_nan=False)
+    VLM_TIMEOUT_SEC: float = Field(default=60.0, gt=0, allow_inf_nan=False)
 
     # 인증, 기본값 없음, 비어 있으면 기동 실패
     API_KEY: str

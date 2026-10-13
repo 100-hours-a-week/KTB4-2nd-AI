@@ -1,0 +1,135 @@
+"""vLLM의 비스트리밍 chat 전송. 프롬프트와 기능별 출력 검증은 호출자가 담당한다."""
+
+import asyncio
+import math
+from typing import Any, Self
+
+import httpx
+
+from app.core.config import Settings
+from app.infra.vlm import ChatMessage, VLMUnavailable
+
+
+class VllmClient:
+    """프로세스별로 재사용하고 앱 종료 시 aclose한다. base_url은 /v1까지 포함한다.
+
+    생성 요청은 자동 재시도하지 않는다. 응답을 못 받은 경우에도 서버에서는
+    생성 중일 수 있으므로 재시도 여부와 전체 처리 예산은 호출자가 결정한다.
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        *,
+        api_key: str | None = None,
+        timeout_sec: float = 60.0,
+        connect_timeout_sec: float = 5.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        url = httpx.URL(base_url)
+        if (
+            url.scheme not in {"http", "https"}
+            or not url.host
+            or url.userinfo
+            or url.query
+            or url.fragment
+        ):
+            raise ValueError("VLM 주소는 인증 정보와 쿼리가 없는 HTTP(S) URL이어야 합니다.")
+        if not model.strip():
+            raise ValueError("VLM 모델명이 필요합니다.")
+        if any(
+            not math.isfinite(value) or value <= 0 for value in (timeout_sec, connect_timeout_sec)
+        ):
+            raise ValueError("VLM 시간 제한은 양의 유한 값이어야 합니다.")
+        self._model = model
+        self._timeout_sec = timeout_sec
+        self._client = httpx.AsyncClient(
+            base_url=base_url.rstrip("/") + "/",
+            headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
+            timeout=httpx.Timeout(timeout_sec, connect=connect_timeout_sec),
+            follow_redirects=False,
+            transport=transport,
+        )
+
+    @classmethod
+    def from_settings(
+        cls, settings: Settings, *, transport: httpx.AsyncBaseTransport | None = None
+    ) -> Self:
+        if not settings.VLM_BASE_URL or not settings.VLM_MODEL:
+            raise ValueError("VLM_BASE_URL과 VLM_MODEL을 설정해야 합니다.")
+        return cls(
+            settings.VLM_BASE_URL,
+            settings.VLM_MODEL,
+            api_key=settings.VLM_API_KEY.get_secret_value() if settings.VLM_API_KEY else None,
+            timeout_sec=settings.VLM_TIMEOUT_SEC,
+            connect_timeout_sec=settings.VLM_CONNECT_TIMEOUT_SEC,
+            transport=transport,
+        )
+
+    async def chat(
+        self,
+        messages: list[ChatMessage],
+        image_urls: list[str],
+        max_tokens: int,
+        response_format: dict[str, Any] | None = None,
+    ) -> str:
+        if (
+            not messages
+            or not isinstance(max_tokens, int)
+            or isinstance(max_tokens, bool)
+            or max_tokens < 1
+        ):
+            raise ValueError("메시지와 양의 정수 max_tokens가 필요합니다.")
+        # 호출자의 메시지를 바꾸지 않는다. 이미지는 마지막 user 메시지에만 붙인다.
+        wire_messages: list[dict[str, Any]] = [dict(message) for message in messages]
+        if image_urls:
+            index = next(
+                (i for i in range(len(messages) - 1, -1, -1) if messages[i]["role"] == "user"),
+                None,
+            )
+            if index is None:
+                raise ValueError("이미지를 첨부할 user 메시지가 없습니다.")
+            wire_messages[index]["content"] = [
+                {"type": "text", "text": messages[index]["content"]},
+                *({"type": "image_url", "image_url": {"url": url}} for url in image_urls),
+            ]
+        body = {
+            "model": self._model,
+            "messages": wire_messages,
+            "max_tokens": max_tokens,
+            "stream": False,
+        }
+        if response_format is not None:
+            body["response_format"] = response_format
+        try:
+            # HTTPX의 I/O별 제한 외에 응답 본문을 모두 받기까지의 전체 시간도 제한한다.
+            async with asyncio.timeout(self._timeout_sec):
+                response = await self._client.post("chat/completions", json=body)
+                response.raise_for_status()
+        except (httpx.TimeoutException, TimeoutError):
+            raise TimeoutError("VLM 요청 시간이 초과되었습니다.") from None
+        except httpx.HTTPError:
+            # 인증키, presigned URL과 모델 응답 본문을 오류 메시지에 포함하지 않는다.
+            raise VLMUnavailable("VLM 요청에 실패했습니다.") from None
+        try:
+            choice = response.json()["choices"][0]
+            content = choice["message"]["content"]
+            if (
+                choice["finish_reason"] != "stop"
+                or not isinstance(content, str)
+                or not content.strip()
+            ):
+                raise ValueError("완성된 텍스트가 아님")
+        except (ValueError, KeyError, IndexError, TypeError):
+            raise VLMUnavailable("VLM이 완성된 텍스트 응답을 반환하지 않았습니다.") from None
+        return content
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        await self.aclose()
