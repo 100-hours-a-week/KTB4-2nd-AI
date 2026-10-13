@@ -9,6 +9,12 @@ services:
       - ${EMBEDDING_MODEL_REVISION:?Set the model revision}
       - --runner
       - pooling
+      # 2026-10-13 검증과 같은 인자, 1024px 사진 한 장은 약 1024토큰 이하
+      - --trust-remote-code
+      - --dtype
+      - bfloat16
+      - --max-model-len
+      - "4096"
       - --served-model-name
       - ${EMBEDDING_SERVED_MODEL_NAME:?Set the public model name}
       - --host
@@ -22,6 +28,13 @@ services:
       - "${EMBEDDING_BIND_HOST:-127.0.0.1}:${EMBEDDING_PORT:-8003}:8000"
     volumes:
       - embedding-model-cache:/root/.cache/huggingface
+    # 기동 약 95초(가중치 적재와 엔진 준비), 유예 180초 동안의 실패는 재시작 사유에서 제외
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 180s
     deploy:
       resources:
         reservations:
