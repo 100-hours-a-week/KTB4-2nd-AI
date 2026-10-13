@@ -9,9 +9,9 @@ from typing import Annotated
 
 from fastapi import Depends, Header, Request
 
-from app.api.services.task_service import TaskService
 from app.core.config import Settings
 from app.core.errors import AppError, ErrorCode
+from app.jobs.task_service import TaskService
 
 
 def get_settings_dep(request: Request) -> Settings:

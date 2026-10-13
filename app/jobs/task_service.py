@@ -19,8 +19,6 @@ import asyncio
 import time
 from collections.abc import Callable
 
-from app.api.services.task_store import Task, TaskStore
-from app.api.services.worker_client import SubmitResult, WorkerClientProtocol, WorkerUnavailable
 from app.core.config import Settings
 from app.core.errors import DEFAULT_MESSAGE, AppError, ErrorCode
 from app.core.logging import (
@@ -30,10 +28,13 @@ from app.core.logging import (
     FAILURE_WORKER_DISPATCH,
     get_logger,
 )
+from app.jobs.task_store import Task, TaskStore
+from app.jobs.worker_client import SubmitResult, WorkerClientProtocol, WorkerUnavailable
 from app.schemas.process import ProcessRequest, ProcessResult
 from app.schemas.task import TERMINAL_STATUSES, ErrorBody, ProcessStep, TaskStatus
 
-log = get_logger(__name__)
+# 패키지 이동 후에도 기존 로그 조회와 필터가 동작하도록 이름을 유지한다.
+log = get_logger("app.api.services.task_service")
 
 # 종료 상태를 클라우드 관측 계약의 result 값으로
 JOB_RESULTS = {

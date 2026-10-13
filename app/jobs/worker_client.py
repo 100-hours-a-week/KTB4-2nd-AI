@@ -1,6 +1,6 @@
 """워커 프로세스 호출, api → worker
 
-api 안에서 워커의 URL과 HTTP를 아는 유일한 파일. task_service는 SubmitResult 값만 봄.
+작업 관리에서 워커의 HTTP 호출을 담당한다. task_service는 SubmitResult 값만 본다.
 전부 httpx.AsyncClient로 await. 동기로 부르면 워커가 늦을 때 루프 전체가 멈춰
 대기 중인 POST뿐 아니라 GET 진행률과 콜백까지 밀림
 """

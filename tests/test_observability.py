@@ -14,8 +14,6 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from app.api.services.task_service import TaskService
-from app.api.services.task_store import TaskStore
 from app.core.config import Settings
 from app.core.errors import DEFAULT_MESSAGE, AppError, ErrorCode
 from app.core.logging import (
@@ -33,6 +31,8 @@ from app.core.logging import (
 )
 from app.engines.fake import FakeEngine
 from app.infra.qdrant import MEMORY
+from app.jobs.task_service import TaskService
+from app.jobs.task_store import TaskStore
 from app.main import create_app
 from app.pipeline.bootstrap import build_context
 from app.pipeline.context import PipelineContext
