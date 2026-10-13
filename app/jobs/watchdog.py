@@ -6,10 +6,11 @@ lifespan에서 asyncio.create_task로 띄움. 스레드가 아닌 이유는 task
 
 import asyncio
 
-from app.api.services.task_service import TaskService
 from app.core.logging import get_logger
+from app.jobs.task_service import TaskService
 
-log = get_logger(__name__)
+# 패키지 이동 후에도 기존 로그 조회와 필터가 동작하도록 이름을 유지한다.
+log = get_logger("app.api.services.watchdog")
 
 
 async def watchdog_loop(service: TaskService, interval: float) -> None:

@@ -1,0 +1,36 @@
+# Grant: kksoo1769, Kael: wooseok-98
+# 공통 설정과 계약은 함께 검토한다. 아래의 구체적인 경로가 우선한다.
+* @kksoo1769 @wooseok-98
+
+# Grant: 서비스 실행, 스토리, 공통 생성 클라이언트와 전체 연결
+/app/api/ @kksoo1769
+/app/jobs/ @kksoo1769
+/app/story/ @kksoo1769
+/app/worker/ @kksoo1769
+/app/main.py @kksoo1769
+/app/worker_main.py @kksoo1769
+/app/search_dev.py @kksoo1769
+/app/infra/vlm.py @kksoo1769 @wooseok-98
+/app/infra/vllm_client.py @kksoo1769
+/app/infra/images.py @kksoo1769
+
+# Kael: 검색, 임베딩, 사진 정리와 벡터 저장
+/app/search/ @wooseok-98
+/app/embedding/ @wooseok-98
+/app/engines/ @wooseok-98
+/docker/embedding/ @wooseok-98
+/docker/generation/ @wooseok-98
+/app/pipeline/ @wooseok-98
+/app/infra/qdrant.py @wooseok-98
+/scripts/fetch_model.py @wooseok-98
+/scripts/runtime_check.py @wooseok-98
+/scripts/run_pipeline.py @wooseok-98
+
+# 기능 간에 공유하는 인터페이스는 주 담당 영역 안에서도 함께 검토한다.
+/app/search/context.py @kksoo1769 @wooseok-98
+/app/embedding/contracts.py @kksoo1769 @wooseok-98
+/app/engines/base.py @kksoo1769 @wooseok-98
+/app/pipeline/context.py @kksoo1769 @wooseok-98
+/app/pipeline/run.py @kksoo1769 @wooseok-98
+/app/jobs/worker_client.py @kksoo1769 @wooseok-98
+/app/worker/callback.py @kksoo1769 @wooseok-98

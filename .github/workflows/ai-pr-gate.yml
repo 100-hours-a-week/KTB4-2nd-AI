@@ -37,6 +37,15 @@ jobs:
       - name: Format
         run: uv run ruff format --check .
 
+      - name: Validate standalone embedding service configuration
+        run: docker compose -f docker/embedding/compose.yaml config --quiet
+        env:
+          VLLM_EMBEDDING_IMAGE: vllm/vllm-openai:validation-only
+          EMBEDDING_MODEL: validation/model
+          EMBEDDING_MODEL_REVISION: validation-revision
+          EMBEDDING_SERVED_MODEL_NAME: validation-embedding
+          EMBEDDING_API_KEY: validation-only
+
       - name: Test
         run: uv run pytest
         env:
@@ -52,7 +61,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           if git diff --name-only "$BASE_SHA" "$HEAD_SHA" |
-            grep -Eq '^(app/engines/|app/pipeline/bootstrap\.py$|app/core/config\.py$|scripts/(fetch_model|runtime_check)\.py$|docker/|pyproject\.toml$|uv\.lock$)'; then
+            grep -Eq '^(app/(engines|embedding)/|app/pipeline/bootstrap\.py$|app/core/config\.py$|scripts/(fetch_model|runtime_check)\.py$|docker/|pyproject\.toml$|uv\.lock$)'; then
             echo 'model_runtime=true' >> "$GITHUB_OUTPUT"
           else
             echo 'model_runtime=false' >> "$GITHUB_OUTPUT"

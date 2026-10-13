@@ -11,7 +11,7 @@ import httpx
 
 from app.core.config import Settings
 from app.core.logging import get_logger
-from app.engines.base import EmbeddingEngine
+from app.embedding.contracts import EmbeddingEngine
 from app.engines.fake import FakeEngine
 from app.infra.images import ImageSource, LocalDirImageSource, S3ImageSource
 from app.infra.qdrant import MEMORY, QdrantStore

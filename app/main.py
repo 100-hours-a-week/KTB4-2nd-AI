@@ -16,13 +16,13 @@ from fastapi import FastAPI, Request
 from app.api.routers import health, internal, process, query
 from app.api.routers.health import qdrant_ready
 from app.api.services.query_service import QueryService
-from app.api.services.task_service import TaskService
-from app.api.services.task_store import TaskStore
-from app.api.services.watchdog import watchdog_loop
-from app.api.services.worker_client import WorkerClient, WorkerClientProtocol
 from app.core.config import Settings, get_settings
 from app.core.http_errors import register_error_handlers
 from app.core.logging import bind_request, get_logger, setup_logging
+from app.jobs.task_service import TaskService
+from app.jobs.task_store import TaskStore
+from app.jobs.watchdog import watchdog_loop
+from app.jobs.worker_client import WorkerClient, WorkerClientProtocol
 
 log = get_logger(__name__)
 

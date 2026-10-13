@@ -4,10 +4,10 @@ import asyncio
 
 import pytest
 
-from app.api.services.task_service import TaskService
-from app.api.services.task_store import TaskStore
 from app.core.config import Settings
 from app.core.errors import AppError, ErrorCode
+from app.jobs.task_service import TaskService
+from app.jobs.task_store import TaskStore
 from app.schemas.process import ProcessRequest
 from app.schemas.task import ProcessStep, TaskStatus
 from tests.fakes import FakeClock, FakeWorkerClient

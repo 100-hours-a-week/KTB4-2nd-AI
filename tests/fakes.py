@@ -8,9 +8,9 @@ app/pipeline/fake_run.py에 있음
 import asyncio
 import threading
 
-from app.api.services.task_service import TaskService
-from app.api.services.worker_client import SubmitResult, WorkerUnavailable
 from app.core.errors import DEFAULT_MESSAGE, ErrorCode
+from app.jobs.task_service import TaskService
+from app.jobs.worker_client import SubmitResult, WorkerUnavailable
 from app.schemas.internal import ReadyResponse
 from app.schemas.process import (
     Issue,
