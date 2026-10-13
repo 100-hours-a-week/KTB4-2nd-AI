@@ -19,6 +19,7 @@
 /app/embedding/ @wooseok-98
 /app/engines/ @wooseok-98
 /docker/embedding/ @wooseok-98
+/docker/generation/ @wooseok-98
 /app/pipeline/ @wooseok-98
 /app/infra/qdrant.py @wooseok-98
 /scripts/fetch_model.py @wooseok-98
