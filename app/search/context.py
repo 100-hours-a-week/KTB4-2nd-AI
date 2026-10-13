@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import Protocol
 
+from app.embedding.contracts import TextEmbedder as TextEmbedder
 from app.infra.vlm import VlmClient
 from app.schemas.query import SearchCandidate, SearchHit
 
@@ -19,10 +20,6 @@ class InvalidModelOutput(Exception):
 class Evidence:
     candidate: SearchCandidate
     image_url: str
-
-
-class TextEmbedder(Protocol):
-    async def encode_text(self, text: str) -> list[float]: ...
 
 
 class CandidateSearcher(Protocol):

@@ -16,7 +16,9 @@
 
 # Kael: 검색, 임베딩, 사진 정리와 벡터 저장
 /app/search/ @wooseok-98
+/app/embedding/ @wooseok-98
 /app/engines/ @wooseok-98
+/docker/embedding/ @wooseok-98
 /app/pipeline/ @wooseok-98
 /app/infra/qdrant.py @wooseok-98
 /scripts/fetch_model.py @wooseok-98
@@ -25,6 +27,7 @@
 
 # 기능 간에 공유하는 인터페이스는 주 담당 영역 안에서도 함께 검토한다.
 /app/search/context.py @kksoo1769 @wooseok-98
+/app/embedding/contracts.py @kksoo1769 @wooseok-98
 /app/engines/base.py @kksoo1769 @wooseok-98
 /app/pipeline/context.py @kksoo1769 @wooseok-98
 /app/pipeline/run.py @kksoo1769 @wooseok-98

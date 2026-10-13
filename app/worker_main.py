@@ -16,7 +16,7 @@ from fastapi import FastAPI
 from app.core.config import Settings, get_settings
 from app.core.http_errors import register_error_handlers
 from app.core.logging import get_logger, setup_logging
-from app.engines.base import EmbeddingEngine
+from app.embedding.contracts import EmbeddingEngine
 from app.pipeline.bootstrap import RunFn, build_context, build_engine, select_run
 from app.worker.callback import CallbackClient, CallbackProtocol
 from app.worker.routers import jobs

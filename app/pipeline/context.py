@@ -12,7 +12,7 @@ from pathlib import Path
 import yaml
 
 from app.core.config import Settings
-from app.engines.base import EmbeddingEngine
+from app.embedding.contracts import EmbeddingEngine
 from app.infra.images import ImageSource
 from app.infra.qdrant import QdrantStore
 
