@@ -35,7 +35,7 @@ from app.jobs.kafka import (
     publish_results,
 )
 from app.jobs.mock import run as mock_run
-from app.jobs.models import MESSAGE, JobResultEvent
+from app.jobs.models import MESSAGE, RESULT_MAX_BYTES, JobResultEvent
 from app.jobs.redis_store import RedisJobStore
 from app.jobs.runner import run_claimed
 from app.schemas.task import ErrorBody
@@ -994,3 +994,84 @@ async def test_oversized_dlt_preserves_offset_and_other_partition_progress(
         assert (entry.source_topic, entry.partition, entry.offset) == (topic, 0, 7)
         assert entry.payload_bytes == len(bad.value)
         assert entry.partition_paused is still_assigned
+
+
+@pytest.mark.parametrize("kind", ["process", "story"])
+@pytest.mark.parametrize("delta", [-1, 0, 1])
+def test_result_size_limit_counts_utf8_envelope_and_includes_boundary(kind, delta):
+    event = JobResultEvent(
+        type=f"{kind}_result",
+        trip_id=77,
+        execution_id="e" * 128,
+        status="FAILED",
+        error=ErrorBody(code="DOWNLOAD_FAILED", message="실패", detail={"keys": ["한😀\n"]}),
+    )
+    prefix_size = len(event.model_dump_json().encode("utf-8"))
+    event.error.detail["keys"][0] += "x" * (RESULT_MAX_BYTES + delta - prefix_size)
+    assert len(event.model_dump_json().encode("utf-8")) == RESULT_MAX_BYTES + delta
+    bounded = event.enforce_size_limit()
+    if delta <= 0:
+        assert bounded is event
+    else:
+        assert bounded.status == "FAILED" and bounded.error.code == "RESULT_TOO_LARGE"
+        assert bounded.result is None
+        assert bounded.type == event.type and bounded.execution_id == event.execution_id
+        assert bounded.error.detail == {
+            "max_bytes": 524288,
+            "actual_bytes": 524289,
+        }
+        assert len(bounded.model_dump_json().encode("utf-8")) < 1024
+
+
+@pytest.mark.parametrize(
+    "kind,status", [("process", "COMPLETED"), ("process", "FAILED"), ("story", "FAILED")]
+)
+@scenario
+async def test_oversized_result_is_failed_before_storage_and_publishes_small_event(kind, status):
+    async with environment() as (cfg, a, b, producer):
+        body = process_request() if kind == "process" else story_request()
+        await RequestReceiver(a, producer).accept(message(cfg, body))
+        job = await a.claim(kind, "worker")
+        options = (
+            {
+                "result": {
+                    "places": [],
+                    "unclassified": [],
+                    "failed": [],
+                    "clock_offsets": [
+                        {"device_model": "기" * RESULT_MAX_BYTES, "days": 0, "matched_pairs": 1}
+                    ],
+                }
+            }
+            if status == "COMPLETED"
+            else {
+                "error": ErrorBody(
+                    code="DOWNLOAD_FAILED",
+                    message="실패",
+                    detail={"keys": ["x" * RESULT_MAX_BYTES]},
+                )
+            }
+        )
+        assert await a.finish(job.identity, job.owner, status, **options)
+        saved = await b.get(job.identity)
+        assert saved.status == "FAILED" and saved.event.error.code == "RESULT_TOO_LARGE"
+        assert saved.event.error.detail["actual_bytes"] > RESULT_MAX_BYTES
+        assert saved.event.result is None
+        assert (await b.latest(77, kind)).response().status == "FAILED"
+        assert saved.identity in await b.pending()
+        assert not await a.finish(
+            job.identity, job.owner, "COMPLETED", result=options.get("result")
+        )
+        publisher = asyncio.create_task(publish_results(a, producer))
+        try:
+            async with asyncio.timeout(3):
+                while not (await b.get(job.identity)).published:
+                    await asyncio.sleep(0.01)
+            assert len(producer.sent) == 1
+            topic, payload, key, _ = producer.sent[0]
+            assert topic == saved.result_topic and key == b"77"
+            assert len(payload) <= RESULT_MAX_BYTES
+            assert json.loads(payload) == saved.event.model_dump(mode="json")
+        finally:
+            publisher.cancel()
+            await asyncio.gather(publisher, return_exceptions=True)

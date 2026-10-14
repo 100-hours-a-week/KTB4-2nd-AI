@@ -52,7 +52,7 @@ async def run(request: dict, reporter: JobReporter) -> dict:
 - 식별 가능한 잘못된 본문은 기존 BE 계약대로 `FAILED / INVALID_REQUEST` 결과로 반환합니다. 클라우드 안내의 형식 오류 DLT 범위를 이 경우까지 넓힐지는 BE와 대조할 사항입니다. 정상 접수 후 분석 실패도 결과 토픽의 FAILED로 전달합니다.
 - Kafka가 꺼져 있어도 API는 시작하며 발행자와 세 소비자가 각각 백그라운드에서 재연결합니다. 진행률 HTTP, 연결된 검색 서비스, 작업 감시와 실행은 Kafka 초기 연결을 기다리지 않습니다.
 - 결과 전송 실패 시 Redis에 결과와 발행 대기 상태를 유지합니다. 브로커 확인 뒤에만 발행 완료로 바꾸므로 재연결 후 전송만 재시도합니다. 원문 크기는 `payload_bytes`로 기록하고 크기 제한 오류는 `ai_job_result_too_large`로 알립니다. 압축이 메시지 크기 제한을 없애지는 않습니다.
-- `process_result`와 `story_result`의 용량 계획 기준은 각각 압축 전 UTF-8 JSON 전체 본문 512KiB입니다. 현재 코드가 이 상한을 강제하지는 않으며 문자열과 오류 상세의 제한 및 초과 처리 정책은 후속으로 정해야 합니다. DLT에는 BE 요청 원문에 헤더를 추가할 여유가 별도로 필요합니다.
+- `process_result`와 `story_result`는 압축 전 UTF-8 JSON 전체 본문을 512KiB(524,288바이트)까지 허용합니다. 작업 종료 상태를 저장하기 전에 검사하며 초과하면 `FAILED / RESULT_TOO_LARGE`로 대체합니다. `result`는 null이고 `error.detail`에는 `max_bytes`와 `actual_bytes`만 넣습니다. 긴 실패 상세도 같은 규칙을 적용하므로 BE는 이 오류 코드를 처리해야 합니다. DLT에는 BE 요청 원문에 헤더를 추가할 여유가 별도로 필요합니다.
 - Redis 전체 유실 시 작업과 미발행 결과가 유실될 수 있습니다. 이는 v2의 알려진 한계입니다. Redis 등록 실패는 접수 완료로 처리하지 않습니다.
 - 완료 및 무시 기록은 자동 삭제하지 않습니다. 재처리 가능 기간에 맞춘 보관 및 정리 정책과 Redis 용량을 배포 전에 확인해야 합니다. Redis는 `noeviction`을 사용합니다.
 

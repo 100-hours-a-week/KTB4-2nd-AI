@@ -218,10 +218,10 @@ class RedisJobStore:
             status=status,
             result=result,
             error=error,
-        )
-        record.status = TaskStatus(status)
+        ).enforce_size_limit()
+        record.status = TaskStatus(record.event.status)
         record.current_step = None
-        if status == "COMPLETED":
+        if record.status == TaskStatus.COMPLETED:
             record.progress.done = record.progress.total
 
     async def finish(

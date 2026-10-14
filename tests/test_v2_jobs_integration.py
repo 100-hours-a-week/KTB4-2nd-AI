@@ -15,8 +15,10 @@ from aiokafka.admin import AIOKafkaAdminClient, NewTopic
 from pydantic import SecretStr
 
 from app.core.errors import AppError
-from app.jobs.kafka import RequestReceiver, consume_requests
-from tests.test_v2_jobs import environment, process_request, scenario, story_request
+from app.jobs.kafka import RequestReceiver, consume_requests, publish_results
+from app.jobs.models import RESULT_MAX_BYTES
+from app.schemas.task import ErrorBody
+from tests.test_v2_jobs import environment, message, process_request, scenario, story_request
 
 pytestmark = pytest.mark.skipif(
     not (os.environ.get("JOBS_TEST_REDIS_URL") and os.environ.get("JOBS_TEST_KAFKA_URL")),
@@ -45,6 +47,67 @@ async def stop(process):
         except TimeoutError:
             process.kill()
             await asyncio.to_thread(process.wait)
+
+
+@pytest.mark.parametrize("kind", ["process", "story"])
+@scenario
+async def test_real_kafka_result_limit_delivers_failed_event(kind):
+    async with environment() as (cfg, store, replica, _producer):
+        address = os.environ["JOBS_TEST_KAFKA_URL"]
+        body = process_request() if kind == "process" else story_request()
+        incoming = message(cfg, body)
+        topic = cfg.topics[incoming.topic][1]
+        admin = AIOKafkaAdminClient(bootstrap_servers=address)
+        producer = AIOKafkaProducer(
+            bootstrap_servers=address,
+            compression_type="lz4",
+            acks="all",
+            enable_idempotence=True,
+        )
+        consumer = AIOKafkaConsumer(
+            topic, bootstrap_servers=address, enable_auto_commit=False, auto_offset_reset="earliest"
+        )
+        publisher = None
+        await admin.start()
+        try:
+            await admin.create_topics([NewTopic(topic, 2, 1)])
+            await producer.start()
+            await consumer.start()
+            await RequestReceiver(store, producer).accept(incoming)
+            job = await store.claim(kind, "worker")
+            await store.finish(
+                job.identity,
+                job.owner,
+                "FAILED",
+                error=ErrorBody(
+                    code="DOWNLOAD_FAILED",
+                    message="실패",
+                    detail={"keys": ["가" * RESULT_MAX_BYTES]},
+                ),
+            )
+            publisher = asyncio.create_task(publish_results(store, producer))
+            async with asyncio.timeout(15):
+                received = await consumer.getone()
+            event = json.loads(received.value)
+            assert len(received.value) <= 524288
+            assert received.key == b"77" and event["type"] == f"{kind}_result"
+            assert event["status"] == "FAILED" and event["result"] is None
+            assert event["error"]["code"] == "RESULT_TOO_LARGE"
+            assert event["error"]["detail"]["max_bytes"] == 524288
+            assert (await replica.latest(77, kind)).response().status == "FAILED"
+
+            async def published():
+                return (await replica.get(job.identity)).published
+
+            await eventually(published)
+        finally:
+            if publisher:
+                publisher.cancel()
+                await asyncio.gather(publisher, return_exceptions=True)
+            await consumer.stop()
+            await producer.stop()
+            await admin.delete_topics([topic])
+            await admin.close()
 
 
 @scenario

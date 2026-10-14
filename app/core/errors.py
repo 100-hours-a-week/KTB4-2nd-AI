@@ -23,6 +23,7 @@ class ErrorCode(StrEnum):
     WORKER_DEAD = "WORKER_DEAD"
     TIMEOUT = "TIMEOUT"
     INTERNAL_ERROR = "INTERNAL_ERROR"
+    RESULT_TOO_LARGE = "RESULT_TOO_LARGE"
     # 워커 → api 실패 콜백에서 취소를 구분하는 내부 코드, 백엔드 응답에는 status CANCELED로만 나감
     CANCELED = "CANCELED"
     # 명세에는 failed[].reason 값으로만 있음. v1은 디코딩 실패도 작업 전체 FAILED라 오류 코드로도 씀
@@ -57,6 +58,7 @@ DEFAULT_MESSAGE: dict[ErrorCode, str] = {
     ErrorCode.WORKER_DEAD: "워커 응답이 끊겼습니다.",
     ErrorCode.TIMEOUT: "처리 시간 상한을 초과했습니다.",
     ErrorCode.INTERNAL_ERROR: "내부 오류가 발생했습니다.",
+    ErrorCode.RESULT_TOO_LARGE: "작업 결과가 허용된 크기를 초과했습니다.",
     ErrorCode.CANCELED: "작업이 취소되었습니다.",
     ErrorCode.DECODE_FAILED: "이미지 디코딩에 실패했습니다.",
     ErrorCode.WORKER_BUSY: "워커가 다른 작업을 실행 중입니다.",

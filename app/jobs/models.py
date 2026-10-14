@@ -6,11 +6,13 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
+from app.core.errors import DEFAULT_MESSAGE, ErrorCode
 from app.schemas.process import Period, ProcessRequest, ProcessResult, RequestModel
 from app.schemas.task import ErrorBody, Progress, TaskStatus
 
 JobKind = Literal["process", "story"]
 TerminalStatus = Literal["COMPLETED", "FAILED", "CANCELED"]
+RESULT_MAX_BYTES = 512 * 1024
 
 
 class ProcessMessage(ProcessRequest):
@@ -106,6 +108,23 @@ class JobResultEvent(StrictModel):
             # NaN/Inf가 저장 시 null로 변해 다시 읽을 수 없는 기록을 만들지 않게 한다.
             json.dumps(self.result, ensure_ascii=False, allow_nan=False).encode("utf-8")
         return self
+
+    def enforce_size_limit(self) -> "JobResultEvent":
+        """압축 전 UTF-8 봉투 전체를 제한한다. 긴 실패 상세도 작은 실패로 대체한다."""
+        size = len(self.model_dump_json().encode("utf-8"))
+        if size <= RESULT_MAX_BYTES:
+            return self
+        return JobResultEvent(
+            type=self.type,
+            trip_id=self.trip_id,
+            execution_id=self.execution_id,
+            status="FAILED",
+            error=ErrorBody(
+                code=ErrorCode.RESULT_TOO_LARGE,
+                message=DEFAULT_MESSAGE[ErrorCode.RESULT_TOO_LARGE],
+                detail={"max_bytes": RESULT_MAX_BYTES, "actual_bytes": size},
+            ),
+        )
 
 
 class JobRecord(StrictModel):
