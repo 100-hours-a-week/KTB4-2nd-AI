@@ -51,6 +51,51 @@ def test_build_engine_fake_mode_does_not_load_real_engine(monkeypatch: pytest.Mo
     assert isinstance(bootstrap.build_engine(settings), FakeEngine)
 
 
+def test_build_engine_selects_qwen_without_loading_siglip(monkeypatch: pytest.MonkeyPatch):
+    from app.embedding.client import QwenEmbeddingEngine
+    from app.engines.siglip_naflex import SiglipNaflexEngine
+
+    def never(*args, **kwargs):
+        raise AssertionError("Qwen 모드에서 SigLIP을 적재하면 안 됨")
+
+    monkeypatch.setattr(SiglipNaflexEngine, "__init__", never)
+    settings = Settings(
+        _env_file=None,
+        API_KEY="test",
+        IMAGE_SOURCE="local",
+        FAKE_PIPELINE=False,
+        EMBED_MODEL="qwen3-vl-embedding-2b",
+        EMBEDDING_BASE_URL="http://embedding.test/v1",
+        EMBEDDING_SERVED_MODEL_NAME="qwen3-vl-embedding-2b",
+    )
+
+    engine = bootstrap.build_engine(settings)
+    try:
+        assert isinstance(engine, QwenEmbeddingEngine)
+        assert engine.model_version == settings.EMBED_MODEL
+    finally:
+        engine.close()
+
+
+def test_build_engine_rejects_unknown_model(monkeypatch: pytest.MonkeyPatch):
+    from app.engines.siglip_naflex import SiglipNaflexEngine
+
+    def never(*args, **kwargs):
+        raise AssertionError("맞는 엔진이 없으면 아무 엔진도 적재하면 안 됨")
+
+    monkeypatch.setattr(SiglipNaflexEngine, "__init__", never)
+    settings = Settings(
+        _env_file=None,
+        API_KEY="test",
+        IMAGE_SOURCE="local",
+        FAKE_PIPELINE=False,
+        EMBED_MODEL="unknown-model",
+    )
+
+    with pytest.raises(ValueError, match="unknown-model"):
+        bootstrap.build_engine(settings)
+
+
 def test_thresholds_qwen_has_same_keys_as_siglip():
     """키를 한쪽에만 추가하면 그 모델로 기동할 때 run()이 누락 오류를 냄"""
     path = Path(__file__).resolve().parents[1] / "app/pipeline/thresholds.yaml"

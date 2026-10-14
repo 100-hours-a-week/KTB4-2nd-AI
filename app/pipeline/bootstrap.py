@@ -50,15 +50,22 @@ def wait_for_qdrant(url: str, timeout: float = 60.0, interval: float = 1.0) -> N
 
 
 def build_engine(settings: Settings) -> EmbeddingEngine:
-    """FAKE_PIPELINE이면 FakeEngine, 아니면 파이프라인 담당의 엔진
+    """FAKE_PIPELINE이면 FakeEngine, 아니면 model_version이 EMBED_MODEL과 같은 엔진
 
-    진짜 엔진은 함수 안에서 import. 모듈 최상단에 두면 그 파일이 없는 동안 가짜 모드도 못 뜸
+    임계값은 EMBED_MODEL 항목에서, Qdrant 컬렉션은 엔진의 model_version에서 정하므로 둘을 맞춤
+    진짜 엔진은 함수 안에서 import, Qwen을 먼저 확인해 v2에서는 torch를 불러오지 않음
     """
     if settings.FAKE_PIPELINE:
         return FakeEngine()
-    from app.engines.siglip_naflex import SiglipNaflexEngine  # 파이프라인 담당 파일
+    from app.embedding.client import QwenEmbeddingEngine
 
-    return SiglipNaflexEngine(model_path=settings.MODEL_PATH, device=settings.EMBED_DEVICE)
+    if settings.EMBED_MODEL == QwenEmbeddingEngine.model_version:
+        return QwenEmbeddingEngine.from_settings(settings)
+    from app.engines.siglip_naflex import SiglipNaflexEngine  # v1
+
+    if settings.EMBED_MODEL == SiglipNaflexEngine.model_version:
+        return SiglipNaflexEngine(model_path=settings.MODEL_PATH, device=settings.EMBED_DEVICE)
+    raise ValueError(f"EMBED_MODEL={settings.EMBED_MODEL}에 맞는 엔진이 없음")
 
 
 def build_images(settings: Settings) -> ImageSource:
