@@ -33,8 +33,9 @@ async def parse(
                 prompts.parse_messages(request),
                 image_urls=[],
                 max_tokens=prompts.PARSE_MAX_TOKENS,
+                response_format=prompts.PARSE_RESPONSE_FORMAT,
             )
-            return prompts.parse_output(output)
+            return prompts.parse_output(output, request)
     except (VLMUnavailable, InvalidModelOutput, TimeoutError):
         return parse_fallback(request)
 

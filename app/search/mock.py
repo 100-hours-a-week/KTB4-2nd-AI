@@ -27,7 +27,6 @@ class MockVLM:
                 "date_to": None,
                 "region_names": None,
                 "visual_query": query,
-                "parsed": True,
             },
             ensure_ascii=False,
         )
