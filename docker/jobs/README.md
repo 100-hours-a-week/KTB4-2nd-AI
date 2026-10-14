@@ -33,11 +33,26 @@ async def run(request: dict, reporter: JobReporter) -> dict:
 
 기존 정리 함수 `run(request, ctx, on_progress, is_cancelled)`는 유지합니다. 위 async 함수는 서버 담당자가 연결할 어댑터이며, 정리 담당자에게 알고리즘의 시그니처 변경을 요구하지 않습니다. 기능별 입력과 결과는 `app/jobs/models.py`에 있습니다. 임베딩 HTTP 연결과 실제 스토리 파이프라인은 각각의 구현이 준비된 뒤 연결합니다. 검색은 기존 QueryService를 주입하며 Kafka와 Redis 대기열을 거치지 않습니다. 미연결 검색은 503을 반환합니다.
 
+## 업로드 묶음 수신
+
+초기 v2에서는 `photos_ready`를 받으면 사진 ID와 `analyze_storage_key`만 Redis에 보관합니다. 이미지를 다운로드하거나 임베딩하지 않으며 정리 실행 대기열에도 넣지 않습니다. 같은 여행과 실행의 묶음은 `batch_no`로 구분하고, 같은 메시지가 다시 와도 중복 저장하지 않습니다. 사진은 S3에 그대로 둡니다.
+
+BE가 모든 사진의 업로드와 분석용 사본 생성을 마친 뒤 보내는 `process`가 정리 시작 기준입니다. 200장은 여행당 상한이며, 200장이 모이는 조건으로 시작하지 않습니다. `process.attachments`의 전체 목록으로 작업을 등록하면서 임시 묶음을 삭제합니다. 묶음 알림이 누락되거나 만료되어도 진행하며, 보관된 목록에만 있는 사진은 처리하지 않습니다. 정리 알고리즘과 모델의 실제 실행은 위의 핸들러 연결이 필요합니다.
+
+- `photos_ready`는 여행 생성 또는 수정 요청 토픽에 같은 실행의 `process`와 동일한 `trip_id` key 및 `execution_id`로 보냅니다. 한 묶음은 1~16장입니다.
+- Redis 보관이 성공한 뒤 Kafka offset을 커밋합니다. `process`가 이미 등록되거나 진행 중 작업 때문에 무시된 실행의 늦은 묶음은 다시 보관하지 않습니다.
+- 같은 묶음 번호의 내용이나 같은 사진 ID의 사본 경로가 달라지면 원래 정보를 유지하고 잘못된 알림을 DLT로 격리합니다. 초기 보관은 실행당 고유 사진 200장과 묶음 200개까지 허용합니다. S3 키는 UTF-8 1024바이트까지, 실행별 임시 JSON 전체는 2MiB까지 허용합니다. 초과한 묶음도 기존 정보를 유지한 채 DLT로 격리합니다.
+- 잘못된 묶음은 검증 실패 3회 후 요청 DLT에 보냅니다. 보조 알림 자체로 `process_result`나 작업 FAILED를 만들지 않으므로 뒤에 오는 정상 `process`를 차단하지 않습니다.
+- `process` 전에는 새 정리 상태를 만들지 않습니다. 첫 실행의 GET은 404이며, 이전 실행이 있으면 기존 상태가 보입니다. BE는 `execution_id`를 비교하고 최종 요청 접수 후의 상태를 확인해야 합니다. 업로드 중 취소는 BE에서 업로드와 최종 `process` 발행을 중단하는 범위이며 AI DELETE는 등록된 정리 작업에 적용합니다.
+- 최종 요청이 오지 않은 임시 묶음은 기본 7일 후 만료합니다. `JOBS_PHOTOS_READY_TTL_SEC`로 조정하며 새 묶음을 저장할 때만 갱신합니다. 작업 상태와 미발행 결과의 보관 규칙은 바뀌지 않습니다.
+
+묶음을 받는 즉시 임베딩하고 최종 정리에서 벡터를 재사용하는 기능은 후속 개선입니다. 현재 구현은 초기 수신과 대기만 제공합니다.
+
 ## 통신과 실패 처리
 
 - 요청과 결과 토픽은 클라우드가 전달하는 환경변수 6개를 그대로 사용합니다. `JOBS_ENV`는 Redis 키 공간만 구분합니다. `.env.example`의 `local` 값은 로컬 검증용이며 스테이징과 운영에서는 환경별 값을 주입합니다.
 - API마다 요청 종류별 소비자를 하나씩 실행합니다. 여행 생성은 `yeodam-ai-trip-create`, 사진 추가는 `yeodam-ai-trip-update`, 스토리는 `yeodam-ai-story-create` 그룹을 사용합니다. 두 API는 해당 그룹 이름과 Redis를 공유합니다. 환경마다 브로커가 분리되므로 그룹에 환경명을 붙이지 않습니다.
-- 요청 key는 UTF-8로 인코딩한 문자열 trip_id이며 value는 UTF-8 JSON입니다. JSON 검증과 Redis 등록 및 대기열 추가가 성공한 뒤에만 해당 partition의 offset을 커밋합니다. 자동 커밋을 끄고 `auto_offset_reset="earliest"`와 기본 poll 제한 5분을 사용합니다.
+- 요청 key는 UTF-8로 인코딩한 문자열 trip_id이며 value는 UTF-8 JSON입니다. process와 story는 Redis 작업 등록 및 대기열 추가 후, photos_ready는 임시 묶음 보관 후 해당 partition의 offset을 커밋합니다. 자동 커밋을 끄고 `auto_offset_reset="earliest"`와 기본 poll 제한 5분을 사용합니다.
 - 각 소비 루프는 받은 순서대로 등록과 커밋을 마치며 모델을 호출하지 않습니다. Redis ZSET에는 시각 대신 원자적으로 증가하는 등록 순번을 넣습니다. 서로 다른 토픽의 생성과 수정 순서는 이 방식만으로 보장되지 않습니다.
 - GET은 상태와 진행률만 반환합니다. 완료, 실패, 취소의 최종 결과는 수신 요청 토픽에 대응하는 Kafka 결과 토픽으로 전달합니다.
 - DELETE는 대기 작업을 즉시 취소합니다. 실행 중에는 취소 요청을 기록합니다. DELETE는 기존 명세대로 CANCELED를 응답하지만, GET은 실제 중단 전까지 PROCESSING을 유지하고 다음 경계에서 멈춘 뒤 Kafka CANCELED 결과를 발행합니다.
@@ -49,7 +64,7 @@ async def run(request: dict, reporter: JobReporter) -> dict:
 - JSON 해석 불가, 식별자 누락, key 또는 작업 종류 불일치는 동일 메시지 검증이 3번 실패한 뒤 `요청 토픽-dlt`에 보냅니다. 원본 key와 본문을 보존하며 헤더에는 `original-topic`, `original-partition`, `original-offset`, `ai-error`(사유), `failure`(예외 종류), `attempts`를 넣습니다. 원본 key가 없는 경우 임의의 trip_id를 만들지 않고 null을 유지합니다.
 - DLT 발행 성공 뒤에만 원래 offset을 커밋하고 `kafka_dlt_published` JSON 로그를 남깁니다. 검증 실패 횟수는 원본 topic/partition/offset별로 Redis에 공유하며 30일 동안 보관합니다. Redis 또는 Kafka의 연결 실패는 DLT 격리 사유로 세지 않습니다.
 - DLT 크기 제한을 넘으면 `ai_kafka_dlt_too_large`에 원본 위치와 크기를 기록합니다. 해당 파티션의 읽기 위치를 원본 offset으로 되돌리고 일시 중지하며, 다른 파티션은 계속 처리합니다. 원본 offset은 커밋하지 않습니다. 요청 최대 크기에 DLT 헤더가 추가되는 공간까지 발행자와 브로커의 제한에 확보한 뒤 소비자를 재시작해야 합니다. 이 오류 로그는 DLT 발행 성공 로그와 다르므로 별도 알림 수집이 필요합니다.
-- 식별 가능한 잘못된 본문은 기존 BE 계약대로 `FAILED / INVALID_REQUEST` 결과로 반환합니다. 클라우드 안내의 형식 오류 DLT 범위를 이 경우까지 넓힐지는 BE와 대조할 사항입니다. 정상 접수 후 분석 실패도 결과 토픽의 FAILED로 전달합니다.
+- process와 story의 식별 가능한 잘못된 본문은 기존 BE 계약대로 `FAILED / INVALID_REQUEST` 결과로 반환합니다. 클라우드 안내의 형식 오류 DLT 범위를 이 경우까지 넓힐지는 BE와 대조할 사항입니다. photos_ready의 잘못된 본문은 위 규칙에 따라 DLT로 보냅니다. 정상 접수 후 분석 실패도 결과 토픽의 FAILED로 전달합니다.
 - Kafka가 꺼져 있어도 API는 시작하며 발행자와 세 소비자가 각각 백그라운드에서 재연결합니다. 진행률 HTTP, 연결된 검색 서비스, 작업 감시와 실행은 Kafka 초기 연결을 기다리지 않습니다.
 - 결과 전송 실패 시 Redis에 결과와 발행 대기 상태를 유지합니다. 브로커 확인 뒤에만 발행 완료로 바꾸므로 재연결 후 전송만 재시도합니다. 원문 크기는 `payload_bytes`로 기록하고 크기 제한 오류는 `ai_job_result_too_large`로 알립니다. 압축이 메시지 크기 제한을 없애지는 않습니다.
 - `process_result`와 `story_result`는 압축 전 UTF-8 JSON 전체 본문을 512KiB(524,288바이트)까지 허용합니다. 작업 종료 상태를 저장하기 전에 검사하며 초과하면 `FAILED / RESULT_TOO_LARGE`로 대체합니다. `result`는 null이고 `error.detail`에는 `max_bytes`와 `actual_bytes`만 넣습니다. 긴 실패 상세도 같은 규칙을 적용하므로 BE는 이 오류 코드를 처리해야 합니다. DLT에는 BE 요청 원문에 헤더를 추가할 여유가 별도로 필요합니다.
@@ -69,8 +84,8 @@ python -c "from aiokafka.codec import has_lz4; assert has_lz4()"
 ## 검증
 
 ```sh
-uv run pytest tests/test_v2_jobs.py
-JOBS_TEST_REDIS_URL=redis://127.0.0.1:6379/0 uv run pytest tests/test_v2_jobs.py
+uv run pytest tests/test_v2_jobs.py tests/test_photos_ready.py
+JOBS_TEST_REDIS_URL=redis://127.0.0.1:6379/0 uv run pytest tests/test_v2_jobs.py tests/test_photos_ready.py
 JOBS_TEST_REDIS_URL=redis://127.0.0.1:6379/0 JOBS_TEST_KAFKA_URL=localhost:9092 uv run pytest tests/test_v2_jobs_integration.py
 ```
 

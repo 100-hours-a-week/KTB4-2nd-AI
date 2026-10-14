@@ -24,6 +24,8 @@ class JobsSettings(Settings):
     JOBS_TIMEOUT_SEC: float = Field(default=300, gt=0)
     JOBS_PUBLISH_LEASE_SEC: float = Field(default=60, gt=0)
     JOBS_POLL_SEC: float = Field(default=0.5, gt=0)
+    # 실행 전의 선택적 묶음 정보만 만료한다. 최종 process는 전체 목록을 제공한다.
+    JOBS_PHOTOS_READY_TTL_SEC: int = Field(default=7 * 86400, gt=0)
     JOBS_FAKE_PIPELINE: bool = False
     # async def handler(request: dict, reporter: JobReporter) -> dict
     JOBS_PROCESS_HANDLER: str | None = None

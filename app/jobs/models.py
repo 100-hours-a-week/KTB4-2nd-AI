@@ -4,7 +4,15 @@ import hashlib
 import json
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 
 from app.core.errors import DEFAULT_MESSAGE, ErrorCode
 from app.schemas.process import Period, ProcessRequest, ProcessResult, RequestModel
@@ -13,6 +21,38 @@ from app.schemas.task import ErrorBody, Progress, TaskStatus
 JobKind = Literal["process", "story"]
 TerminalStatus = Literal["COMPLETED", "FAILED", "CANCELED"]
 RESULT_MAX_BYTES = 512 * 1024
+PHOTOS_READY_MAX_BYTES = 2 * 1024 * 1024
+
+
+class ReadyAttachment(RequestModel):
+    trip_attachment_id: int = Field(gt=0)
+    analyze_storage_key: str = Field(min_length=1, max_length=1024)
+
+    @field_validator("analyze_storage_key")
+    @classmethod
+    def valid_s3_key(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 1024:
+            raise ValueError("S3 사본 키는 UTF-8 1024바이트 이하여야 함")
+        return value
+
+
+class PhotosReadyMessage(RequestModel):
+    type: Literal["photos_ready"]
+    trip_id: int = Field(gt=0)
+    execution_id: str = Field(min_length=1, max_length=128)
+    batch_no: int = Field(gt=0)
+    attachments: list[ReadyAttachment] = Field(min_length=1, max_length=16)
+
+    @model_validator(mode="after")
+    def unique_photos(self) -> Self:
+        ids = [photo.trip_attachment_id for photo in self.attachments]
+        if len(set(ids)) != len(ids):
+            raise ValueError("같은 묶음에 사진 ID를 중복할 수 없음")
+        return self
+
+    @property
+    def identity(self) -> str:
+        return identity(self.trip_id, "process", self.execution_id)
 
 
 class ProcessMessage(ProcessRequest):
@@ -57,6 +97,11 @@ MESSAGE = TypeAdapter(JobMessage)
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+
+class PhotoBatchBuffer(StrictModel):
+    request_topic: str
+    batches: dict[str, list[ReadyAttachment]] = Field(default_factory=dict)
 
 
 class StoryBlock(StrictModel):

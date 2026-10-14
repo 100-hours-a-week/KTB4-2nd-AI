@@ -15,9 +15,12 @@ from aiokafka.admin import AIOKafkaAdminClient, NewTopic
 from pydantic import SecretStr
 
 from app.core.errors import AppError
+from app.jobs.execution import execute
 from app.jobs.kafka import RequestReceiver, consume_requests, publish_results
+from app.jobs.mock import run as mock_run
 from app.jobs.models import RESULT_MAX_BYTES
 from app.schemas.task import ErrorBody
+from tests.test_photos_ready import buffer_key, ready_request
 from tests.test_v2_jobs import environment, message, process_request, scenario, story_request
 
 pytestmark = pytest.mark.skipif(
@@ -47,6 +50,124 @@ async def stop(process):
         except TimeoutError:
             process.kill()
             await asyncio.to_thread(process.wait)
+
+
+@pytest.mark.parametrize("work", ["trip-create", "trip-update"])
+@scenario
+async def test_real_kafka_stages_batches_then_process_runs_after_consumer_restart(work):
+    async with environment() as (cfg, store, replica, _producer):
+        address = os.environ["JOBS_TEST_KAFKA_URL"]
+        batch = ready_request(ids=(101, 102))
+        incoming = message(cfg, batch, work)
+        topic = incoming.topic
+        result_topic = cfg.topics[topic][1]
+        topics = [topic, topic + "-dlt", result_topic]
+        admin = AIOKafkaAdminClient(bootstrap_servers=address)
+        producer = AIOKafkaProducer(
+            bootstrap_servers=address, compression_type="lz4", acks="all", enable_idempotence=True
+        )
+        readers = [
+            AIOKafkaConsumer(
+                topic,
+                bootstrap_servers=address,
+                group_id=cfg.JOBS_ENV + "-photos",
+                enable_auto_commit=False,
+                auto_offset_reset="earliest",
+            )
+            for _ in range(2)
+        ]
+        results = AIOKafkaConsumer(
+            result_topic,
+            bootstrap_servers=address,
+            enable_auto_commit=False,
+            auto_offset_reset="earliest",
+        )
+        consumer_task = publisher = None
+        await admin.start()
+        try:
+            await admin.create_topics([NewTopic(name, 2, 1) for name in topics])
+            await producer.start()
+            await results.start()
+            await readers[0].start()
+            consumer_task = asyncio.create_task(
+                consume_requests(readers[0], RequestReceiver(store, producer))
+            )
+            first = await producer.send_and_wait(topic, incoming.value, key=b"77")
+            partition = TopicPartition(topic, first.partition)
+
+            async def first_committed():
+                return await readers[0].committed(partition) == first.offset + 1
+
+            await eventually(first_committed)
+            saved = await replica.redis.get(buffer_key(replica, batch))
+            assert saved is not None and await replica.claim("process", "runner") is None
+            assert await results.getmany(timeout_ms=200) == {}
+            consumer_task.cancel()
+            await asyncio.gather(consumer_task, return_exceptions=True)
+            await readers[0].stop()
+
+            # 다른 API 복제본으로 소비가 옮겨져도 Redis 묶음을 재사용한다.
+            await readers[1].start()
+            consumer_task = asyncio.create_task(
+                consume_requests(readers[1], RequestReceiver(replica, producer))
+            )
+            duplicate = await producer.send_and_wait(topic, incoming.value, key=b"77")
+
+            async def duplicate_committed():
+                return await readers[1].committed(partition) == duplicate.offset + 1
+
+            await eventually(duplicate_committed)
+            assert await store.redis.get(buffer_key(store, batch)) == saved
+            assert await store.claim("process", "runner") is None
+
+            final = process_request()
+            final["trigger"] = "PHOTOS_ADDED" if work == "trip-update" else "TRIP_CREATED"
+            # 103의 photos_ready가 없어도 최종 목록의 세 장을 처리한다.
+            final["attachments"] = ready_request(ids=(101, 102, 103))["attachments"]
+            await producer.send_and_wait(topic, json.dumps(final).encode(), key=b"77")
+
+            async def accepted():
+                try:
+                    return await store.latest(77, "process")
+                except AppError:
+                    return None
+
+            await eventually(accepted)
+            assert not await store.redis.exists(buffer_key(store, batch))
+            job = await store.claim("process", "runner")
+            assert job.progress.total == 3
+            await execute(store, job.identity, job.owner, mock_run)
+            publisher = asyncio.create_task(publish_results(replica, producer))
+            async with asyncio.timeout(15):
+                result = await results.getone()
+            event = json.loads(result.value)
+            assert result.key == b"77" and event["type"] == "process_result"
+            assert event["status"] == "COMPLETED"
+            assert [p["trip_attachment_id"] for p in event["result"]["unclassified"]] == [
+                101,
+                102,
+                103,
+            ]
+            late = await producer.send_and_wait(topic, incoming.value, key=b"77")
+
+            async def late_committed():
+                return await readers[1].committed(partition) == late.offset + 1
+
+            await eventually(late_committed)
+            assert not await store.redis.exists(buffer_key(store, batch))
+            assert await store.claim("process", "runner") is None
+            assert (await replica.latest(77, "process")).status == "COMPLETED"
+        finally:
+            tasks = [task for task in (consumer_task, publisher) if task]
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            for reader in readers:
+                await reader.stop()
+            await results.stop()
+            await producer.stop()
+            await admin.delete_topics(topics)
+            await admin.close()
 
 
 @pytest.mark.parametrize("kind", ["process", "story"])

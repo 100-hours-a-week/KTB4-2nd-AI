@@ -12,7 +12,15 @@ from redis.exceptions import WatchError
 
 from app.core.errors import AppError, ErrorCode
 from app.jobs.config import JobsSettings
-from app.jobs.models import JobKind, JobRecord, JobResultEvent, TerminalStatus
+from app.jobs.models import (
+    PHOTOS_READY_MAX_BYTES,
+    JobKind,
+    JobRecord,
+    JobResultEvent,
+    PhotoBatchBuffer,
+    PhotosReadyMessage,
+    TerminalStatus,
+)
 from app.schemas.task import TERMINAL_STATUSES, ErrorBody, Progress, TaskStatus
 
 
@@ -27,6 +35,61 @@ class RedisJobStore:
 
     def record_key(self, identity: str) -> str:
         return self.key("job:" + identity)
+
+    def photo_batches_key(self, identity: str) -> str:
+        return self.key("photo_batches:" + identity)
+
+    async def stage_photos(
+        self, message: PhotosReadyMessage, request_topic: str
+    ) -> Literal["staged", "duplicate", "closed"]:
+        """사본 경로만 공유 보관한다. process 전에는 실행 대기열과 상태를 만들지 않는다."""
+        key = self.photo_batches_key(message.identity)
+        job = self.record_key(message.identity)
+        ignored = self.key("ignored:" + message.identity)
+        batch_no = str(message.batch_no)
+        photos = sorted(message.attachments, key=lambda photo: photo.trip_attachment_id)
+        while True:
+            async with self.redis.pipeline(transaction=True) as pipe:
+                try:
+                    # process 등록과 경합해도 닫힌 실행의 임시 자료를 되살리지 않는다.
+                    await pipe.watch(key, job, ignored)
+                    if await pipe.exists(job, ignored):
+                        return "closed"
+                    raw = await pipe.get(key)
+                    buffer = (
+                        PhotoBatchBuffer.model_validate_json(raw)
+                        if raw
+                        else PhotoBatchBuffer(request_topic=request_topic)
+                    )
+                    if buffer.request_topic != request_topic:
+                        raise ValueError("같은 실행의 묶음은 같은 요청 토픽을 사용해야 함")
+                    previous = buffer.batches.get(batch_no)
+                    if previous is not None:
+                        if previous != photos:
+                            raise ValueError("같은 묶음 번호의 사진 목록 또는 경로가 변경됨")
+                        return "duplicate"
+                    known = {
+                        photo.trip_attachment_id: photo.analyze_storage_key
+                        for batch in buffer.batches.values()
+                        for photo in batch
+                    }
+                    for photo in photos:
+                        old_key = known.get(photo.trip_attachment_id)
+                        if old_key is not None and old_key != photo.analyze_storage_key:
+                            raise ValueError("같은 실행의 사진 사본 경로가 변경됨")
+                        known[photo.trip_attachment_id] = photo.analyze_storage_key
+                    if len(known) > 200 or len(buffer.batches) >= 200:
+                        raise ValueError("실행당 사진 또는 묶음 보관 상한 200개 초과")
+                    buffer.batches[batch_no] = photos
+                    payload = buffer.model_dump_json()
+                    if len(payload.encode("utf-8")) > PHOTOS_READY_MAX_BYTES:
+                        raise ValueError("실행당 사진 묶음 보관 크기 상한 2MiB 초과")
+                    pipe.multi()
+                    pipe.set(key, payload, ex=self.cfg.JOBS_PHOTOS_READY_TTL_SEC)
+                    await pipe.execute()
+                    return "staged"
+                except WatchError:
+                    continue
 
     async def now(self) -> float:
         seconds, micros = await self.redis.time()
@@ -48,6 +111,7 @@ class RedisJobStore:
         ignored = self.key("ignored:" + record.identity)
         latest = self.key(f"latest:{record.kind}:{record.trip_id}")
         sequence = self.key("enqueue_sequence")
+        photo_batches = self.photo_batches_key(record.identity)
         while True:
             async with self.redis.pipeline(transaction=True) as pipe:
                 try:
@@ -65,6 +129,7 @@ class RedisJobStore:
                         # 무시한 실행도 기록한다. Kafka 재전달 때 뒤늦게 실행하지 않는다.
                         pipe.multi()
                         pipe.set(ignored, "1")
+                        pipe.delete(photo_batches)
                         await pipe.execute()
                         return "busy"
                     record.created_at = await self.now()
@@ -74,6 +139,8 @@ class RedisJobStore:
                     pipe.set(sequence, order)
                     pipe.set(key, record.model_dump_json())
                     pipe.set(latest, record.identity)
+                    # 최종 process가 전체 목록의 기준이다. 묶음의 누락과 만료를 기다리지 않는다.
+                    pipe.delete(photo_batches)
                     destination = "pending" if record.event else f"queue:{record.kind}"
                     score = record.created_at if record.event else order
                     pipe.zadd(self.key(destination), {record.identity: score})
