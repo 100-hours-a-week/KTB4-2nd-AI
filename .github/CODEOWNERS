@@ -8,6 +8,8 @@
 /app/story/ @kksoo1769
 /app/worker/ @kksoo1769
 /app/main.py @kksoo1769
+/app/v2_main.py @kksoo1769
+/docker/jobs/ @kksoo1769
 /app/worker_main.py @kksoo1769
 /app/search_dev.py @kksoo1769
 /app/infra/vlm.py @kksoo1769 @wooseok-98
@@ -34,3 +36,6 @@
 /app/pipeline/run.py @kksoo1769 @wooseok-98
 /app/jobs/worker_client.py @kksoo1769 @wooseok-98
 /app/worker/callback.py @kksoo1769 @wooseok-98
+
+/app/jobs/models.py @kksoo1769 @wooseok-98
+/app/jobs/execution.py @kksoo1769 @wooseok-98

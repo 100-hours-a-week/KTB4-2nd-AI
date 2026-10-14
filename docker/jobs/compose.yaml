@@ -1,0 +1,64 @@
+# 로컬 mock 검증 전용. AWS 네트워크와 Kafka 배포 구성은 클라우드 작업 정의를 사용한다.
+x-app: &app
+  image: yeodam-ai-jobs:local
+  build:
+    context: ../..
+    dockerfile: docker/jobs/Dockerfile
+  env_file: .env
+  init: true
+  stop_grace_period: 20s
+  depends_on:
+    redis:
+      condition: service_healthy
+    topic-init:
+      condition: service_completed_successfully
+services:
+  api:
+    <<: *app
+    deploy:
+      replicas: 2
+    ports:
+      - "127.0.0.1::8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+  process-runner:
+    <<: *app
+    command: ["python", "-m", "app.jobs.runner"]
+    cpus: 2.0
+  redis:
+    image: redis:7.4.2
+    command: ["redis-server", "--maxmemory-policy", "noeviction"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+  topic-init:
+    image: apache/kafka:3.9.1
+    entrypoint: ["/bin/sh", "/init-topics.sh"]
+    volumes:
+      - ./init-topics.sh:/init-topics.sh:ro
+    depends_on:
+      kafka:
+        condition: service_healthy
+  kafka:
+    image: apache/kafka:3.9.1
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
