@@ -4,7 +4,6 @@ from abc import ABC, abstractmethod
 from typing import Protocol
 
 import numpy as np
-from PIL import Image
 
 
 class EmbeddingEngine(ABC):
@@ -14,9 +13,11 @@ class EmbeddingEngine(ABC):
     dim: int  # 벡터 차원, 컬렉션 생성 시 size
 
     @abstractmethod
-    def encode_images(self, images: list[Image.Image]) -> np.ndarray:
-        """디코딩된 PIL 이미지 목록 → (N, dim) float32, 행마다 L2 정규화
+    def encode_images(self, images: list[bytes]) -> np.ndarray:
+        """S3에서 받은 JPEG 사본 bytes 목록 → (N, dim) float32, 행마다 L2 정규화
 
+        디코딩 전 bytes를 그대로 받아 HTTP 엔진의 재인코딩을 없앰
+        디코딩이 필요한 구현은 내부에서 처리
         배치 크기와 스레드 수는 구현이 정함. 빈 목록이면 (0, dim)
         """
 

@@ -15,6 +15,7 @@
 """
 
 import argparse
+import io
 import os
 import sys
 import time
@@ -42,9 +43,10 @@ def check_model(model_path: str) -> None:
     engine = build_engine(settings)
     print(f"적재 {time.perf_counter() - started:.1f}s, {type(engine).__name__}")
 
-    image = Image.new("RGB", (1024, 768), (120, 160, 200))
+    buffer = io.BytesIO()
+    Image.new("RGB", (1024, 768), (120, 160, 200)).save(buffer, "JPEG")
     started = time.perf_counter()
-    vector = engine.encode_images([image])
+    vector = engine.encode_images([buffer.getvalue()])
     if vector.shape != (1, DIM):
         raise RuntimeError(f"벡터 모양 {vector.shape}, 기대 (1, {DIM})")
     if vector.dtype != np.float32:

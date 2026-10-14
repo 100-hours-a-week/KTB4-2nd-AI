@@ -7,7 +7,6 @@ tests가 아니라 app에 있는 이유는 .dockerignore가 tests를 제외해 �
 import hashlib
 
 import numpy as np
-from PIL import Image
 
 from app.engines.base import EmbeddingEngine
 
@@ -16,7 +15,7 @@ DIM = 1152
 
 
 class FakeEngine(EmbeddingEngine):
-    """이미지를 8×8로 줄인 바이트를 시드로 정규분포 벡터를 만들어 L2 정규화
+    """사본 bytes의 해시를 시드로 정규분포 벡터를 만들어 L2 정규화
 
     model_version이 "fake"라 컬렉션이 vectors_fake로 분리되어 진짜 벡터와 섞이지 않음
     """
@@ -24,15 +23,14 @@ class FakeEngine(EmbeddingEngine):
     model_version = "fake"
     dim = DIM
 
-    def encode_images(self, images: list[Image.Image]) -> np.ndarray:
+    def encode_images(self, images: list[bytes]) -> np.ndarray:
         if not images:
             return np.zeros((0, self.dim), dtype=np.float32)
         vectors = np.stack([self._one(image) for image in images])
         return vectors.astype(np.float32)
 
-    def _one(self, image: Image.Image) -> np.ndarray:
-        thumb = image.convert("RGB").resize((8, 8))
-        digest = hashlib.blake2b(thumb.tobytes(), digest_size=8).digest()
+    def _one(self, image: bytes) -> np.ndarray:
+        digest = hashlib.blake2b(image, digest_size=8).digest()
         seed = int.from_bytes(digest, "big")
         vector = np.random.default_rng(seed).standard_normal(self.dim)
         return vector / np.linalg.norm(vector)
