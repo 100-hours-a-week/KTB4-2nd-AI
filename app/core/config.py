@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     VLM_CONNECT_TIMEOUT_SEC: float = Field(default=5.0, gt=0, allow_inf_nan=False)
     VLM_TIMEOUT_SEC: float = Field(default=60.0, gt=0, allow_inf_nan=False)
 
+    # v2 임베딩 vLLM. 서빙 이름과 키는 docker/embedding의 값과 같음, 미설정이면 v1 기동에 영향 없음
+    EMBEDDING_BASE_URL: str | None = None
+    EMBEDDING_SERVED_MODEL_NAME: str | None = None
+    EMBEDDING_API_KEY: SecretStr | None = None
+    EMBEDDING_CONNECT_TIMEOUT_SEC: float = Field(default=5.0, gt=0, allow_inf_nan=False)
+    EMBEDDING_TIMEOUT_SEC: float = Field(default=30.0, gt=0, allow_inf_nan=False)
+
     # 인증, 기본값 없음, 비어 있으면 기동 실패
     API_KEY: str
 
