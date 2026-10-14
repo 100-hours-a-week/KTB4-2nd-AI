@@ -14,7 +14,8 @@ from app.api.services.query_service import QueryService
 from app.core.config import Settings
 from app.infra.vlm import VLMUnavailable
 from app.main import create_app
-from app.schemas.query import ParseResponse, SearchHit, SearchResponse
+from app.schemas.query import ParseRequest, ParseResponse, SearchHit, SearchResponse
+from app.search import prompts
 from app.search.context import InvalidModelOutput, ModelUnavailable, SearchOptions
 from app.search.mock import MockEmbedder, MockImages, MockVLM, create_mock_context
 
@@ -118,10 +119,7 @@ async def test_mock_parse_search_question_without_network(monkeypatch):
 async def test_mock_chat_accepts_optional_response_format_without_changing_output(image_urls):
     vlm = MockVLM()
     messages = [{"role": "user", "content": json.dumps({"query": "바다 사진?"})}]
-    response_format = {
-        "type": "json_schema",
-        "json_schema": {"name": "query_parse", "schema": ParseResponse.model_json_schema()},
-    }
+    response_format = deepcopy(prompts.PARSE_RESPONSE_FORMAT)
     original_format = deepcopy(response_format)
 
     original = await vlm.chat(messages, image_urls, max_tokens=512)
@@ -135,7 +133,7 @@ async def test_mock_chat_accepts_optional_response_format_without_changing_outpu
     if image_urls:
         assert original.startswith("[MOCK]")
     else:
-        assert ParseResponse.model_validate_json(original).parsed is True
+        assert prompts.ParseOutput.model_validate_json(original).visual_query == "바다 사진?"
 
 
 async def test_unconfigured_server_does_not_use_mock():
@@ -397,7 +395,15 @@ def test_response_extra_fields_remain_forbidden(model, payload):
                 "region_names": None,
                 "visual_query": None,
                 "parsed": True,
-                "extra": 1,
+            }
+        ),
+        json.dumps(
+            {
+                "intent": "SEARCH",
+                "date_from": "2026/09/01",
+                "date_to": None,
+                "region_names": None,
+                "visual_query": None,
             }
         ),
     ],
@@ -415,6 +421,64 @@ async def test_invalid_vlm_text_uses_parse_fallback(output):
         assert response.status_code == 200
         assert response.json()["parsed"] is False
         assert response.json()["visual_query"] == "지난달 바다"
+
+
+PARSE_REQUEST = ParseRequest(query="지난달 속초 바다", reference_date="2026-10-11")
+
+
+def model_output(**updates):
+    output = {
+        "intent": "SEARCH",
+        "date_from": None,
+        "date_to": None,
+        "region_names": None,
+        "visual_query": "바다",
+    }
+    return json.dumps(output | updates, ensure_ascii=False)
+
+
+def test_response_format_matches_output_model_without_parsed():
+    schema = prompts.PARSE_RESPONSE_FORMAT["json_schema"]["schema"]
+    fields = set(prompts.ParseOutput.model_fields)
+    assert set(schema["required"]) == set(schema["properties"]) == fields
+    assert "parsed" not in fields
+
+
+def test_parse_output_normalizes_empty_values_and_sets_parsed():
+    result = prompts.parse_output(
+        model_output(region_names=[" 속초 ", "", "속초", "강릉"], visual_query="  "),
+        PARSE_REQUEST,
+    )
+    assert result.region_names == ["속초", "강릉"]
+    assert result.visual_query is None
+    assert result.parsed is True
+    empty = prompts.parse_output(model_output(region_names=[" "]), PARSE_REQUEST)
+    assert empty.region_names is None
+
+
+@pytest.mark.parametrize(
+    "date_from,date_to,expected",
+    [
+        ("2025-09-01", "2025-11-30", ("2025-09-01", "2025-11-30")),
+        (None, "2026-09-30", (None, "2026-09-30")),
+        # 오늘 뒤의 상한은 오늘로
+        ("2026-10-01", "2026-10-31", ("2026-10-01", "2026-10-11")),
+        # 자른 뒤에도 역순, 상한 없는 미래 시작, 역순, 달력에 없는 날짜
+        ("2026-12-01", "2027-02-28", (None, None)),
+        ("2026-10-20", None, (None, None)),
+        ("2026-09-30", "2026-09-01", (None, None)),
+        ("2025-12-01", "2026-02-29", (None, None)),
+    ],
+)
+def test_parse_output_clears_only_invalid_dates(date_from, date_to, expected):
+    result = prompts.parse_output(
+        model_output(date_from=date_from, date_to=date_to, region_names=["속초"]),
+        PARSE_REQUEST,
+    )
+    dumped = result.model_dump(mode="json")
+    assert (dumped["date_from"], dumped["date_to"]) == expected
+    assert dumped["region_names"] == ["속초"] and dumped["visual_query"] == "바다"
+    assert dumped["parsed"] is True
 
 
 async def test_vlm_implementation_bug_is_not_treated_as_invalid_model_text():
@@ -456,7 +520,7 @@ async def test_shared_chat_receives_search_prompts_and_only_selected_images():
         )
         assert response.status_code == 200
         messages, urls, budget, response_format = calls[0]
-        assert response_format is None
+        assert response_format == prompts.PARSE_RESPONSE_FORMAT
         assert urls == [] and budget > 0
         assert [item["role"] for item in messages] == ["system", "user"]
         assert json.loads(messages[-1]["content"])["reference_date"] == "2026-10-11"
