@@ -168,10 +168,12 @@ def test_decode_failed_collects_ids(ctx: PipelineContext, tmp_path: Path):
 # ---------- 엔진 ----------
 
 
-def test_fake_engine_deterministic_and_normalized():
+def test_fake_engine_deterministic_and_normalized(tmp_path: Path):
     engine = FakeEngine()
-    red = Image.new("RGB", (64, 48), (200, 30, 30))
-    blue = Image.new("RGB", (64, 48), (30, 30, 200))
+    write_jpeg(tmp_path / "red.jpg", (200, 30, 30))
+    write_jpeg(tmp_path / "blue.jpg", (30, 30, 200))
+    red = (tmp_path / "red.jpg").read_bytes()
+    blue = (tmp_path / "blue.jpg").read_bytes()
 
     first = engine.encode_images([red, blue])
     second = engine.encode_images([red, blue])

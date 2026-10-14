@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
+import app.pipeline.run as pipeline_run
 from app.core.config import Settings
 from app.core.errors import DecodeFailed, DownloadFailed, PipelineCancelled, PipelineError
 from app.pipeline.bootstrap import build_context, select_run
@@ -74,7 +75,22 @@ def setup(tmp_path):
     return build
 
 
-def test_real_stages_results_storage_and_progress(setup, tmp_path):
+@pytest.fixture
+def decoded(monkeypatch):
+    """run()이 디코딩한 이미지. 엔진은 bytes를 받으므로 이미지 해제는 여기서 확인"""
+    images = []
+    load = pipeline_run.load_images
+
+    def capture(attachments, source):
+        raw, result = load(attachments, source)
+        images.extend(result.values())
+        return raw, result
+
+    monkeypatch.setattr(pipeline_run, "load_images", capture)
+    return images
+
+
+def test_real_stages_results_storage_and_progress(setup, tmp_path, decoded):
     request, ctx, engine = setup(6)
     ids = [50, 10, 70, 20, 90, 30]
     for attachment, photo_id in zip(request.attachments, ids, strict=True):
@@ -111,8 +127,11 @@ def test_real_stages_results_storage_and_progress(setup, tmp_path):
         done = [d for s, d, _ in progress if s is step]
         assert done[0] == 0 and done[-1] == 6 and done == sorted(done)
     assert all(total == 6 for _, _, total in progress)
+    # 엔진은 다운로드한 사본 bytes를 재인코딩 없이 사진 순서대로 받는다.
+    assert engine.images == [(tmp_path / f"{i}.png").read_bytes() for i in range(6)]
+    assert len(decoded) == 6
     with pytest.raises(ValueError):
-        engine.images[0].getpixel((0, 0))  # 성공 후에도 디코딩 자원을 닫는다.
+        decoded[0].getpixel((0, 0))  # 성공 후에도 디코딩 자원을 닫는다.
 
 
 def test_clock_correction_precedes_period_check_and_gps_inheritance(setup):
@@ -232,7 +251,7 @@ def test_invalid_engine_output_fails_before_storage(setup, monkeypatch, kind):
 @pytest.mark.parametrize(
     "kind", ["duplicate_ids", "period", "thresholds", "qdrant", "callback", "all_blurry"]
 )
-def test_internal_failures(setup, monkeypatch, tmp_path, kind):
+def test_internal_failures(setup, monkeypatch, tmp_path, decoded, kind):
     request, ctx, engine = setup()
 
     def callback(*args):
@@ -256,7 +275,7 @@ def test_internal_failures(setup, monkeypatch, tmp_path, kind):
             Image.new("RGB", (32, 32), "gray").save(tmp_path / f"{i}.png")
     with pytest.raises(PipelineError):
         run(request, ctx, callback, lambda: False)
-    for image in engine.images:
+    for image in decoded:
         with pytest.raises(ValueError):
             image.getpixel((0, 0))
 

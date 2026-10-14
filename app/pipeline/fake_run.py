@@ -55,12 +55,12 @@ def fake_run(
         blobs.update(ctx.images.get_many([a.analyze_storage_key for a in chunk]))
         on_progress(ProcessStep.DOWNLOADING, min(start + BATCH, total), total)
 
-    # EMBEDDING, 배치마다 디코딩 → 엔진 → upsert → 버림
+    # EMBEDDING, 배치마다 디코딩 확인 → 엔진에 bytes → upsert → 버림
     for start in range(0, total, BATCH):
         check_cancel()
         chunk = attachments[start : start + BATCH]
         images = _decode(chunk, blobs)
-        vectors = ctx.engine.encode_images(images)
+        vectors = ctx.engine.encode_images([blobs[a.analyze_storage_key] for a in chunk])
         ctx.qdrant.upsert([a.trip_attachment_id for a in chunk], vectors)
         for image in images:
             image.close()

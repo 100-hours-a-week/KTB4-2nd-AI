@@ -1,5 +1,6 @@
 """실제 가중치 없이 임베딩 엔진의 배치 처리와 출력 계약을 검증한다."""
 
+import io
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -82,7 +83,12 @@ def engine(monkeypatch: pytest.MonkeyPatch, request):
 def test_encode_images_preserves_order_and_normalizes_across_batches(engine, batch_size):
     subject, batches = engine
     subject.batch_size = batch_size
-    images = [Image.new("RGB", (2, 2), (i, 0, 0)) for i in [2, 0, 1]]
+    # 픽셀 값을 사진 ID로 쓰므로 무손실 PNG bytes로 전달
+    images = []
+    for i in [2, 0, 1]:
+        buffer = io.BytesIO()
+        Image.new("RGB", (2, 2), (i, 0, 0)).save(buffer, "PNG")
+        images.append(buffer.getvalue())
 
     vectors = subject.encode_images(images)
 
