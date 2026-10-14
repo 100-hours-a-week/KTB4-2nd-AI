@@ -325,7 +325,7 @@ async def test_invalid_envelope_is_quarantined_before_acceptance(mutation):
         if mutation == "identity":
             del body["execution_id"]
         if mutation == "type":
-            body["type"] = "photos_ready"
+            body["type"] = "unknown"
         incoming = message(cfg, body)
         if mutation == "json":
             incoming = Incoming(incoming.topic, 1, 4, b"77", b"{broken")

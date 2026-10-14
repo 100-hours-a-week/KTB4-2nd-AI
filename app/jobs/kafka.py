@@ -20,7 +20,7 @@ from redis.exceptions import RedisError, WatchError
 from app.core.errors import ErrorCode
 from app.core.logging import get_logger
 from app.jobs.config import JobsSettings
-from app.jobs.models import MESSAGE, JobRecord
+from app.jobs.models import MESSAGE, JobRecord, PhotosReadyMessage
 from app.jobs.redis_store import RedisJobStore
 from app.schemas.task import ErrorBody, Progress
 
@@ -78,15 +78,35 @@ class RequestReceiver:
         if not isinstance(data, dict):
             return await self.reject(message, "invalid_envelope")
         trip_id, execution_id = data.get("trip_id"), data.get("execution_id")
+        allowed_types = ("process", "photos_ready") if kind == "process" else ("story",)
         if (
             type(trip_id) is not int
             or trip_id <= 0
             or not isinstance(execution_id, str)
             or not 1 <= len(execution_id) <= 128
-            or data.get("type") != kind
+            or data.get("type") not in allowed_types
             or message.key != str(trip_id).encode()
         ):
             return await self.reject(message, "invalid_identity_or_route")
+        if data["type"] == "photos_ready":
+            try:
+                batch = PhotosReadyMessage.model_validate(data)
+                outcome = await self.store.stage_photos(batch, message.topic)
+            except (ValidationError, ValueError):
+                # 보조 알림 오류로 본 작업을 FAILED 처리하면 뒤의 정상 process가 차단된다.
+                return await self.reject(message, "invalid_photos_ready")
+            log.info(
+                "사진 묶음 수신, 최종 process 대기",
+                extra={
+                    "event": "ai_photos_ready_received",
+                    "result": outcome,
+                    "trip_id": trip_id,
+                    "execution_id": execution_id,
+                    "batch_no": batch.batch_no,
+                    "attachment_count": len(batch.attachments),
+                },
+            )
+            return outcome
         error = None
         try:
             request = MESSAGE.validate_python(data)
