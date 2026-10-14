@@ -16,6 +16,34 @@ jobs:
   ai-ci-gate:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      kafka:
+        image: apache/kafka:3.9.1
+        ports: ["9092:9092"]
+        env:
+          KAFKA_NODE_ID: 1
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+          KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+        options: >-
+          --health-cmd "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+          --health-start-period 20s
+      redis:
+        image: redis:7.4.2
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -46,9 +74,16 @@ jobs:
           EMBEDDING_SERVED_MODEL_NAME: validation-embedding
           EMBEDDING_API_KEY: validation-only
 
+      - name: Validate local jobs configuration
+        run: |
+          cp docker/jobs/.env.example docker/jobs/.env
+          docker compose -f docker/jobs/compose.yaml config --quiet
+
       - name: Test
         run: uv run pytest
         env:
+          JOBS_TEST_REDIS_URL: redis://127.0.0.1:6379/0
+          JOBS_TEST_KAFKA_URL: localhost:9092
           AWS_ACCESS_KEY_ID: testing
           AWS_SECRET_ACCESS_KEY: testing
           AWS_DEFAULT_REGION: ap-northeast-2
@@ -99,6 +134,17 @@ jobs:
           provenance: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Build v2 app image without pushing
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/jobs/Dockerfile
+          platforms: linux/amd64
+          push: false
+          provenance: false
+          cache-from: type=gha,scope=jobs
+          cache-to: type=gha,scope=jobs,mode=max
 
       - name: Summarize checks
         if: always()
