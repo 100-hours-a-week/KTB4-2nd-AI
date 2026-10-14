@@ -106,7 +106,11 @@ async def test_fetch_returns_float32_vectors_and_skips_missing(vectors):
     ],
     ids=["connection", "server_error"],
 )
-async def test_qdrant_errors_become_model_unavailable(vectors, error):
+async def test_qdrant_errors_become_model_unavailable(vectors, monkeypatch, error):
+    from app.infra import qdrant
+
+    warnings = []
+    monkeypatch.setattr(qdrant.logger, "warning", lambda msg, *, extra: warnings.append(extra))
     await seed(vectors)
     vectors._client.query_points = AsyncMock(side_effect=error)
     vectors._client.retrieve = AsyncMock(side_effect=error)
@@ -116,6 +120,9 @@ async def test_qdrant_errors_become_model_unavailable(vectors, error):
     with pytest.raises(ModelUnavailable):
         await vectors.fetch([1])
     assert searched.value.__cause__ is None
+    # 원인은 예외 종류로만 남고 응답 본문은 로그에 들어가지 않음
+    assert warnings == [{"error_type": type(error).__name__}] * 2
+    assert "private" not in str(warnings)
 
 
 async def test_search_pipeline_uses_async_vectors_as_candidate_searcher(vectors):

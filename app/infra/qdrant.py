@@ -99,7 +99,9 @@ class AsyncQdrantVectors:
                 limit=limit,
                 with_payload=False,
             )
-        except (ResponseHandlingException, UnexpectedResponse):
+        except (ResponseHandlingException, UnexpectedResponse) as exc:
+            # 원인 구분용으로 예외 종류만 기록, 질의 벡터와 후보 ID는 남기지 않음
+            logger.warning("qdrant unavailable", extra={"error_type": type(exc).__name__})
             raise ModelUnavailable("벡터 검색을 사용할 수 없습니다.") from None
         return [SearchHit(trip_attachment_id=int(p.id), score=p.score) for p in response.points]
 
@@ -113,7 +115,8 @@ class AsyncQdrantVectors:
             records = await self._client.retrieve(
                 collection_name=self.collection, ids=ids, with_vectors=True, with_payload=False
             )
-        except (ResponseHandlingException, UnexpectedResponse):
+        except (ResponseHandlingException, UnexpectedResponse) as exc:
+            logger.warning("qdrant unavailable", extra={"error_type": type(exc).__name__})
             raise ModelUnavailable("벡터 조회를 사용할 수 없습니다.") from None
         return {int(record.id): np.asarray(record.vector, dtype=np.float32) for record in records}
 
