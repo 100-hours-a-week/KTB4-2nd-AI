@@ -14,10 +14,11 @@ from app.core.config import Settings
 from app.embedding.contracts import EmbeddingEngine
 from app.search.context import ModelUnavailable
 
-# 벡터를 결정하는 값이라 환경 변수가 아닌 코드에 고정. 바꾸면 Qdrant 컬렉션도 새로 만듦
 MODEL_VERSION = "qwen3-vl-embedding-2b"
 DIM = 2048
+# 입력을 일반적인 표현으로 만들라는 기본 문장
 IMAGE_INSTRUCTION = "Represent the user's input."
+# "이 문장과 관련된 사진을 찾아라"라는 의미, 검색 질의 임베딩에만 사용
 QUERY_INSTRUCTION = "Retrieve images relevant to the user's query."
 # 정리 묶음 하나(16장)를 한 번에 보내는 동시 요청 수, 운영 규약의 묶음 크기와 같음
 MAX_CONCURRENCY = 16
@@ -107,10 +108,11 @@ class QwenEmbeddingEngine(EmbeddingEngine):
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self._model = model
+        # transport를 넘기면 Client의 limits는 무시되므로 연결 수 상한은 transport에 지정
+        limits = httpx.Limits(max_connections=MAX_CONCURRENCY)
         self._client = httpx.Client(
             **_client_options(base_url, api_key, timeout_sec, connect_timeout_sec),
-            limits=httpx.Limits(max_connections=MAX_CONCURRENCY),
-            transport=transport or httpx.HTTPTransport(retries=1),
+            transport=transport or httpx.HTTPTransport(retries=1, limits=limits),
         )
         self._pool = ThreadPoolExecutor(MAX_CONCURRENCY, thread_name_prefix="embedding")
 
