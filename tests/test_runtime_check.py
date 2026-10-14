@@ -1,10 +1,12 @@
 """점검이 실제 엔진 생성 경로와 반환 계약을 사용하고 실패를 알리는지 확인한다."""
 
+import io
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from PIL import Image
 
 from app.pipeline import bootstrap
 from scripts import runtime_check
@@ -42,7 +44,8 @@ def test_model_check_uses_real_mode_and_requested_settings(monkeypatch, runtime_
     assert settings.EMBED_DEVICE == "cuda"
     assert settings.IMAGE_SOURCE == "local"
     assert len(runtime_engine.images) == 1
-    assert runtime_engine.images[0].mode == "RGB"
+    with Image.open(io.BytesIO(runtime_engine.images[0])) as image:
+        assert image.format == "JPEG" and image.mode == "RGB"
 
 
 @pytest.mark.parametrize(

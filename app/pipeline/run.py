@@ -37,14 +37,14 @@ def run(
     인자
         request       이번 여행의 사진 목록, 기간, 지역.
                       사본 키는 request.attachments[].analyze_storage_key
-        ctx           외부 자원. ctx.images.get_many(keys), ctx.engine.encode_images(images),
+        ctx           외부 자원. ctx.images.get_many(keys), ctx.engine.encode_images(사본 bytes),
                       ctx.qdrant.upsert(ids, vectors), ctx.thresholds[키], ctx.settings, ctx.log
         on_progress   진행률 보고 함수 on_progress(step, done, total). 워커가 api로 콜백
         is_cancelled  취소 확인 함수. True면 즉시 PipelineCancelled를 raise
 
     단계, 이 순서로 ProcessStep 값을 on_progress에 넘김
         DOWNLOADING  ctx.images로 사본 bytes 확보, PIL로 디코딩. 안 열리는 사진은 DecodeFailed(ids)
-        EMBEDDING    16장 배치로 ctx.engine.encode_images, 배치마다 ctx.qdrant.upsert
+        EMBEDDING    16장 배치의 사본 bytes로 ctx.engine.encode_images, 배치마다 ctx.qdrant.upsert
         CLOCK        device_model로 기기별 묶음, 유사도 쌍으로 기기별 단일 오프셋 산출과 적용
         LOCATING     기간 밖 분리, GPS 앵커, 유사도 상속
         CLUSTERING   haversine DBSCAN, 재방문은 한 폴더
@@ -81,6 +81,7 @@ def run(
     """
     total = len(request.attachments)
     photos = build_photo_states(request)
+    raw_images: dict[int, bytes] = {}
     images = {}
     thresholds = ctx.thresholds
 
@@ -115,7 +116,9 @@ def run(
                 check_cancel()
                 chunk = request.attachments[start : start + 16]
                 try:
-                    images.update(load_images(chunk, ctx.images))
+                    raw, decoded = load_images(chunk, ctx.images)
+                    raw_images.update(raw)
+                    images.update(decoded)
                 except DecodeFailed as exc:
                     failed_ids.extend(exc.ids)
                 check_cancel()
@@ -130,7 +133,7 @@ def run(
                 check_cancel()
                 chunk = photos[start : start + 16]
                 ids = [photo.source.trip_attachment_id for photo in chunk]
-                vectors = ctx.engine.encode_images([images[photo_id] for photo_id in ids])
+                vectors = ctx.engine.encode_images([raw_images[photo_id] for photo_id in ids])
                 check_cancel()
                 if (
                     not isinstance(vectors, np.ndarray)

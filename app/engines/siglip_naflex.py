@@ -1,3 +1,4 @@
+import io
 from pathlib import Path
 
 import numpy as np
@@ -27,13 +28,17 @@ class SiglipNaflexEngine(EmbeddingEngine):
             model_path, local_files_only=True, max_num_patches=1024
         )
 
-    def encode_images(self, images: list[Image.Image]) -> np.ndarray:
+    def encode_images(self, images: list[bytes]) -> np.ndarray:
         if not images:
             return np.zeros((0, self.dim), dtype=np.float32)
 
         chunks: list[np.ndarray] = []
         for start in range(0, len(images), self.batch_size):
-            batch = images[start : start + self.batch_size]
+            # 로컬 모델은 processor가 PIL 이미지를 받으므로 배치마다 직접 디코딩
+            batch = [
+                Image.open(io.BytesIO(data)).convert("RGB")
+                for data in images[start : start + self.batch_size]
+            ]
             inputs = self.processor(images=batch, return_tensors="pt").to(self.device)
 
             with torch.inference_mode():

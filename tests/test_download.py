@@ -24,27 +24,32 @@ def attachment(attachment_id: int, key: str) -> ProcessAttachment:
 
 def test_decodes_to_rgb(photo_dir):
     src = LocalDirImageSource(photo_dir)
-    got = load_images([attachment(101, "ok.jpg")], src)
+    _, got = load_images([attachment(101, "ok.jpg")], src)
 
     assert list(got) == [101]
     assert got[101].mode == "RGB"
     assert got[101].size == (8, 8)  # 정상 디코딩 확인
 
 
-def test_maps_each_id_to_own_image(photo_dir):
+def test_maps_each_id_to_own_image_and_original_bytes(photo_dir):
     src = LocalDirImageSource(photo_dir)
-    got = load_images([attachment(101, "ok.jpg"), attachment(102, "ok2.jpg")], src)
+    raw, got = load_images([attachment(101, "ok.jpg"), attachment(102, "ok2.jpg")], src)
 
     assert sorted(got) == [101, 102]
     assert got[101].size == (8, 8)
     assert got[102].size == (16, 8)
+    # 임베딩 엔진에 넘길 사본은 다운로드한 bytes 그대로
+    assert raw == {
+        101: (photo_dir / "ok.jpg").read_bytes(),
+        102: (photo_dir / "ok2.jpg").read_bytes(),
+    }
 
 
 def test_converts_grayscale_to_rgb(photo_dir):
     src = LocalDirImageSource(photo_dir)
     assert Image.open(photo_dir / "gray.jpg").mode == "L"
 
-    got = load_images([attachment(103, "gray.jpg")], src)
+    _, got = load_images([attachment(103, "gray.jpg")], src)
 
     assert got[103].mode == "RGB"
 
