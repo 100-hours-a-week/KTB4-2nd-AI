@@ -3,7 +3,13 @@
 import asyncio
 
 from app.infra.vlm import VLMUnavailable
-from app.schemas.query import ParseRequest, ParseResponse, SearchRequest, SearchResponse
+from app.schemas.query import (
+    ParseRequest,
+    ParseResponse,
+    SearchHit,
+    SearchRequest,
+    SearchResponse,
+)
 from app.search import prompts
 from app.search.context import (
     Evidence,
@@ -40,6 +46,17 @@ async def parse(
         return parse_fallback(request)
 
 
+def apply_cutoff(ranked: list[SearchHit], options: SearchOptions) -> list[SearchHit]:
+    """점수순 결과에서 절대 하한과 1위 점수 대비 비율을 모두 넘는 사진만
+
+    절대 하한은 맞는 사진이 없는 질문을, 비율은 1위와 크게 벌어진 뒤쪽 사진을 거름
+    """
+    if not ranked:
+        return []
+    threshold = max(options.min_score, ranked[0].score * options.score_ratio)
+    return [hit for hit in ranked if hit.score >= threshold]
+
+
 async def search(
     request: SearchRequest, context: SearchContext, options: SearchOptions
 ) -> SearchResponse:
@@ -61,13 +78,14 @@ async def search(
         raise ValueError("벡터 검색에서 후보 밖 사진이 반환되었습니다.")
     ranked = sorted(hits, key=lambda hit: (-hit.score, hit.trip_attachment_id))
     unique = {hit.trip_attachment_id: hit for hit in reversed(ranked)}
-    selected = sorted(unique.values(), key=lambda hit: (-hit.score, hit.trip_attachment_id))[:limit]
+    ordered = sorted(unique.values(), key=lambda hit: (-hit.score, hit.trip_attachment_id))
+    selected = apply_cutoff(ordered, options)[:limit]
     if request.intent == "SEARCH":
         return SearchResponse(attachments=selected)
+    # 컷오프를 통과한 근거가 없으면 VLM을 부르지 않음, 관련 없는 사진으로 답을 지어내지 않게
     if not selected:
         return SearchResponse(attachments=[], answer_error="NO_EVIDENCE")
 
-    # TODO(검색): 실제 검색 컷오프와 근거 선택은 평가 후 구현. 현재는 반환 상한만 적용.
     try:
         async with asyncio.timeout(options.answer_timeout_sec):
             evidence = [

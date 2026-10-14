@@ -337,6 +337,88 @@ async def test_missing_vectors_question_returns_no_evidence():
         assert response.json()["answer_error"] == "NO_EVIDENCE"
 
 
+def hits(*scores):
+    return [
+        SearchHit(trip_attachment_id=index, score=score)
+        for index, score in enumerate(scores, start=1)
+    ]
+
+
+@pytest.mark.parametrize(
+    "scores,limit,expected",
+    [
+        # 기준 max(0.20, 0.50 x 0.80) = 0.40, 비율 미달과 하한 미달 제외
+        ((0.50, 0.42, 0.39, 0.18), 30, [1, 2]),
+        # 1위가 낮으면 절대 하한이 기준, 0.20 미만만 제외
+        ((0.24, 0.21, 0.19), 30, [1, 2]),
+        # 컷오프 뒤에 limit 적용
+        ((0.90, 0.85, 0.80), 2, [1, 2]),
+    ],
+)
+async def test_search_cutoff_then_limit(scores, limit, expected):
+    context = replace(create_mock_context(), vectors=FixedVectors(hits(*scores)))
+    async with client_for(context) as client:
+        response = await client.post(
+            "/query/search", json=search_body(count=len(scores)) | {"limit": limit}
+        )
+        assert response.status_code == 200
+        returned = [item["trip_attachment_id"] for item in response.json()["attachments"]]
+        assert returned == expected
+
+
+@pytest.mark.parametrize("intent,error", [("SEARCH", None), ("QUESTION", "NO_EVIDENCE")])
+async def test_all_below_floor_returns_empty_without_vlm(intent, error):
+    class UnexpectedVLM(MockVLM):
+        async def chat(self, messages, image_urls, max_tokens, response_format=None):
+            raise AssertionError("근거가 없으면 VLM 호출 금지")
+
+    images = SpyImages()
+    context = replace(
+        create_mock_context(),
+        vlm=UnexpectedVLM(),
+        images=images,
+        vectors=FixedVectors(hits(0.15, 0.12)),
+    )
+    async with client_for(context) as client:
+        response = await client.post("/query/search", json=search_body(intent))
+        assert response.status_code == 200
+        assert response.json() == {"attachments": [], "answer": None, "answer_error": error}
+        assert images.keys == []
+
+
+async def test_question_evidence_is_cutoff_then_top_k():
+    images = SpyImages()
+    context = replace(
+        create_mock_context(),
+        images=images,
+        vectors=FixedVectors(hits(0.60, 0.58, 0.55, 0.30)),
+    )
+    async with client_for(context, SearchOptions(question_k=2)) as client:
+        response = await client.post("/query/search", json=search_body("QUESTION", 4))
+        assert response.status_code == 200
+        returned = [item["trip_attachment_id"] for item in response.json()["attachments"]]
+        assert returned == [1, 2]
+        assert images.keys == ["trips/1/0.jpg", "trips/1/1.jpg"]
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"question_k": 0},
+        {"question_k": 6},
+        {"min_score": -0.1},
+        {"min_score": 1.1},
+        {"min_score": float("nan")},
+        {"score_ratio": 0},
+        {"score_ratio": 1.1},
+        {"score_ratio": float("nan")},
+    ],
+)
+def test_search_options_reject_invalid_cutoff_and_k(changes):
+    with pytest.raises(ValueError):
+        SearchOptions(**changes)
+
+
 async def test_request_extra_fields_are_ignored_without_changing_scope():
     async with client_for(create_mock_context()) as client:
         response = await client.post(

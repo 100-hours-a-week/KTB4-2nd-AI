@@ -41,8 +41,9 @@ class MockVectors:
     async def search(
         self, vector: list[float], *, candidate_ids: list[int], limit: int
     ) -> list[SearchHit]:
+        # 순서 확인용 점수, 간격을 좁혀 50장까지 기본 컷오프(1위 대비 비율)를 통과
         return [
-            SearchHit(trip_attachment_id=photo_id, score=1 / (index + 1))
+            SearchHit(trip_attachment_id=photo_id, score=0.9 - 0.002 * index)
             for index, photo_id in enumerate(candidate_ids[:limit])
         ]
 
