@@ -131,6 +131,25 @@ def test_vectors_are_normalized_to_unit_length(make_engine):
     np.testing.assert_allclose(np.linalg.norm(vectors, axis=1), 1.0, rtol=1e-6)
 
 
+@pytest.mark.parametrize("scale", [1e30, 1e-30])
+def test_finite_extreme_image_vectors_keep_float32_unit_contract(make_engine, scale):
+    vectors = make_engine(lambda request: ok(unit(3, scale=scale))).encode_images([b"photo-0"])
+    assert vectors.dtype == np.float32
+    np.testing.assert_array_equal(vectors[0], unit(3))
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("scale", [1e30, 1e-30])
+async def test_finite_extreme_text_vectors_keep_unit_contract(scale):
+    embedder = QwenTextEmbedder(
+        BASE_URL, MODEL, transport=httpx.MockTransport(lambda request: ok(unit(3, scale=scale)))
+    )
+    try:
+        np.testing.assert_array_equal(await embedder.encode_text("바다 사진"), unit(3))
+    finally:
+        await embedder.aclose()
+
+
 INVALID_RESPONSES = {
     "short": lambda request: ok(unit(0)[:-1]),
     # httpx의 json 인자는 NaN을 막으므로 서버가 보낼 수 있는 JSON 텍스트를 직접 생성
@@ -138,6 +157,7 @@ INVALID_RESPONSES = {
         200, text=json.dumps({"data": [{"embedding": [float("nan")] * embedding.DIM}]})
     ),
     "zero": lambda request: ok([0.0] * embedding.DIM),
+    "overflow_integer": lambda request: ok(unit(0, scale=10**400)),
     "no_data": lambda request: httpx.Response(200, json={"data": []}),
     "not_json": lambda request: httpx.Response(200, text="not json"),
     "server_error": lambda request: httpx.Response(500, json={"error": "boom"}),

@@ -53,14 +53,15 @@ def parse_vector(response: httpx.Response) -> np.ndarray:
     """응답의 첫 벡터를 float32로 꺼내 L2 정규화, 서버 정규화 값의 반올림 오차까지 계약에 맞춤"""
     try:
         vector = np.asarray(response.json()["data"][0]["embedding"], dtype=np.float32)
-    except (ValueError, KeyError, IndexError, TypeError) as exc:
+    except (ValueError, KeyError, IndexError, TypeError, OverflowError) as exc:
         raise EmbeddingUnavailable("임베딩 응답 형식이 올바르지 않음") from exc
     if vector.shape != (DIM,) or not np.isfinite(vector).all():
         raise EmbeddingUnavailable(f"임베딩 벡터가 {DIM}차원 유한값이 아님")
-    norm = np.linalg.norm(vector)
-    if norm == 0:
-        raise EmbeddingUnavailable("임베딩 벡터의 크기가 0")
-    return vector / norm
+    # float32 성분이 유한해도 제곱합은 overflow 또는 underflow할 수 있다.
+    norm = np.linalg.norm(vector.astype(np.float64))
+    if not np.isfinite(norm) or norm == 0:
+        raise EmbeddingUnavailable("임베딩 벡터의 크기가 유효하지 않음")
+    return (vector / norm).astype(np.float32)
 
 
 def _client_options(
