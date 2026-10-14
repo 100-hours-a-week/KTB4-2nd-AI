@@ -13,3 +13,15 @@ siglip2-so400m-naflex:
   clock_min_pairs: 3                # CLOCK. 사진 재사용 없는 상호 유일 최고 유사도 쌍의 최소 수
   # CLOCK. 같은 정수 일수 후보 안에서 초 단위 오프셋의 중앙값 ± 허용 오차인 쌍만 집계
   clock_offset_tolerance_sec: 1800  # 0 이상 반일 미만. 실제 시각에는 정수 일수만 적용
+
+# 10/14 200장 평가셋과 임베딩 vLLM 벡터로 측정, 배포 환경에서 1회 확인 예정
+# 임베딩 유사도를 쓰는 두 값만 재측정, 나머지는 SigLIP과 같음
+qwen3-vl-embedding-2b:
+  inherit_min_sim: 0.88             # 0.87 이상에서 잘못 상속 0, 0.86부터 잘못 상속
+  dbscan_eps_m: 100
+  min_samples: 1
+  blur_var_min: 80.0
+  phash_max_dist: 4
+  clock_pair_min_sim: 0.7           # 0.50~0.85 전부 정답 일수, 0.90부터 디카 보정 실패
+  clock_min_pairs: 3
+  clock_offset_tolerance_sec: 1800
