@@ -10,7 +10,7 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from app.core.errors import ErrorCode
-from app.core.logging import get_logger
+from app.core.logging import get_logger, setup_logging
 from app.jobs.config import JobsSettings
 from app.jobs.execution import handler_for
 from app.jobs.models import JobKind, JobRecord
@@ -101,6 +101,7 @@ async def runner_loop(store: RedisJobStore, kind: JobKind) -> None:
 
 async def main(kind: JobKind = "process") -> None:
     cfg = JobsSettings()
+    setup_logging(cfg.LOG_LEVEL, cfg.RELEASE)
     redis = Redis.from_url(
         cfg.REDIS_URL.get_secret_value(),
         decode_responses=True,

@@ -8,6 +8,7 @@ import sys
 from redis.asyncio import Redis
 
 from app.core.errors import ErrorCode, PipelineCancelled, PipelineError
+from app.core.logging import bind_job, bind_trip, setup_logging
 from app.jobs.config import JobsSettings
 from app.jobs.models import JobKind
 from app.jobs.process_guard import parent_guard
@@ -78,6 +79,7 @@ async def execute(store: RedisJobStore, identity: str, owner: str, handler) -> N
 
 async def main(identity: str, owner: str) -> None:
     cfg = JobsSettings()
+    setup_logging(cfg.LOG_LEVEL, cfg.RELEASE)
     redis = Redis.from_url(
         cfg.REDIS_URL.get_secret_value(),
         decode_responses=True,
@@ -89,6 +91,9 @@ async def main(identity: str, owner: str) -> None:
     if record is None:
         await redis.aclose()
         return
+
+    bind_trip(record.trip_id)
+    bind_job(record.execution_id)
 
     async def guard() -> None:
         while True:
