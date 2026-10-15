@@ -7,6 +7,7 @@
 
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 from typing import Protocol
 
@@ -66,15 +67,20 @@ class S3ImageSource:
         self._client = boto3.client(
             "s3",
             region_name=region,
-            config=Config(max_pool_connections=max_workers, retries={"max_attempts": 1}),
+            config=Config(
+                max_pool_connections=max_workers,
+                retries={"max_attempts": 1},
+                connect_timeout=5,
+                read_timeout=30,
+            ),
         )
 
     def _get_one(self, key: str) -> bytes | None:
         """retries회까지 시도, 간격은 backoff x 2^n. 끝내 실패하면 None"""
         for attempt in range(self.retries):
             try:
-                body = self._client.get_object(Bucket=self.bucket, Key=key)["Body"]
-                return body.read()
+                with closing(self._client.get_object(Bucket=self.bucket, Key=key)["Body"]) as body:
+                    return body.read()
             except Exception as exc:  # noqa: BLE001, 스로틀링과 네트워크 오류 모두 재시도 대상
                 if attempt < self.retries - 1:
                     delay = self.backoff_seconds * (2**attempt)
@@ -86,6 +92,9 @@ class S3ImageSource:
                 else:
                     logger.error("download failed", extra={"key": key, "error": str(exc)})
         return None
+
+    def close(self) -> None:
+        self._client.close()
 
     def get_many(self, keys: list[str]) -> dict[str, bytes]:
         result: dict[str, bytes] = {}

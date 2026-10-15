@@ -34,7 +34,14 @@ class QdrantStore:
         self.dim = dim
         self.collection = collection_name(model_version)
         self._client = QdrantClient(MEMORY) if location == MEMORY else QdrantClient(url=location)
-        self._ensure_collection()
+        try:
+            self._ensure_collection()
+        except BaseException:
+            self._client.close()
+            raise
+
+    def close(self) -> None:
+        self._client.close()
 
     def _ensure_collection(self) -> None:
         """없으면 생성, 있으면 그대로. 재기동해도 /data/qdrant에 남아 있으면 재사용"""

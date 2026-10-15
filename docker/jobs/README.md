@@ -31,7 +31,7 @@ async def run(request: dict, reporter: JobReporter) -> dict:
     return result
 ```
 
-기존 정리 함수 `run(request, ctx, on_progress, is_cancelled)`는 유지합니다. 위 async 함수는 서버 담당자가 연결할 어댑터이며, 정리 담당자에게 알고리즘의 시그니처 변경을 요구하지 않습니다. 기능별 입력과 결과는 `app/jobs/models.py`에 있습니다. 임베딩 HTTP 연결과 실제 스토리 파이프라인은 각각의 구현이 준비된 뒤 연결합니다.
+기존 정리 함수 `run(request, ctx, on_progress, is_cancelled)`는 유지합니다. 위 async 함수는 서버 담당자가 연결할 어댑터이며, 정리 담당자에게 알고리즘의 시그니처 변경을 요구하지 않습니다. 기능별 입력과 결과는 `app/jobs/models.py`에 있습니다. 정리 연결은 `JOBS_PROCESS_HANDLER=app.jobs.process_handler:run`으로 활성화합니다. `EMBED_MODEL=qwen3-vl-embedding-2b`, `EMBEDDING_BASE_URL`, `EMBEDDING_SERVED_MODEL_NAME`, `QDRANT_URL`을 설정하고 S3 접근 권한과 `S3_BUCKET`, `AWS_REGION`을 전달합니다. `FAKE_PIPELINE`과 `JOBS_FAKE_PIPELINE`은 모두 false여야 합니다. 로컬 사진 검증에는 `IMAGE_SOURCE=local`, `IMAGE_DIR`을 사용할 수 있습니다. 정리는 동기 파이프라인을 별도 스레드에서 실행하며 단계별 진행률과 취소 여부를 Redis와 교환합니다. 임베딩은 최대 16장씩 순서대로 호출하고 종료 시 HTTP 연결과 Qdrant 및 S3 클라이언트를 닫습니다. 스토리는 별도 실행 함수를 연결합니다.
 
 ## 실제 검색 연결
 
