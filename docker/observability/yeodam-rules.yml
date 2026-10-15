@@ -1,0 +1,13 @@
+groups:
+  - name: yeodam-shared-redis
+    rules:
+      - record: yeodam:operation_duration_seconds_bucket:max
+        expr: max without(instance, pod, replica) (yeodam_ai_operation_duration_seconds_bucket)
+      - record: yeodam:operation_duration_seconds_count:max
+        expr: max without(instance, pod, replica) (yeodam_ai_operation_duration_seconds_count)
+      - record: yeodam:operation_duration_seconds_sum:max
+        expr: max without(instance, pod, replica) (yeodam_ai_operation_duration_seconds_sum)
+      - record: yeodam:jobs:max
+        expr: max without(instance, pod, replica) (yeodam_ai_jobs)
+      - record: yeodam:evaluation:max
+        expr: max without(instance, pod, replica) (yeodam_ai_evaluation * on(job, environment, instance, feature) group_left(dataset, model, k, unclassified_policy) yeodam_ai_evaluation_info)

@@ -133,6 +133,17 @@ def create_app(
             trip_id=trip_id, execution_id=record.execution_id, status=TaskStatus.CANCELED
         )
 
+    @app.get("/metrics", dependencies=[Depends(require_api_key)], include_in_schema=False)
+    async def metrics(request: Request):
+        from fastapi.responses import Response
+        from prometheus_client import CONTENT_TYPE_LATEST
+
+        from app.observability.metrics import Metrics
+
+        jobs = request.app.state.jobs
+        content = await Metrics(jobs.redis, jobs.prefix).render()
+        return Response(content=content, headers={"Content-Type": CONTENT_TYPE_LATEST})
+
     @app.get("/health")
     async def health(request: Request):
         from fastapi.responses import JSONResponse

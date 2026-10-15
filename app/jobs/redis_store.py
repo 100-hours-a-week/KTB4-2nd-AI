@@ -21,6 +21,7 @@ from app.jobs.models import (
     PhotosReadyMessage,
     TerminalStatus,
 )
+from app.observability.metrics import log_terminal, terminal_commands
 from app.schemas.task import TERMINAL_STATUSES, ErrorBody, Progress, TaskStatus
 
 
@@ -144,7 +145,13 @@ class RedisJobStore:
                     destination = "pending" if record.event else f"queue:{record.kind}"
                     score = record.created_at if record.event else order
                     pipe.zadd(self.key(destination), {record.identity: score})
+                    if record.event:
+                        terminal_commands(
+                            pipe, self.key("metrics:operations"), record, record.created_at
+                        )
                     await pipe.execute()
+                    if record.event:
+                        log_terminal(record, record.created_at)
                     return "accepted"
                 except WatchError:
                     continue
@@ -201,6 +208,7 @@ class RedisJobStore:
                     if raw is None:
                         return None
                     record = JobRecord.model_validate_json(raw)
+                    was_terminal = record.status in TERMINAL_STATUSES
                     now = await self.now()
                     if not update(record, now):
                         return None
@@ -210,6 +218,8 @@ class RedisJobStore:
                     pipe.multi()
                     pipe.set(key, record.model_dump_json())
                     if record.status in TERMINAL_STATUSES:
+                        if not was_terminal:
+                            terminal_commands(pipe, self.key("metrics:operations"), record, now)
                         pipe.zrem(self.key(f"queue:{record.kind}"), identity)
                         pipe.zrem(self.key("running"), identity)
                         if slot_owner == identity:
@@ -225,6 +235,8 @@ class RedisJobStore:
                         )
                         pipe.zadd(self.key("running"), {identity: deadline})
                     await pipe.execute()
+                    if not was_terminal and record.status in TERMINAL_STATUSES:
+                        log_terminal(record, now)
                     return record
                 except WatchError:
                     continue

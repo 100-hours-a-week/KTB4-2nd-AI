@@ -10,6 +10,7 @@ from app.embedding.contracts import TextEmbedder
 from app.infra.image_resolver import S3ImageResolver
 from app.infra.qdrant import AsyncQdrantVectors
 from app.infra.vllm_client import VllmClient
+from app.observability.metrics import Metrics
 from app.search.context import CandidateSearcher, SearchContext, SearchOptions
 
 
@@ -45,5 +46,7 @@ async def search_service(
             vlm = generation_client(vlm, redis, settings)
             embedder = embedding_client(embedder, redis, settings)
         yield QueryService(
-            SearchContext(vlm=vlm, embedder=embedder, vectors=vectors, images=images), options
+            SearchContext(vlm=vlm, embedder=embedder, vectors=vectors, images=images),
+            options,
+            metrics=Metrics(redis, settings.redis_prefix) if redis is not None else None,
         )

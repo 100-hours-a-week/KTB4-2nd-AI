@@ -13,9 +13,12 @@ log = get_logger(__name__)
 
 
 class QueryService:
-    def __init__(self, context: SearchContext, options: SearchOptions | None = None) -> None:
+    def __init__(
+        self, context: SearchContext, options: SearchOptions | None = None, metrics=None
+    ) -> None:
         self.context = context
         self.options = options or SearchOptions()
+        self.metrics = metrics
 
     async def parse(self, request: ParseRequest) -> ParseResponse:
         return await self._run("parse", request)
@@ -65,6 +68,9 @@ class QueryService:
             log.error("검색 처리 실패", extra={"error_type": type(exc).__name__})
             raise AppError(ErrorCode.INTERNAL_ERROR) from exc
         finally:
+            duration = time.monotonic() - started
+            if self.metrics is not None:
+                await self.metrics.query(operation, outcome, duration)
             log.info(
                 "검색 요청 완료",
                 extra={
@@ -75,7 +81,7 @@ class QueryService:
                     "candidate_count": candidate_count,
                     "returned_count": returned_count,
                     "parsed": parsed,
-                    "duration_ms": round((time.monotonic() - started) * 1000, 2),
+                    "duration_ms": round(duration * 1000, 2),
                 },
             )
 

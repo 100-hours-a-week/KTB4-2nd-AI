@@ -23,6 +23,7 @@ dependencies = [
     "huggingface-hub>=0.25",
     "redis>=5.2,<7",
     "aiokafka[lz4]==0.14.0",
+    "prometheus-client==0.26.0",
 ]
 
 [dependency-groups]
