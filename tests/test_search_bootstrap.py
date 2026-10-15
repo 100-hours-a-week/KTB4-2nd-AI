@@ -515,7 +515,7 @@ async def test_deployment_entrypoints_select_search_without_implicit_mock(monkey
     entered, closed = [], []
 
     @asynccontextmanager
-    async def factory(cfg):
+    async def factory(cfg, *, redis):
         entered.append(cfg)
         try:
             yield QueryService(create_mock_context())

@@ -20,6 +20,7 @@ async def search_service(
     vectors: CandidateSearcher | None = None,
     embedder: TextEmbedder | None = None,
     options: SearchOptions | None = None,
+    redis=None,
 ) -> AsyncIterator[QueryService]:
     """API별로 한 번 구성한다. 직접 만든 자원만 닫고 주입된 자원은 빌려 쓴다.
 
@@ -38,6 +39,11 @@ async def search_service(
             resources.push_async_callback(vectors.aclose)
         images = await S3ImageResolver.create(settings)
         resources.push_async_callback(images.aclose)
+        if redis is not None:
+            from app.jobs.gpu_requests import embedding_client, generation_client
+
+            vlm = generation_client(vlm, redis, settings)
+            embedder = embedding_client(embedder, redis, settings)
         yield QueryService(
             SearchContext(vlm=vlm, embedder=embedder, vectors=vectors, images=images), options
         )
