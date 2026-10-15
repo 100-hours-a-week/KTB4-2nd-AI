@@ -4,6 +4,7 @@ import asyncio
 import uuid
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
+from functools import partial
 from typing import Literal
 
 from fastapi import Depends, FastAPI, Request
@@ -66,7 +67,7 @@ def create_app(
             await jobs.redis.ping()
             factory = query_service_factory
             if query_service is None and factory is None and cfg.SEARCH_ENABLED:
-                factory = search_service
+                factory = partial(search_service, redis=jobs.redis)
             if factory:
                 app.state.query_service = await search_resources.enter_async_context(factory(cfg))
             if runtime:
@@ -167,4 +168,5 @@ def create_search_app(
     settings: JobsSettings | None = None, store: RedisJobStore | None = None
 ) -> FastAPI:
     """검색 검증용 진입점. 실제 검색을 연결하고 Kafka 및 스토리 실행은 시작하지 않는다."""
-    return create_app(settings, store, start_kafka=False, query_service_factory=search_service)
+    cfg = (settings or JobsSettings()).model_copy(update={"SEARCH_ENABLED": True})
+    return create_app(cfg, store, start_kafka=False)

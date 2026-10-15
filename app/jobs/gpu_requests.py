@@ -1,0 +1,110 @@
+"""복제본들이 공유하는 외부 GPU HTTP 호출 한도. 작업 대기열과는 별개다."""
+
+import asyncio
+import uuid
+
+from redis.exceptions import RedisError, WatchError
+
+from app.core.logging import get_logger
+from app.infra.vlm import VLMUnavailable
+from app.search.context import ModelUnavailable
+
+log = get_logger(__name__)
+
+
+class GateUnavailable(Exception):
+    pass
+
+
+class RequestGate:
+    def __init__(self, redis, key: str, limit: int, wait_sec: float):
+        self.redis, self.key, self.limit, self.wait_sec = redis, key, limit, wait_sec
+        if limit < 1 or wait_sec <= 0:
+            raise ValueError("GPU 호출 한도와 대기 시간은 양수여야 합니다.")
+
+    async def _claim(self, token, lease_sec):
+        async with self.redis.pipeline(transaction=True) as pipe:
+            try:
+                await pipe.watch(self.key)
+                seconds, micros = await self.redis.time()
+                now = seconds + micros / 1_000_000
+                if await pipe.zcount(self.key, f"({now}", "+inf") >= self.limit:
+                    return False
+                pipe.multi()
+                pipe.zremrangebyscore(self.key, "-inf", now)
+                pipe.zadd(self.key, {token: now + lease_sec})
+                await pipe.execute()
+                return True
+            except WatchError:
+                return False
+
+    async def run(self, operation, timeout_sec):
+        token = uuid.uuid4().hex
+        try:
+            try:
+                async with asyncio.timeout(self.wait_sec):
+                    while not await self._claim(token, timeout_sec + 10):
+                        await asyncio.sleep(0.05)
+            except (TimeoutError, RedisError):
+                raise GateUnavailable("GPU 호출 슬롯을 확보하지 못했습니다.") from None
+            # client의 I/O timeout 외에 호출 전체 시간을 제한한다.
+            async with asyncio.timeout(timeout_sec):
+                return await operation()
+        finally:
+            # claim 중 응답을 잃어도 같은 토큰을 정리한다. 실패 시 lease가 회수한다.
+            try:
+                async with asyncio.timeout(5):
+                    await self.redis.zrem(self.key, token)
+            except (TimeoutError, RedisError):
+                log.warning("GPU 호출 슬롯 해제 지연", extra={"event": "gpu_slot_release_failed"})
+
+
+class GatedVlm:
+    def __init__(self, client, gate: RequestGate, timeout_sec: float):
+        self.client, self.gate, self.timeout_sec = client, gate, timeout_sec
+
+    async def chat(self, messages, image_urls, max_tokens, response_format=None):
+        try:
+            return await self.gate.run(
+                lambda: self.client.chat(messages, image_urls, max_tokens, response_format),
+                self.timeout_sec,
+            )
+        except GateUnavailable:
+            raise VLMUnavailable("생성 서버의 호출 대기 한도를 초과했습니다.") from None
+
+
+class GatedEmbedder:
+    def __init__(self, client, gate: RequestGate, timeout_sec: float):
+        self.client, self.gate, self.timeout_sec = client, gate, timeout_sec
+
+    async def encode_text(self, text):
+        try:
+            return await self.gate.run(lambda: self.client.encode_text(text), self.timeout_sec)
+        except GateUnavailable:
+            raise ModelUnavailable("임베딩 서버의 호출 대기 한도를 초과했습니다.") from None
+
+
+def generation_client(client, redis, cfg):
+    return GatedVlm(
+        client,
+        RequestGate(
+            redis,
+            cfg.redis_prefix + "gpu:generation",
+            cfg.GPU_GENERATION_INFLIGHT,
+            cfg.GPU_WAIT_SEC,
+        ),
+        cfg.VLM_TIMEOUT_SEC,
+    )
+
+
+def embedding_client(client, redis, cfg):
+    return GatedEmbedder(
+        client,
+        RequestGate(
+            redis,
+            cfg.redis_prefix + "gpu:search-embedding",
+            cfg.GPU_SEARCH_EMBEDDING_INFLIGHT,
+            cfg.GPU_WAIT_SEC,
+        ),
+        cfg.EMBEDDING_TIMEOUT_SEC,
+    )

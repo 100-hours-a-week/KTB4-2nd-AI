@@ -7,6 +7,7 @@ from app.infra.image_resolver import S3ImageResolver
 from app.infra.qdrant import AsyncQdrantVectors
 from app.infra.vllm_client import VllmClient
 from app.jobs.config import JobsSettings
+from app.jobs.gpu_requests import generation_client
 from app.pipeline.bootstrap import build_images
 from app.story.pipeline import StoryContext, StoryOptions, validate_request
 from app.story.pipeline import run as run_pipeline
@@ -38,5 +39,10 @@ async def run(request: dict, reporter) -> dict:
         resources.push_async_callback(vectors.aclose)
         urls = await S3ImageResolver.create(cfg)
         resources.push_async_callback(urls.aclose)
-        ctx = StoryContext(images=lambda: image_source(cfg), vectors=vectors, urls=urls, vlm=vlm)
+        ctx = StoryContext(
+            images=lambda: image_source(cfg),
+            vectors=vectors,
+            urls=urls,
+            vlm=generation_client(vlm, reporter.store.redis, cfg),
+        )
         return await run_pipeline(request, reporter, ctx, options)
