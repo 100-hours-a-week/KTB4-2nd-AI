@@ -8,6 +8,8 @@ from app.core.config import Settings
 
 
 class JobsSettings(Settings):
+    # v2 API에서 실제 검색 의존성을 조립한다. 로컬 작업 큐 검증은 비활성화해 사용한다.
+    SEARCH_ENABLED: bool = False
     JOBS_ENV: str = Field(default="local", pattern=r"^[a-z][a-z0-9-]*$")
     REDIS_URL: SecretStr = SecretStr("redis://127.0.0.1:6379/0")
     KAFKA_BOOTSTRAP_SERVERS: str = "127.0.0.1:9092"

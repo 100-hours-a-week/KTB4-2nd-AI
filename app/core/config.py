@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     WORKER_URL: str = "http://127.0.0.1:8002"
     API_URL: str = "http://127.0.0.1:8000"
     QDRANT_URL: str = "http://127.0.0.1:6333"
+    QDRANT_TIMEOUT_SEC: int = Field(default=5, ge=1)
 
     # v2 VLM. 미설정이면 기존 v1 기동에 영향이 없고, 클라이언트 생성 시 필수값을 확인한다.
     VLM_BASE_URL: str | None = None
@@ -52,6 +53,7 @@ class Settings(BaseSettings):
     IMAGE_SOURCE: Literal["s3", "local"] = "s3"
     S3_BUCKET: str | None = None
     AWS_REGION: str = "ap-northeast-2"
+    S3_PRESIGN_EXPIRES_SEC: int = Field(default=300, ge=1, le=604800)
     IMAGE_DIR: Path = Path("data/photos")
 
     # 상한과 감시
