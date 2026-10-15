@@ -15,6 +15,7 @@ x-app: &app
 services:
   api:
     <<: *app
+    stop_grace_period: 120s
     deploy:
       replicas: 2
     ports:

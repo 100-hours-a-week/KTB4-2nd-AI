@@ -22,7 +22,7 @@ from app.jobs.execution import handler_for
 from app.jobs.kafka import KafkaRuntime
 from app.jobs.models import JobStatusResponse
 from app.jobs.redis_store import RedisJobStore
-from app.jobs.runner import runner_loop
+from app.jobs.runner import drain_story_runners, story_runners
 from app.schemas.task import CancelResponse, TaskStatus
 
 
@@ -62,6 +62,7 @@ def create_app(
         app.state.query_service = query_service
         app.state.kafka = runtime
         story_runner = None
+        story_stop = asyncio.Event()
         search_resources = AsyncExitStack()
         try:
             await jobs.redis.ping()
@@ -72,14 +73,13 @@ def create_app(
                 app.state.query_service = await search_resources.enter_async_context(factory(cfg))
             if runtime:
                 await runtime.start()
-                story_runner = asyncio.create_task(runner_loop(jobs, "story"))
+                story_runner = asyncio.create_task(story_runners(jobs, story_stop))
             app.state.story_runner = story_runner
             yield
         finally:
             try:
                 if story_runner:
-                    story_runner.cancel()
-                    await asyncio.gather(story_runner, return_exceptions=True)
+                    await drain_story_runners(story_runner, story_stop, cfg.JOBS_SHUTDOWN_GRACE_SEC)
                 if runtime:
                     await runtime.stop()
                 if redis:
