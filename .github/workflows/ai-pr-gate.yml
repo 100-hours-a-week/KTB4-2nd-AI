@@ -74,6 +74,21 @@ jobs:
           EMBEDDING_SERVED_MODEL_NAME: validation-embedding
           EMBEDDING_API_KEY: validation-only
 
+      - name: Validate v2 deployment configurations
+        run: |
+          cp docker/v2/.env.example docker/v2/.env
+          docker compose --env-file docker/v2/.env -f docker/v2/compose.yaml config --quiet
+          docker compose -f docker/generation/compose.yaml config --quiet
+        env:
+          AI_APP_IMAGE: yeodam-ai-app:validation-only
+          QDRANT_DATA_DIR: /tmp/yeodam-qdrant-validation
+          EMBEDDING_API_KEY: validation-only
+          VLLM_GENERATION_IMAGE: vllm/vllm-openai:validation-only
+          GENERATION_MODEL: validation/model
+          GENERATION_MODEL_REVISION: validation-revision
+          GENERATION_SERVED_MODEL_NAME: validation-generation
+          GENERATION_API_KEY: validation-only
+
       - name: Validate local jobs configuration
         run: |
           cp docker/jobs/.env.example docker/jobs/.env

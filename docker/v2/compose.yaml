@@ -1,0 +1,56 @@
+# 통합 검증용 구성. 실제 Fargate와 EC2의 서비스 배치는 Cloud 작업 정의에 적용한다.
+x-app: &app
+  image: ${AI_APP_IMAGE:?Set the reviewed app image digest}
+  env_file: .env
+  init: true
+  stop_grace_period: 20s
+  environment:
+    JOBS_FAKE_PIPELINE: "false"
+    FAKE_PIPELINE: "false"
+    SEARCH_ENABLED: "true"
+    JOBS_PROCESS_HANDLER: app.jobs.process_handler:run
+    JOBS_STORY_HANDLER: app.story.handler:run
+    EMBED_MODEL: qwen3-vl-embedding-2b
+    EMBEDDING_BASE_URL: http://embedding:8000/v1
+    QDRANT_URL: http://qdrant:6333
+    REDIS_URL: redis://redis:6379/0
+  depends_on:
+    redis:
+      condition: service_healthy
+services:
+  api:
+    <<: *app
+    deploy:
+      replicas: 2
+    ports: ["127.0.0.1::8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+  process-runner:
+    <<: *app
+    command: ["python", "-m", "app.jobs.runner"]
+    cpus: 2.0
+    deploy:
+      replicas: 1
+  embedding:
+    extends:
+      file: ../embedding/compose.yaml
+      service: embedding
+  qdrant:
+    image: qdrant/qdrant:v1.19.1@sha256:12364fe851b9f17356fc88189fc06d1b521262e04659ec7345975b00c9246a10
+    volumes:
+      - ${QDRANT_DATA_DIR:?Set the EBS mount path}:/qdrant/storage
+    expose: ["6333"]
+  redis:
+    image: redis:7.4.2
+    command: ["redis-server", "--maxmemory-policy", "noeviction"]
+    expose: ["6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+volumes:
+  embedding-model-cache:

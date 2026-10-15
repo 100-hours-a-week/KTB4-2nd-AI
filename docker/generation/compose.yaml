@@ -1,0 +1,40 @@
+# RunPod 생성 서버의 실행 계약. 모델과 GPU에서 검증한 이미지 및 revision을 전달한다.
+services:
+  generation:
+    image: ${VLLM_GENERATION_IMAGE:?Set a validated vLLM image tag or digest}
+    entrypoint: ["vllm", "serve"]
+    command:
+      - ${GENERATION_MODEL:?Set the generation model repository}
+      - --revision
+      - ${GENERATION_MODEL_REVISION:?Set the model revision}
+      - --served-model-name
+      - ${GENERATION_SERVED_MODEL_NAME:?Set the public model name}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --max-model-len
+      - ${GENERATION_MAX_MODEL_LEN:-16384}
+      - --limit-mm-per-prompt
+      - '{"image": ${GENERATION_MAX_IMAGES:-10}}'
+    environment:
+      VLLM_API_KEY: ${GENERATION_API_KEY:?Set the generation API key}
+      HF_TOKEN: ${HF_TOKEN:-}
+    ports: ["${GENERATION_BIND_HOST:-127.0.0.1}:${GENERATION_PORT:-8004}:8000"]
+    volumes:
+      - generation-model-cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 180s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+volumes:
+  generation-model-cache:
