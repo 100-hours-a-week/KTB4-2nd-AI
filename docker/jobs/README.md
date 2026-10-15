@@ -129,7 +129,9 @@ JOBS_TEST_REDIS_URL=redis://127.0.0.1:6379/0 JOBS_TEST_KAFKA_URL=localhost:9092 
 
 스토리는 S3 사본의 흐림과 중복을 제외하고, 장소마다 한 장을 확보한 뒤 나머지 사진 예산을 남은 사진 수에 비례해 배분합니다. 소수점은 최대 나머지 방식으로 처리하며 동점에서는 입력 장소 순서를 사용합니다. 장소별 평균 임베딩에 가까운 사진을 고르고 VLM에 한 번 전달합니다. 모델이 반환한 사진 ID와 형식 및 모든 선택 장소의 포함 여부를 검사하며 결과는 촬영 시각순으로 정렬합니다.
 
-초기 설정은 `STORY_IMAGE_BUDGET=10`, `STORY_BLUR_VAR_MIN=80`, `STORY_PHASH_MAX_DIST=4`, `STORY_MAX_TOKENS=4096`입니다. 품질이나 GPU 한도를 실측해 확정한 값이 아닙니다. RunPod의 이미지 입력 상한은 사진 예산 이상이어야 하며, 선택한 장소 수보다 예산이 작으면 요청이 실패합니다. 사진이 남지 않은 장소는 `INVALID_REQUEST`의 `NO_USABLE_PHOTOS`, 필요한 벡터 누락은 `MODEL_NOT_READY`의 `MISSING_VECTORS`로 알립니다. 장소나 사진을 임의로 생략해 완료하지 않습니다.
+초기 설정은 `STORY_IMAGE_BUDGET=10`, `STORY_BLUR_VAR_MIN=80`, `STORY_PHASH_MAX_DIST=4`, `STORY_MAX_TOKENS=2048`입니다. RunPod의 이미지 입력 상한은 사진 예산 이상이어야 하며, 선택한 장소 수보다 예산이 작으면 요청이 실패합니다. 사진이 남지 않은 장소는 `INVALID_REQUEST`의 `NO_USABLE_PHOTOS`, 필요한 벡터 누락은 `MODEL_NOT_READY`의 `MISSING_VECTORS`로 알립니다. 필터 임계값과 실제 호출 품질은 스테이징에서 확인합니다.
+
+프롬프트는 요약 두 필드를 각각 40자 이내의 짧은 구절로, `memo`를 125자 이내로 요청합니다. 응답 스키마는 선별한 사진 수만큼 블록을 요구하고 사진 ID도 해당 요청의 선별 ID로 제한합니다. 최종 검증에서는 모든 선별 사진이 정확히 한 번씩 포함되었는지 검사합니다. 출력 한도에 도달하거나 사진이 누락된 응답을 완료 결과로 전달하지 않습니다. 서버의 `disable_any_whitespace` 옵션은 사용하지 않습니다.
 
 기존 결과 계약의 `verification.passed=true`는 코드가 ID, 형식과 장소 포함 여부를 검사했다는 뜻입니다. 문장의 사실성을 별도 모델로 검증했다는 뜻은 아닙니다. 한 번 작성하는 기준선이므로 재작성 횟수는 0입니다. 입력 `taken_at`은 기존 계약대로 오프셋을 포함한 필수 값이며, `day_label`은 제공된 촬영 시각과 여행 시작일로 계산합니다.
 

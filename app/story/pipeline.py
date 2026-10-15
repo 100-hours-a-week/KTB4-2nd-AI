@@ -27,7 +27,7 @@ class StoryOptions:
     image_budget: int = 10
     blur_min: float = 80.0
     phash_max: int = 4
-    max_tokens: int = 4096
+    max_tokens: int = 2048
 
 
 def validate_request(request: dict) -> StoryMessage:
@@ -49,8 +49,8 @@ def finalize(raw: str, request: StoryMessage, selected) -> dict:
         draft = StoryDraft.model_validate_json(raw)
         photos = {photo.trip_attachment_id: (place_id, photo) for place_id, photo in selected}
         ids = [block.trip_attachment_id for block in draft.blocks]
-        if len(set(ids)) != len(ids) or any(photo_id not in photos for photo_id in ids):
-            raise ValueError("선별되지 않은 사진 또는 중복 사진")
+        if len(set(ids)) != len(ids) or set(ids) != set(photos):
+            raise ValueError("선별 사진 누락 또는 선별되지 않은 사진 또는 중복 사진")
         if {photos[photo_id][0] for photo_id in ids} != {p.trip_place_id for p in request.places}:
             raise ValueError("선택 장소 누락")
         places = {place.trip_place_id: place.place_name for place in request.places}
@@ -125,7 +125,10 @@ async def run(request: dict, reporter, ctx: StoryContext, options: StoryOptions)
         await reporter.report("WRITING", 2, 4)
         await reporter.check_cancel()
         raw = await ctx.vlm.chat(
-            messages(message, selected), urls, options.max_tokens, response_format=response_format()
+            messages(message, selected),
+            urls,
+            options.max_tokens,
+            response_format=response_format([photo.trip_attachment_id for _, photo in selected]),
         )
         await reporter.check_cancel()
         await reporter.report("VERIFYING", 3, 4)
