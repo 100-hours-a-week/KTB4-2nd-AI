@@ -12,6 +12,7 @@ from PIL import Image
 from app.core.errors import ErrorCode, PipelineCancelled, PipelineError
 from app.infra.vlm import VLMUnavailable
 from app.story.pipeline import StoryContext, StoryOptions, finalize, run, validate_request
+from app.story.prompts import StoryDraft, response_format
 from app.story.selection import allocate, select
 from tests.test_v2_jobs import scenario, story_request
 
@@ -126,6 +127,42 @@ def test_model_output_rejects_missing_or_unselected_or_duplicate_photos(raw):
     assert error.value.detail["reason"] == "INVALID_STORY_OUTPUT"
 
 
+def test_output_rejects_missing_photo_even_when_every_place_is_present():
+    message = validate_request(request_two_places())
+    selected = [(p.trip_place_id, p.attachments[0]) for p in message.places]
+    selected.append((5001, selected[0][1].model_copy(update={"trip_attachment_id": 103})))
+    with pytest.raises(PipelineError) as error:
+        finalize(draft((101, 102)), message, selected)
+    assert error.value.detail["reason"] == "INVALID_STORY_OUTPUT"
+    assert len(finalize(draft((103, 102, 101)), message, selected)["blocks"]) == 3
+
+
+@pytest.mark.parametrize("count", [1, 2, 10])
+def test_response_schema_requires_actual_selected_photos(count):
+    ids = list(range(101, 101 + count))
+    schema = response_format(ids)["json_schema"]["schema"]
+    blocks = schema["properties"]["blocks"]
+    assert blocks["minItems"] == blocks["maxItems"] == count
+    block = schema["$defs"]["DraftBlock"]["properties"]
+    assert block["trip_attachment_id"]["enum"] == ids
+    assert schema["properties"]["story_summary"]["maxLength"] == 40
+    assert block["detail_summary"]["maxLength"] == 40
+    assert block["memo"]["maxLength"] == 125
+
+
+def test_response_schemas_do_not_share_mutable_state_between_requests():
+    ids = [101, 102]
+    first = response_format(ids)["json_schema"]["schema"]
+    ids.append(103)
+    second = response_format([201])["json_schema"]["schema"]
+    first["properties"]["blocks"]["maxItems"] = 99
+    first["$defs"]["DraftBlock"]["properties"]["trip_attachment_id"]["enum"].append(999)
+    assert second["properties"]["blocks"]["maxItems"] == 1
+    assert second["$defs"]["DraftBlock"]["properties"]["trip_attachment_id"]["enum"] == [201]
+    assert StoryDraft.model_json_schema()["properties"]["blocks"]["maxItems"] == 30
+    assert response_format([101, 102])["json_schema"]["schema"] != first
+
+
 @pytest.mark.parametrize(
     "fault,code",
     [
@@ -223,6 +260,15 @@ async def test_actual_vlm_transport_and_job_result_outbox():
         body = json.loads(request.content)
         requests.append(body)
         assert body["response_format"]["json_schema"]["name"] == "travel_story"
+        schema = body["response_format"]["json_schema"]["schema"]
+        assert schema["properties"]["blocks"]["minItems"] == 2
+        assert schema["properties"]["blocks"]["maxItems"] == 2
+        assert schema["$defs"]["DraftBlock"]["properties"]["trip_attachment_id"]["enum"] == [
+            101,
+            102,
+        ]
+        assert body["max_tokens"] == 2048
+        assert "40자 이내의 짧은 한 구절" in body["messages"][0]["content"]
         images = [part for part in body["messages"][-1]["content"] if part["type"] == "image_url"]
         assert len(images) == 2
         return httpx.Response(
