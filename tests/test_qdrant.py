@@ -1,10 +1,12 @@
 """ai-api용 비동기 Qdrant 읽기. 후보 범위, 점수 순서, 컬렉션 없음, 오류 변환을 확인한다."""
 
+from dataclasses import replace
 from unittest.mock import AsyncMock
 
 import httpx
 import numpy as np
 import pytest
+from qdrant_client import AsyncQdrantClient
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
@@ -12,7 +14,8 @@ from app.infra.qdrant import MEMORY, AsyncQdrantVectors
 from app.schemas.query import SearchCandidate, SearchRequest
 from app.search import pipeline
 from app.search.context import ModelUnavailable, SearchContext, SearchOptions
-from app.search.mock import MockImages, MockVLM
+from app.search.mock import MockImages, MockVLM, create_mock_context
+from tests.test_query import client_for, search_body
 
 pytestmark = pytest.mark.anyio
 QUERY = [1.0, 0.0, 0.0]
@@ -155,3 +158,49 @@ async def test_search_pipeline_uses_async_vectors_as_candidate_searcher(vectors)
     response = await pipeline.search(request, context, SearchOptions())
 
     assert [hit.trip_attachment_id for hit in response.attachments] == [1, 3]
+
+
+@pytest.mark.parametrize("operation", ["search", "fetch", "collection_exists"])
+@pytest.mark.parametrize("timeout_type", [httpx.ConnectTimeout, httpx.ReadTimeout])
+async def test_sdk_timeouts_preserve_timeout_contract(vectors, operation, timeout_type):
+    wrapped = ResponseHandlingException(timeout_type("private timeout details"))
+    if operation == "collection_exists":
+        vectors._client.collection_exists = AsyncMock(side_effect=wrapped)
+    else:
+        await seed(vectors)
+        target = "query_points" if operation == "search" else "retrieve"
+        setattr(vectors._client, target, AsyncMock(side_effect=wrapped))
+    with pytest.raises(TimeoutError) as raised:
+        if operation == "fetch":
+            await vectors.fetch([1])
+        else:
+            await vectors.search(QUERY, candidate_ids=[1], limit=5)
+    assert "private" not in str(raised.value)
+    assert raised.value.__cause__ is None
+
+
+async def test_qdrant_transport_timeout_returns_http_504():
+    def transport(request):
+        if request.url.path.endswith("/exists"):
+            return httpx.Response(
+                200, json={"result": {"exists": True}, "status": "ok", "time": 0.0}
+            )
+        raise httpx.ReadTimeout("private upstream details", request=request)
+
+    context = create_mock_context()
+    dim = len(await context.embedder.encode_text("바다"))
+    vectors = AsyncQdrantVectors(MEMORY, "test-model", dim)
+    await vectors.aclose()
+    vectors._client = AsyncQdrantClient(
+        url="https://qdrant.example.invalid",
+        check_compatibility=False,
+        transport=httpx.MockTransport(transport),
+    )
+    try:
+        async with client_for(replace(context, vectors=vectors)) as client:
+            response = await client.post("/query/search", json=search_body())
+            assert response.status_code == 504
+            assert response.json()["error"]["code"] == "TIMEOUT"
+            assert "private upstream details" not in response.text
+    finally:
+        await vectors.aclose()

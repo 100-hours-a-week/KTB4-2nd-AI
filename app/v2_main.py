@@ -2,7 +2,8 @@
 
 import asyncio
 import uuid
-from contextlib import asynccontextmanager
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from typing import Literal
 
 from fastapi import Depends, FastAPI, Request
@@ -11,6 +12,7 @@ from redis.exceptions import RedisError
 
 from app.api.deps import require_api_key
 from app.api.routers import query
+from app.api.search_bootstrap import search_service
 from app.api.services.query_service import QueryService
 from app.core.http_errors import register_error_handlers
 from app.core.logging import bind_request, setup_logging
@@ -29,7 +31,12 @@ def create_app(
     query_service: QueryService | None = None,
     *,
     start_kafka: bool = True,
+    query_service_factory: Callable[[JobsSettings], AbstractAsyncContextManager[QueryService]]
+    | None = None,
 ) -> FastAPI:
+    if query_service is not None and query_service_factory is not None:
+        raise ValueError("검색 서비스와 검색 구성 함수는 하나만 지정해야 합니다.")
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         cfg = settings or JobsSettings()
@@ -54,21 +61,30 @@ def create_app(
         app.state.query_service = query_service
         app.state.kafka = runtime
         story_runner = None
+        search_resources = AsyncExitStack()
         try:
             await jobs.redis.ping()
+            factory = query_service_factory
+            if query_service is None and factory is None and cfg.SEARCH_ENABLED:
+                factory = search_service
+            if factory:
+                app.state.query_service = await search_resources.enter_async_context(factory(cfg))
             if runtime:
                 await runtime.start()
                 story_runner = asyncio.create_task(runner_loop(jobs, "story"))
             app.state.story_runner = story_runner
             yield
         finally:
-            if story_runner:
-                story_runner.cancel()
-                await asyncio.gather(story_runner, return_exceptions=True)
-            if runtime:
-                await runtime.stop()
-            if redis:
-                await redis.aclose()
+            try:
+                if story_runner:
+                    story_runner.cancel()
+                    await asyncio.gather(story_runner, return_exceptions=True)
+                if runtime:
+                    await runtime.stop()
+                if redis:
+                    await redis.aclose()
+            finally:
+                await search_resources.aclose()
 
     app = FastAPI(title="여담 AI v2", lifespan=lifespan)
     register_error_handlers(app)
@@ -145,3 +161,10 @@ def create_app(
 
     app.include_router(query.router)
     return app
+
+
+def create_search_app(
+    settings: JobsSettings | None = None, store: RedisJobStore | None = None
+) -> FastAPI:
+    """검색 검증용 진입점. 실제 검색을 연결하고 Kafka 및 스토리 실행은 시작하지 않는다."""
+    return create_app(settings, store, start_kafka=False, query_service_factory=search_service)

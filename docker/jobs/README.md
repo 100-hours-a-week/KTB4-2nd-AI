@@ -31,7 +31,36 @@ async def run(request: dict, reporter: JobReporter) -> dict:
     return result
 ```
 
-기존 정리 함수 `run(request, ctx, on_progress, is_cancelled)`는 유지합니다. 위 async 함수는 서버 담당자가 연결할 어댑터이며, 정리 담당자에게 알고리즘의 시그니처 변경을 요구하지 않습니다. 기능별 입력과 결과는 `app/jobs/models.py`에 있습니다. 임베딩 HTTP 연결과 실제 스토리 파이프라인은 각각의 구현이 준비된 뒤 연결합니다. 검색은 기존 QueryService를 주입하며 Kafka와 Redis 대기열을 거치지 않습니다. 미연결 검색은 503을 반환합니다.
+기존 정리 함수 `run(request, ctx, on_progress, is_cancelled)`는 유지합니다. 위 async 함수는 서버 담당자가 연결할 어댑터이며, 정리 담당자에게 알고리즘의 시그니처 변경을 요구하지 않습니다. 기능별 입력과 결과는 `app/jobs/models.py`에 있습니다. 임베딩 HTTP 연결과 실제 스토리 파이프라인은 각각의 구현이 준비된 뒤 연결합니다.
+
+## 실제 검색 연결
+
+기본 API 실행 명령에서 `SEARCH_ENABLED=true`로 설정하면 Qwen 텍스트 임베딩, Qdrant 후보 검색, 생성용 VLM과 S3 URL 발급기를 연결합니다. 검색은 Kafka와 Redis 대기열을 거치지 않으며 API마다 비동기 클라이언트를 한 번 만들고 종료할 때 닫습니다. `SEARCH_ENABLED=false`는 작업 서버만 검증할 때 사용하는 기본값이며, 이때 검색 HTTP는 503을 반환합니다. 검색 설정이 잘못되었을 때 mock으로 전환하지 않습니다.
+
+루트 `.env.example`을 참고해 다음 값을 환경변수로 주입합니다. 컨테이너 안에 설정 파일을 복사할 필요는 없습니다.
+
+| 설정 | 용도 |
+| --- | --- |
+| `API_KEY`, `REDIS_URL` | BE의 HTTP 인증과 API가 공유할 작업 저장소 |
+| `SEARCH_ENABLED=true` | 기본 API에서 실제 검색 활성화 |
+| `EMBEDDING_BASE_URL`, `EMBEDDING_SERVED_MODEL_NAME`, `EMBEDDING_API_KEY` | AWS Qwen 임베딩 서버의 주소와 모델 이름, 서버가 인증을 사용할 때의 키 |
+| `QDRANT_URL`, `QDRANT_TIMEOUT_SEC` | Qdrant 주소와 개별 HTTP 요청의 시간 상한. 기본 5초 |
+| `VLM_BASE_URL`, `VLM_MODEL`, `VLM_API_KEY` | RunPod 생성 서버의 주소와 모델 이름, 서버가 인증을 사용할 때의 키 |
+| `IMAGE_SOURCE=s3`, `S3_BUCKET`, `AWS_REGION`, `S3_PRESIGN_EXPIRES_SEC` | 분석용 사진 위치와 URL 유효기간. 기본 300초 |
+
+검색은 `vectors_qwen3-vl-embedding-2b` 컬렉션의 2048차원 벡터를 읽습니다. 정리 실행기가 같은 Qwen 모델로 사진을 임베딩하고 BE의 `trip_attachment_id`를 point ID로 저장해야 합니다. v1 벡터를 대신 검색하지 않습니다. 컬렉션이나 후보의 벡터가 없으면 해당 사진은 결과에서 빠지므로, 검색 검증 전에 사진 적재 여부를 확인합니다.
+
+API의 AWS 역할에는 분석용 사본의 `s3:GetObject` 권한이 필요하며, 생성용 VLM 서버가 서명된 URL로 S3에 접근할 수 있어야 합니다. URL은 QUESTION에서 선별된 근거 사진에만 발급하고 이미지를 내려받거나 다시 인코딩하지 않습니다. 실제 URL 만료는 서명에 사용한 자격 증명의 만료에도 제한됩니다.
+
+스토리 실행 함수가 준비되기 전에 검색만 연결하려면 같은 이미지에서 다음 명령을 사용합니다. 이 진입점은 검색을 활성화하고 Kafka 소비와 스토리 실행을 시작하지 않습니다. Redis와 검색용 설정은 필요하며, 정리와 스토리 메시지의 통합 검증에는 기본 API 진입점을 사용합니다.
+
+```sh
+uvicorn app.v2_main:create_search_app --factory --host 0.0.0.0 --port 8000
+```
+
+테스트나 별도 조립에서는 `create_app(query_service_factory=...)` 또는 `query_service=...`를 사용할 수 있습니다. 둘을 동시에 지정할 수는 없습니다. `search_service(settings, vectors=..., embedder=...)`에 주입한 자원은 호출자가 닫으며, 생략해서 구성 함수가 만든 자원은 구성 함수가 닫습니다.
+
+임베딩과 후보 검색의 시간 초과는 HTTP 504의 `TIMEOUT`, 연결 실패는 HTTP 503의 `MODEL_NOT_READY`로 반환합니다. 사진 검색 뒤 답변만 실패하면 사진 목록을 유지하고 `answer_error`를 반환합니다. `/health` 성공만으로 모델 호출, Qdrant 데이터나 S3 접근까지 확인되지는 않습니다.
 
 ## 업로드 묶음 수신
 

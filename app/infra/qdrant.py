@@ -7,6 +7,7 @@ payload는 비움. 모델이 바뀌면 벡터를 전부 다시 만들므로 컬�
 
 import re
 
+import httpx
 import numpy as np
 from qdrant_client import AsyncQdrantClient, QdrantClient
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
@@ -67,7 +68,7 @@ class QdrantStore:
 class AsyncQdrantVectors:
     """ai-api의 검색과 스토리용 비동기 읽기. 저장과 컬렉션 생성은 정리 실행기의 QdrantStore만 담당
 
-    컬렉션이 아직 없으면(해당 모델로 정리된 사진 없음) 빈 결과. 연결과 응답 오류는 ModelUnavailable
+    컬렉션이 없으면 빈 결과, 시간 초과는 TimeoutError, 그 외 연결과 응답 오류는 ModelUnavailable
     """
 
     def __init__(self, location: str, model_version: str, dim: int, timeout_sec: int = 5) -> None:
@@ -100,6 +101,10 @@ class AsyncQdrantVectors:
                 with_payload=False,
             )
         except (ResponseHandlingException, UnexpectedResponse) as exc:
+            if isinstance(exc, ResponseHandlingException) and isinstance(
+                exc.source, httpx.TimeoutException
+            ):
+                raise TimeoutError("벡터 검색 시간이 초과되었습니다.") from None
             # 원인 구분용으로 예외 종류만 기록, 질의 벡터와 후보 ID는 남기지 않음
             logger.warning("qdrant unavailable", extra={"error_type": type(exc).__name__})
             raise ModelUnavailable("벡터 검색을 사용할 수 없습니다.") from None
@@ -116,6 +121,10 @@ class AsyncQdrantVectors:
                 collection_name=self.collection, ids=ids, with_vectors=True, with_payload=False
             )
         except (ResponseHandlingException, UnexpectedResponse) as exc:
+            if isinstance(exc, ResponseHandlingException) and isinstance(
+                exc.source, httpx.TimeoutException
+            ):
+                raise TimeoutError("벡터 조회 시간이 초과되었습니다.") from None
             logger.warning("qdrant unavailable", extra={"error_type": type(exc).__name__})
             raise ModelUnavailable("벡터 조회를 사용할 수 없습니다.") from None
         return {int(record.id): np.asarray(record.vector, dtype=np.float32) for record in records}
