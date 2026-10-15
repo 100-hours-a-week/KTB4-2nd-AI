@@ -11,7 +11,7 @@ from redis.asyncio import Redis
 from redis.exceptions import WatchError
 
 from app.core.errors import AppError, ErrorCode
-from app.jobs.config import JobsSettings
+from app.jobs.config import MAX_STORY_CONCURRENCY, JobsSettings
 from app.jobs.models import (
     PHOTOS_READY_MAX_BYTES,
     JobKind,
@@ -39,6 +39,15 @@ class RedisJobStore:
 
     def photo_batches_key(self, identity: str) -> str:
         return self.key("photo_batches:" + identity)
+
+    def slot_keys(self, kind: JobKind) -> list[str]:
+        # 첫 키는 기존 단일 실행기와 공유한다. 나머지는 스토리 전용이다.
+        base = self.key(f"slot:{kind}")
+        return [base] + (
+            [f"{base}:{index}" for index in range(1, MAX_STORY_CONCURRENCY)]
+            if kind == "story"
+            else []
+        )
 
     async def stage_photos(
         self, message: PhotosReadyMessage, request_topic: str
@@ -156,19 +165,41 @@ class RedisJobStore:
                 except WatchError:
                     continue
 
-    async def claim(self, kind: JobKind, worker: str) -> JobRecord | None:
+    async def claim(
+        self, kind: JobKind, worker: str, *, should_stop: Callable[[], bool] | None = None
+    ) -> JobRecord | None:
         queue = self.key(f"queue:{kind}")
-        slot = self.key(f"slot:{kind}")
+        slots = self.slot_keys(kind)
+        limit = self.cfg.JOBS_STORY_CONCURRENCY if kind == "story" else 1
         while True:
+            if should_stop and should_stop():
+                return None
             async with self.redis.pipeline(transaction=True) as pipe:
                 try:
-                    await pipe.watch(queue, slot)
-                    if await pipe.get(slot):
+                    await pipe.watch(queue, *slots)
+                    occupants = await pipe.mget(slots)
+                    # 이전 이미지의 복구 루프는 추가 슬롯을 모른다. 종료된 소유자만 정리한다.
+                    stale = []
+                    for index, occupant in enumerate(occupants):
+                        if occupant is None:
+                            continue
+                        occupant_key = self.record_key(occupant)
+                        await pipe.watch(occupant_key)
+                        raw = await pipe.get(occupant_key)
+                        if raw and JobRecord.model_validate_json(raw).status in TERMINAL_STATUSES:
+                            stale.append(slots[index])
+                    if stale:
+                        pipe.multi()
+                        pipe.delete(*stale)
+                        await pipe.execute()
+                        continue
+                    if sum(owner is not None for owner in occupants) >= limit:
                         return None
-                    waiting = await pipe.zrange(queue, 0, 0)
+                    slot = slots[occupants.index(None)]
+                    waiting = await pipe.zrange(queue, 0, 0, withscores=True)
                     if not waiting:
                         return None
-                    identity = waiting[0]
+                    identity, queue_score = waiting[0]
                     key = self.record_key(identity)
                     await pipe.watch(key)
                     raw = await pipe.get(key)
@@ -182,6 +213,8 @@ class RedisJobStore:
                     record.status = TaskStatus.PROCESSING
                     record.owner = worker + ":" + uuid.uuid4().hex
                     record.started_at = record.heartbeat_at = now
+                    if should_stop and should_stop():
+                        return None
                     pipe.multi()
                     pipe.zrem(queue, identity)
                     pipe.set(slot, identity)
@@ -191,12 +224,19 @@ class RedisJobStore:
                         {identity: now + min(self.cfg.JOBS_LEASE_SEC, self.cfg.JOBS_TIMEOUT_SEC)},
                     )
                     await pipe.execute()
+                    if should_stop and should_stop():
+                        await self.return_unstarted(record, queue_score)
+                        return None
                     return record
                 except WatchError:
                     continue
 
     async def change(
-        self, identity: str, update: Callable[[JobRecord, float], bool]
+        self,
+        identity: str,
+        update: Callable[[JobRecord, float], bool],
+        *,
+        queue_score: float | None = None,
     ) -> JobRecord | None:
         """조건 확인과 상태 저장을 같은 트랜잭션으로 처리. update는 재실행될 수 있다."""
         key = self.record_key(identity)
@@ -212,9 +252,9 @@ class RedisJobStore:
                     now = await self.now()
                     if not update(record, now):
                         return None
-                    slot = self.key(f"slot:{record.kind}")
-                    await pipe.watch(slot)
-                    slot_owner = await pipe.get(slot)
+                    slots = self.slot_keys(record.kind)
+                    await pipe.watch(*slots)
+                    slot_owners = await pipe.mget(slots)
                     pipe.multi()
                     pipe.set(key, record.model_dump_json())
                     if record.status in TERMINAL_STATUSES:
@@ -222,8 +262,9 @@ class RedisJobStore:
                             terminal_commands(pipe, self.key("metrics:operations"), record, now)
                         pipe.zrem(self.key(f"queue:{record.kind}"), identity)
                         pipe.zrem(self.key("running"), identity)
-                        if slot_owner == identity:
-                            pipe.delete(slot)
+                        for slot, slot_owner in zip(slots, slot_owners, strict=True):
+                            if slot_owner == identity:
+                                pipe.delete(slot)
                         if not record.published:
                             pipe.zadd(
                                 self.key("pending"), {identity: max(now, record.publish_until)}
@@ -234,12 +275,33 @@ class RedisJobStore:
                             record.started_at + self.cfg.JOBS_TIMEOUT_SEC,
                         )
                         pipe.zadd(self.key("running"), {identity: deadline})
+                    elif record.status == TaskStatus.QUEUED and queue_score is not None:
+                        pipe.zrem(self.key("running"), identity)
+                        for slot, slot_owner in zip(slots, slot_owners, strict=True):
+                            if slot_owner == identity:
+                                pipe.delete(slot)
+                        pipe.zadd(self.key(f"queue:{record.kind}"), {identity: queue_score})
                     await pipe.execute()
                     if not was_terminal and record.status in TERMINAL_STATUSES:
                         log_terminal(record, now)
                     return record
                 except WatchError:
                     continue
+
+    async def return_unstarted(self, claimed: JobRecord, queue_score: float) -> None:
+        """종료 신호와 선점 응답이 겹치면 아직 실행하지 않은 작업을 원래 순서로 돌린다."""
+
+        def update(record: JobRecord, now: float) -> bool:
+            if not self.owns(record, claimed.owner, now):
+                return False
+            if record.cancel_requested:
+                self.terminate(record, "CANCELED")
+            else:
+                record.status = TaskStatus.QUEUED
+                record.owner = record.started_at = record.heartbeat_at = None
+            return True
+
+        await self.change(claimed.identity, update, queue_score=queue_score)
 
     def owns(self, record: JobRecord, owner: str, now: float) -> bool:
         return (

@@ -10,31 +10,44 @@ from app.search.context import ModelUnavailable
 from tests.test_v2_jobs import environment, scenario
 
 
+@pytest.mark.parametrize("limit", [2, 8])
 @scenario
-async def test_limit_is_shared_across_api_and_story_clients():
+async def test_limit_is_shared_across_api_and_story_clients(limit):
     async with environment() as (cfg, a, b, _):
-        cfg.GPU_GENERATION_INFLIGHT = 2
+        cfg.GPU_GENERATION_INFLIGHT = limit
         active = maximum = 0
+        full, release = asyncio.Event(), asyncio.Event()
 
         async def operation(*args):
             nonlocal active, maximum
             active += 1
             maximum = max(maximum, active)
-            await asyncio.sleep(0.02)
+            if active == limit:
+                full.set()
+            await release.wait()
             active -= 1
             return "ok"
 
         model = AsyncMock()
         model.chat.side_effect = operation
         clients = [generation_client(model, s.redis, cfg) for s in (a, b, a)]
-        await asyncio.gather(*[clients[i % 3].chat([], [], 20) for i in range(9)])
-        assert maximum == 2
+        tasks = [asyncio.create_task(clients[i % 3].chat([], [], 20)) for i in range(9)]
+        try:
+            await asyncio.wait_for(full.wait(), timeout=1.5)
+            release.set()
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        assert maximum == limit
         assert await a.redis.zcard(a.key("gpu:generation")) == 0
 
 
 @scenario
 async def test_busy_and_redis_failure_never_start_http_call():
     async with environment() as (cfg, a, _, _):
+        cfg.GPU_GENERATION_INFLIGHT = 2
         cfg.GPU_WAIT_SEC = 0.01
         client = AsyncMock()
         gate = generation_client(client, a.redis, cfg)

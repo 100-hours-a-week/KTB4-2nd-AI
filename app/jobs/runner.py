@@ -1,4 +1,4 @@
-"""Redis 단일 소비 루프. CPU 작업은 subprocess에서 실행해 heartbeat와 API를 막지 않는다."""
+"""Redis 실행 루프. 작업은 subprocess에서 실행해 heartbeat와 API를 막지 않는다."""
 
 import asyncio
 import os
@@ -73,14 +73,19 @@ async def run_claimed(store: RedisJobStore, record: JobRecord) -> None:
         await stop_child(process)
 
 
-async def runner_loop(store: RedisJobStore, kind: JobKind) -> None:
+async def runner_loop(
+    store: RedisJobStore, kind: JobKind, stop: asyncio.Event | None = None
+) -> None:
     handler_for(store.cfg, kind)  # 실제 구현이 미설정이면 기동을 거부한다.
+    stop = stop or asyncio.Event()
     worker = uuid.uuid4().hex
-    while True:
+    while not stop.is_set():
         record = None
         try:
             await store.recover()
-            record = await store.claim(kind, worker)
+            if stop.is_set():
+                return
+            record = await store.claim(kind, worker, should_stop=stop.is_set)
             if record:
                 await run_claimed(store, record)
         except asyncio.CancelledError:
@@ -96,7 +101,26 @@ async def runner_loop(store: RedisJobStore, kind: JobKind) -> None:
             log.warning(
                 "실행기 연결 실패, 소유권 만료 후 회수", extra={"event": "ai_job_runner_retry"}
             )
-        await asyncio.sleep(store.cfg.JOBS_POLL_SEC)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=store.cfg.JOBS_POLL_SEC)
+        except TimeoutError:
+            pass
+
+
+async def story_runners(store: RedisJobStore, stop: asyncio.Event) -> None:
+    """API가 하나만 남아도 실행 한도를 사용하고, 전체 한도는 Redis에서 제한한다."""
+    async with asyncio.TaskGroup() as group:
+        for _ in range(store.cfg.JOBS_STORY_CONCURRENCY):
+            group.create_task(runner_loop(store, "story", stop))
+
+
+async def drain_story_runners(task: asyncio.Task, stop: asyncio.Event, timeout: float) -> None:
+    stop.set()
+    done, _ = await asyncio.wait([task], timeout=timeout)
+    if not done:
+        # 유예가 끝나면 각 루프가 자식을 종료하고 FAILED 결과를 Redis에 남긴다.
+        task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
 
 
 async def main(kind: JobKind = "process") -> None:

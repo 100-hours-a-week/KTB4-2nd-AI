@@ -6,6 +6,8 @@ from pydantic import Field, SecretStr, model_validator
 
 from app.core.config import Settings
 
+MAX_STORY_CONCURRENCY = 4
+
 
 class JobsSettings(Settings):
     # v2 API에서 실제 검색 의존성을 조립한다. 로컬 작업 큐 검증은 비활성화해 사용한다.
@@ -32,13 +34,16 @@ class JobsSettings(Settings):
     # async def handler(request: dict, reporter: JobReporter) -> dict
     JOBS_PROCESS_HANDLER: str | None = None
     JOBS_STORY_HANDLER: str | None = None
+    # 각 API의 실행 루프 수와 Redis에서 허용하는 전체 스토리 실행 수.
+    JOBS_STORY_CONCURRENCY: int = Field(default=4, ge=1, le=MAX_STORY_CONCURRENCY)
+    JOBS_SHUTDOWN_GRACE_SEC: float = Field(default=60, ge=0, le=60, allow_inf_nan=False)
     # 실제 모델에서 품질과 메모리를 확인해 조정할 초기 설정값이다.
     STORY_IMAGE_BUDGET: int = Field(default=10, ge=1, le=30)
     STORY_BLUR_VAR_MIN: float = Field(default=80, ge=0, allow_inf_nan=False)
     STORY_PHASH_MAX_DIST: int = Field(default=4, ge=0, le=64)
     STORY_MAX_TOKENS: int = Field(default=2048, ge=1)
     # API 복제본과 스토리 프로세스가 공유하는 HTTP 호출 한도. GPU 성능 보장값은 아니다.
-    GPU_GENERATION_INFLIGHT: int = Field(default=2, ge=1)
+    GPU_GENERATION_INFLIGHT: int = Field(default=8, ge=1)
     GPU_SEARCH_EMBEDDING_INFLIGHT: int = Field(default=2, ge=1)
     GPU_WAIT_SEC: float = Field(default=2, gt=0, allow_inf_nan=False)
 
