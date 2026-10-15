@@ -1,4 +1,4 @@
-# RunPod 생성 서버의 실행 계약. 모델과 GPU에서 검증한 이미지 및 revision을 전달한다.
+# RunPod 생성 서버의 실행 계약, RunPod 템플릿 Container Start Command와 같은 인자
 services:
   generation:
     image: ${VLLM_GENERATION_IMAGE:?Set a validated vLLM image tag or digest}
@@ -6,6 +6,8 @@ services:
     command:
       - ${GENERATION_MODEL:?Set the generation model repository}
       - --revision
+      - ${GENERATION_MODEL_REVISION:?Set the model revision}
+      - --tokenizer-revision
       - ${GENERATION_MODEL_REVISION:?Set the model revision}
       - --served-model-name
       - ${GENERATION_SERVED_MODEL_NAME:?Set the public model name}
@@ -15,8 +17,17 @@ services:
       - "8000"
       - --max-model-len
       - ${GENERATION_MAX_MODEL_LEN:-16384}
+      - --gpu-memory-utilization
+      - ${GENERATION_GPU_MEMORY_UTILIZATION:-0.90}
+      - --max-num-seqs
+      - ${GENERATION_MAX_NUM_SEQS:-8}
       - --limit-mm-per-prompt
-      - '{"image": ${GENERATION_MAX_IMAGES:-10}}'
+      - '{"image": ${GENERATION_MAX_IMAGES:-10}, "audio": 0, "video": 0}'
+      - --scheduling-policy
+      - priority
+      # 볼륨에서 가중치를 읽을 때 미리 페이지 캐시에 올림, RunPod 재시작 약 11분에서 약 3분
+      - --safetensors-load-strategy
+      - prefetch
     environment:
       VLLM_API_KEY: ${GENERATION_API_KEY:?Set the generation API key}
       HF_TOKEN: ${HF_TOKEN:-}
