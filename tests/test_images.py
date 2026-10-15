@@ -47,6 +47,9 @@ class _FakeS3Client:
             def read(self_inner):
                 return b"OK-" + Key.encode()
 
+            def close(self_inner):
+                pass
+
         return {"Body": Body()}
 
 
