@@ -32,6 +32,11 @@ class JobsSettings(Settings):
     # async def handler(request: dict, reporter: JobReporter) -> dict
     JOBS_PROCESS_HANDLER: str | None = None
     JOBS_STORY_HANDLER: str | None = None
+    # 실제 모델에서 품질과 메모리를 확인해 조정할 초기 설정값이다.
+    STORY_IMAGE_BUDGET: int = Field(default=10, ge=1, le=30)
+    STORY_BLUR_VAR_MIN: float = Field(default=80, ge=0, allow_inf_nan=False)
+    STORY_PHASH_MAX_DIST: int = Field(default=4, ge=0, le=64)
+    STORY_MAX_TOKENS: int = Field(default=4096, ge=1)
 
     @model_validator(mode="after")
     def check_jobs_settings(self) -> Self:

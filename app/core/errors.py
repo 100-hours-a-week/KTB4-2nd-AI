@@ -19,6 +19,7 @@ class ErrorCode(StrEnum):
     TASK_NOT_FOUND = "TASK_NOT_FOUND"
     RATE_LIMITED = "RATE_LIMITED"
     MODEL_NOT_READY = "MODEL_NOT_READY"
+    VLM_UNAVAILABLE = "VLM_UNAVAILABLE"
     DOWNLOAD_FAILED = "DOWNLOAD_FAILED"
     WORKER_DEAD = "WORKER_DEAD"
     TIMEOUT = "TIMEOUT"
@@ -54,6 +55,7 @@ DEFAULT_MESSAGE: dict[ErrorCode, str] = {
     ErrorCode.TASK_NOT_FOUND: "작업 기록이 없습니다. 다시 요청해 주세요.",
     ErrorCode.RATE_LIMITED: "대기열이 가득 찼습니다. 잠시 후 다시 요청해 주세요.",
     ErrorCode.MODEL_NOT_READY: "모델 적재가 끝나지 않았습니다.",
+    ErrorCode.VLM_UNAVAILABLE: "스토리 생성 서버를 사용할 수 없습니다.",
     ErrorCode.DOWNLOAD_FAILED: "사본 다운로드에 실패했습니다.",
     ErrorCode.WORKER_DEAD: "워커 응답이 끊겼습니다.",
     ErrorCode.TIMEOUT: "처리 시간 상한을 초과했습니다.",
