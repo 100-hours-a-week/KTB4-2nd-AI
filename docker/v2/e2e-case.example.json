@@ -1,0 +1,91 @@
+{
+  "process": {
+    "type": "process",
+    "trip_id": 77,
+    "execution_id": "execution-1",
+    "trigger": "TRIP_CREATED",
+    "trip_name": "제주 여행",
+    "period": {
+      "start_date": "2026-10-12",
+      "end_date": "2026-10-14"
+    },
+    "regions": [
+      {
+        "latitude": 33.4,
+        "longitude": 126.5
+      }
+    ],
+    "attachments": [
+      {
+        "trip_attachment_id": 101,
+        "analyze_storage_key": "trips/77/101.jpg",
+        "taken_at": "2026-10-12T06:00:00+09:00",
+        "latitude": 33.4,
+        "longitude": 126.5,
+        "device_model": "test"
+      },
+      {
+        "trip_attachment_id": 102,
+        "analyze_storage_key": "trips/77/102.jpg",
+        "taken_at": "2026-10-12T07:00:00+09:00",
+        "latitude": 33.4,
+        "longitude": 126.5,
+        "device_model": "test"
+      }
+    ]
+  },
+  "story": {
+    "type": "story",
+    "trip_id": 77,
+    "execution_id": "story-1",
+    "trip_name": "제주 여행",
+    "period": {
+      "start_date": "2026-10-12",
+      "end_date": "2026-10-14"
+    },
+    "mood": "PLAIN",
+    "places": [
+      {
+        "trip_place_id": 5001,
+        "place_name": "해변",
+        "attachments": [
+          {
+            "trip_attachment_id": 101,
+            "analyze_storage_key": "trips/77/101.jpg",
+            "taken_at": "2026-10-12T06:00:00+09:00"
+          },
+          {
+            "trip_attachment_id": 102,
+            "analyze_storage_key": "trips/77/102.jpg",
+            "taken_at": "2026-10-12T07:00:00+09:00"
+          }
+        ]
+      }
+    ]
+  },
+  "parse": {
+    "query": "사진에 무엇이 보이지?",
+    "reference_date": "2026-10-14"
+  },
+  "search": {
+    "query": "사진에 무엇이 보이지?",
+    "intent": "QUESTION",
+    "visual_query": "사진",
+    "candidates": [
+      {
+        "trip_attachment_id": 101,
+        "analyze_storage_key": "trips/77/101.jpg",
+        "taken_at": "2026-10-12T06:00:00+09:00",
+        "place_name": "해변",
+        "trip_name": "제주 여행"
+      },
+      {
+        "trip_attachment_id": 102,
+        "analyze_storage_key": "trips/77/102.jpg",
+        "taken_at": "2026-10-12T07:00:00+09:00",
+        "place_name": "해변",
+        "trip_name": "제주 여행"
+      }
+    ]
+  }
+}

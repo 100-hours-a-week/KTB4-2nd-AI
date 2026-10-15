@@ -123,7 +123,12 @@ async def environment(**changes):
     )
     for name in type(cfg).model_fields:
         if name.endswith("_TOPIC"):
-            setattr(cfg, name, getattr(cfg, name).replace("local.", cfg.JOBS_ENV + "."))
+            work, direction = name.removeprefix("KAFKA_").removesuffix("_TOPIC").rsplit("_", 1)
+            setattr(
+                cfg,
+                name,
+                f"{cfg.JOBS_ENV}.yeodam.{work.lower().replace('_', '-')}.{direction.lower()}",
+            )
     real_url = os.environ.get("JOBS_TEST_REDIS_URL")
     if real_url:
         clients = [Redis.from_url(real_url, decode_responses=True) for _ in range(2)]
