@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError
 from app.infra.vlm import ChatMessage
 from app.schemas.query import Intent, ParseRequest, ParseResponse
 from app.search.context import Evidence, InvalidModelOutput
+from app.search.regions import to_catalog_names
 
 # 실제 모델의 출력 길이를 측정한 뒤 조정한다.
 PARSE_MAX_TOKENS = 512
@@ -86,7 +87,7 @@ def parse_output(text: str, request: ParseRequest) -> ParseResponse:
         intent=output.intent,
         date_from=date_from,
         date_to=date_to,
-        region_names=list(dict.fromkeys(names)) or None,
+        region_names=to_catalog_names(names),
         visual_query=visual_query or None,
         parsed=True,
     )

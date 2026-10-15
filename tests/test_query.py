@@ -15,7 +15,7 @@ from app.core.config import Settings
 from app.infra.vlm import VLMUnavailable
 from app.main import create_app
 from app.schemas.query import ParseRequest, ParseResponse, SearchHit, SearchResponse
-from app.search import prompts
+from app.search import prompts, regions
 from app.search.context import InvalidModelOutput, ModelUnavailable, SearchOptions
 from app.search.mock import MockEmbedder, MockImages, MockVLM, create_mock_context
 
@@ -538,11 +538,89 @@ def test_parse_output_normalizes_empty_values_and_sets_parsed():
         model_output(region_names=[" 속초 ", "", "속초", "강릉"], visual_query="  "),
         PARSE_REQUEST,
     )
-    assert result.region_names == ["속초", "강릉"]
+    assert result.region_names == ["강원특별자치도 속초시", "강원특별자치도 강릉시"]
     assert result.visual_query is None
     assert result.parsed is True
     empty = prompts.parse_output(model_output(region_names=[" "]), PARSE_REQUEST)
     assert empty.region_names is None
+
+
+@pytest.mark.parametrize(
+    "names,expected",
+    [
+        (["부산"], ["부산광역시", "부산광역시 기장군"]),
+        (["부산시"], ["부산광역시", "부산광역시 기장군"]),
+        (["제주도"], ["제주특별자치도 제주시", "제주특별자치도 서귀포시"]),
+        (["판교", "성남"], ["경기도 성남시"]),
+        (["양양"], ["강원특별자치도 양양군"]),
+        # 단위까지 같은 이름이 있으면 그것만
+        (["광주시"], ["경기도 광주시"]),
+        (["광주"], ["전남광주통합특별시", "경기도 광주시"]),
+        # 상위 지역 항목이 카탈로그에 있으면 함께
+        (["기장"], ["부산광역시 기장군", "부산광역시"]),
+        (["부산광역시 기장군"], ["부산광역시 기장군", "부산광역시"]),
+        (["목포"], ["전남광주통합특별시 목포시", "전남광주통합특별시"]),
+        # 띄어 쓴 이름은 단어별로
+        (["부산 기장"], ["부산광역시", "부산광역시 기장군"]),
+        (["서울 강남"], ["서울특별시"]),
+        # 자치구는 상위 시로, 여러 시에 있는 이름은 모두
+        (["해운대"], ["부산광역시"]),
+        (["해운대구"], ["부산광역시"]),
+        (["강서구"], ["서울특별시", "부산광역시"]),
+        (["수성구", "강남"], ["대구광역시", "서울특별시"]),
+        (["제물포구"], ["인천광역시"]),
+        (["영종도"], ["인천광역시"]),
+        # 카탈로그에 없는 건물, 상호, 장소 종류, 다른 뜻과 겹치는 이름은 버림
+        (["카카오 아지트", "서점", "판교"], None),
+        (["서해", "수영"], None),
+        ([], None),
+    ],
+)
+def test_region_names_become_catalog_names(names, expected):
+    assert regions.to_catalog_names(names) == expected
+
+
+@pytest.mark.parametrize(
+    "name,provinces",
+    [
+        ("경북", {"경상북도"}),
+        ("강원도", {"강원특별자치도"}),
+        ("전라도", {"전북특별자치도", "전남광주통합특별시"}),
+        ("강원 양양", {"강원특별자치도"}),
+    ],
+)
+def test_region_province_expands_to_all_regions(name, provinces):
+    result = regions.to_catalog_names([name])
+    expected = [region for region in regions.catalog() if region.split(" ")[0] in provinces]
+    assert sorted(result) == sorted(expected)
+
+
+def test_region_district_cities_exist_in_catalog():
+    cities = {city for names in regions._districts().values() for city in names}
+    assert cities <= set(regions.catalog())
+    assert set(regions._districts()["중구"]) == {
+        "서울특별시",
+        "부산광역시",
+        "대구광역시",
+        "인천광역시",
+        "대전광역시",
+        "울산광역시",
+    }
+
+
+def test_region_catalog_matches_backend_copy():
+    names = regions.catalog()
+    assert len(names) == len(set(names)) == 167
+    assert all(name.strip() == name and name for name in names)
+
+
+def test_parse_output_drops_region_names_outside_catalog():
+    result = prompts.parse_output(
+        model_output(region_names=["카카오 아지트", "서점"], visual_query="카카오 아지트"),
+        PARSE_REQUEST,
+    )
+    assert result.region_names is None
+    assert result.visual_query == "카카오 아지트"
 
 
 @pytest.mark.parametrize(
@@ -566,7 +644,7 @@ def test_parse_output_clears_only_invalid_dates(date_from, date_to, expected):
     )
     dumped = result.model_dump(mode="json")
     assert (dumped["date_from"], dumped["date_to"]) == expected
-    assert dumped["region_names"] == ["속초"] and dumped["visual_query"] == "바다"
+    assert dumped["region_names"] == ["강원특별자치도 속초시"] and dumped["visual_query"] == "바다"
     assert dumped["parsed"] is True
 
 
