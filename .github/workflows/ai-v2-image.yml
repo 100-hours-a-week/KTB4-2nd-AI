@@ -34,5 +34,41 @@ jobs:
           IMAGE: ghcr.io/${{ github.repository_owner }}/yeodam-ai-app:sha-${{ github.sha }}
           DIGEST: ${{ steps.image.outputs.digest }}
         run: |
-          echo "AI_APP_IMAGE=${IMAGE}@${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo '### AI V2 Manifest candidate'
+            echo "SOURCE_SHA=${GITHUB_SHA}"
+            echo "BUILD_RUN_ID=${GITHUB_RUN_ID}"
+            echo "AI_APP_IMAGE=${IMAGE}"
+            echo "AI_APP_DIGEST=${DIGEST}"
+          } >> "$GITHUB_STEP_SUMMARY"
           echo 'This image requires staging validation before production deployment.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Notify Cloud V2 release manifest
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.CLOUD_RELEASE_TOKEN }}
+          IMAGE: ghcr.io/${{ github.repository_owner }}/yeodam-ai-app:sha-${{ github.sha }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -Eeuo pipefail
+          jq -n \
+            --arg component ai-app \
+            --arg source_repository "${GITHUB_REPOSITORY}" \
+            --arg source_sha "${GITHUB_SHA}" \
+            --arg image "${IMAGE}" \
+            --arg digest "${DIGEST}" \
+            --arg build_run_id "${GITHUB_RUN_ID}" \
+            '{
+              event_type: "v2-image-published",
+              client_payload: {
+                component: $component,
+                source_repository: $source_repository,
+                source_sha: $source_sha,
+                image: $image,
+                digest: $digest,
+                build_run_id: $build_run_id
+              }
+            }' |
+            gh api \
+              --method POST \
+              repos/100-hours-a-week/KTB4-2nd-Cloud/dispatches \
+              --input -
