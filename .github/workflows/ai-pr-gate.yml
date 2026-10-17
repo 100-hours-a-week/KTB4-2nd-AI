@@ -59,6 +59,7 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
 
       - name: Set up uv
+        id: uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "0.12.15"
@@ -74,7 +75,7 @@ jobs:
         run: uv run ruff format --check .
 
       - name: Verify PR gate failure handling
-        run: uv run python -m unittest discover -s .github/tests -p 'test_ai_pr_gate.py'
+        run: uv run python -m unittest discover -s .github/tests -p 'test_*.py'
 
       - name: Validate standalone embedding service configuration
         run: docker compose -f docker/embedding/compose.yaml config --quiet
@@ -106,14 +107,30 @@ jobs:
           docker compose -f docker/jobs/compose.yaml config --quiet
 
       - name: Test
-        run: uv run pytest
+        run: uv run python .github/ci/test_timing.py run
         env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          UV_VERSION: ${{ steps.uv.outputs.uv-version }}
+          UV_CACHE_HIT: ${{ steps.uv.outputs.cache-hit }}
           JOBS_TEST_REDIS_URL: redis://127.0.0.1:6379/0
           JOBS_TEST_KAFKA_URL: localhost:9092
           AWS_ACCESS_KEY_ID: testing
           AWS_SECRET_ACCESS_KEY: testing
           AWS_DEFAULT_REGION: ap-northeast-2
           AWS_EC2_METADATA_DISABLED: "true"
+
+      - name: Summarize test measurement
+        if: always()
+        run: uv run python .github/ci/test_timing.py report
+
+      - name: Upload test measurement
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ai-test-timing-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/ci-timing/
+          retention-days: 7
+          if-no-files-found: error
 
       - name: Check whether the model runtime changed
         id: changes
