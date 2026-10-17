@@ -8,11 +8,13 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 from sklearn.metrics import adjusted_rand_score
 
+from app.observability.metrics import QUALITY_CONTEXT_KEY, QUALITY_KEY
+
 
 class EvaluationInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     feature: Literal["process", "search", "story"]
-    dataset: str = Field(min_length=1, max_length=128)
+    dataset: str = Field(min_length=1, max_length=128, pattern=r"^[^|]+$")
     model: str = Field(min_length=1, max_length=128)
     items: list[dict] = Field(min_length=1)
     unclassified_policy: Literal["singleton", "exclude"] | None = None
@@ -106,13 +108,24 @@ def evaluate(data: EvaluationInput) -> dict:
     }
 
 
+def series_key(report) -> str:
+    """기능, 데이터셋, 미분류 정책별로 최근 평가를 따로 보관한다. 서로 덮어쓰지 않는다."""
+    policy = report["unclassified_policy"] or "none"
+    return f"{report['feature']}|{report['dataset']}|{policy}"
+
+
 async def publish(redis, prefix, report):
-    feature = report["feature"]
-    mapping = {feature + "|" + name: value for name, value in report["metrics"].items()}
-    mapping[feature + "|samples"] = report["samples"]
-    mapping[feature + "|timestamp"] = datetime.fromisoformat(report["evaluated_at"]).timestamp()
-    metadata = {name: report[name] for name in ["dataset", "model", "k", "unclassified_policy"]}
+    series = series_key(report)
+    mapping = {series + "|" + name: value for name, value in report["metrics"].items()}
+    mapping[series + "|samples"] = report["samples"]
+    mapping[series + "|timestamp"] = datetime.fromisoformat(report["evaluated_at"]).timestamp()
+    # 자동 채점은 데이터셋 일부만 올린 여행도 채점하므로 대조된 사진 수를 함께 남긴다.
+    for name in ["matched_photos", "dataset_photos"]:
+        if report.get(name) is not None:
+            mapping[series + "|" + name] = report[name]
+    metadata = {name: report.get(name) for name in ["model", "k", "release"]}
+    metadata["source"] = report.get("source") or "manual"
     async with redis.pipeline(transaction=True) as pipe:
-        pipe.hset(prefix + "metrics:quality", mapping=mapping)
-        pipe.hset(prefix + "metrics:quality_context", feature, json.dumps(metadata))
+        pipe.hset(prefix + QUALITY_KEY, mapping=mapping)
+        pipe.hset(prefix + QUALITY_CONTEXT_KEY, series, json.dumps(metadata))
         await pipe.execute()

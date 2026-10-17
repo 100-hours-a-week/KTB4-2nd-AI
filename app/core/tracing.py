@@ -48,6 +48,8 @@ class Trace:
     current_stage: str | None = None
     # 작업 요약 로그(ai_job_summary)를 이미 남겼는지
     summarized: bool = False
+    # 결과를 저장한 뒤 기록할 정답 기반 평가 보고서
+    evaluations: list[dict[str, Any]] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def add_stage(self, record: StageRecord, **fields: Any) -> None:

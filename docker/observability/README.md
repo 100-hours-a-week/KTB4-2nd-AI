@@ -14,7 +14,7 @@ Cloud는 Prometheus에 두 API 인스턴스의 사설 주소를 등록하고 Gra
 
 ## 정답 기반 평가
 
-`python -m scripts.evaluate_v2 INPUT.json --output REPORT.json`으로 정답과 예측을 비교합니다. 결과를 대시보드에 반영하려면 테스트 환경의 Redis 설정을 준비하고 `--publish`를 추가합니다. 이 명령은 `ai_evaluation` JSON을 출력하고 원본 입력 파일은 수정하지 않습니다. 데이터셋 이름, 모델, 표본 수와 평가 시각을 결과 파일과 로그에 남깁니다. 수치와 조건은 Redis에서 함께 저장하고 읽습니다. Prometheus에서는 같은 API에서 수집한 수치와 조건을 먼저 결합한 뒤 복제본을 합칩니다. 대시보드는 기능별 최근 평가를 표시하므로 서로 다른 데이터셋과 모델의 숫자를 같은 실험처럼 비교하지 않습니다.
+`python -m scripts.evaluate_v2 INPUT.json --output REPORT.json`으로 정답과 예측을 비교합니다. 결과를 대시보드에 반영하려면 테스트 환경의 Redis 설정을 준비하고 `--publish`를 추가합니다. 이 명령은 `ai_evaluation` JSON을 출력하고 원본 입력 파일은 수정하지 않습니다. 데이터셋 이름, 모델, 표본 수와 평가 시각을 결과 파일과 로그에 남깁니다. 수치와 조건은 Redis에서 함께 저장하고 읽습니다. Prometheus에서는 같은 API에서 수집한 수치와 조건을 먼저 결합한 뒤 복제본을 합칩니다. 최근 평가는 기능, 데이터셋, 미분류 정책의 조합마다 따로 보관하므로 서로 덮어쓰지 않습니다. 서로 다른 데이터셋과 모델의 숫자를 같은 실험처럼 비교하지 않습니다.
 
 | feature | items의 평가 입력 | 계산하는 지표 |
 | --- | --- | --- |
@@ -23,6 +23,22 @@ Cloud는 Prometheus에 두 API 인스턴스의 사설 주소를 등록하고 Gra
 | story | 사람이 확인한 `factual`, `all_places_present`, `mood_matched` boolean | 각 조건을 만족한 비율 |
 
 공통 입력은 `feature`, `dataset`, `model`, `items`입니다. 정리의 미분류 예측은 null로 입력하고 `unclassified_policy`를 `singleton` 또는 `exclude`로 명시합니다. 어느 채점 정책을 서비스 평가에 채택할지는 별도 결정이며, 누락하면 임의로 선택하지 않고 실패합니다. 제외 방식은 분류된 사진에 대한 점수이며 coverage를 함께 봐야 합니다. 스토리의 `verification.passed`는 이 평가의 사실성 정답으로 사용할 수 없습니다. 실제 평가 입력이 없으면 품질 지표를 0이나 1로 만들지 않고 미수집 상태로 둡니다.
+
+### 평가 데이터셋 자동 채점
+
+정리 작업이 끝나면 내려받은 사본의 지문을 `app/observability/eval_sets/`의 기준 지문과 대조합니다. 여행 사진의 90% 이상(최소 10장)이 한 데이터셋과 맞으면 그 데이터셋의 정답으로 자동 채점합니다. 지문은 회색조 이미지의 pHash 64비트이며, 거리 8 이하를 같은 사진으로 봅니다. 기준 지문은 원본을 방향 태그대로 바로 세워 만들고, 사본은 픽셀 그대로와 방향 태그대로 바로 세운 것을 모두 대조합니다. BE가 사진을 회전했는지, 방향 태그를 남겼는지와 무관하게 인식하기 위해서입니다. 현재 기준 지문은 정선 가족여행(`jeongseon-family-trip`, 200장)과 eval(`eval-travel-photos`, 198장)입니다.
+
+인식 결과는 `finalizing.evaluate` 단계의 `ai_stage` 로그에 남습니다. `closest_dataset`과 `match_ratio`는 가장 많이 맞은 데이터셋과 그 비율이며, 기준을 넘었을 때만 `dataset`이 채워집니다. 평가 여행인데 기준에 못 미친 경우를 여기서 찾습니다.
+
+- 흐림이나 중복으로 미분류된 사진은 결과의 원래 장소로 채점합니다.
+- 정답이 미분류인 사진은 사진마다 단독 묶음으로 채점합니다.
+- 미분류 예측은 `singleton`과 `exclude` 두 정책을 모두 계산해 `ai_evaluation` 로그 두 줄과 지표로 남깁니다.
+- 로그에는 대조된 사진 수(`matched_photos`), 대조되지 않은 사진 수(`unmatched_photos`), 최대 지문 거리와 배포 커밋(`release`)이 함께 남습니다. 지표에도 `matched_photos`와 `dataset_photos`가 남고, 조건 정보의 `source`로 자동 채점(`auto`)과 수동 게시(`manual`)를 구분합니다.
+- 채점 결과는 작업 결과를 저장한 뒤, 결과가 COMPLETED일 때만 로그와 지표로 남깁니다. 실행 중 취소된 작업은 `ai_evaluation_skipped`만 남깁니다.
+
+지문 계산, 기준 지문 파일 읽기, 채점에 실패해도 정리 결과는 바뀌지 않고 `ai_evaluation_failed` 로그만 남습니다. `EVAL_AUTO_DETECT=false`로 끌 수 있습니다. 라벨이 바뀌면 `scripts/build_eval_fingerprints.py`로 기준 지문을 다시 만듭니다.
+
+평가 지표는 `metrics:quality_v2`와 `metrics:quality_context_v2`에 저장합니다. 이전 버전(`22d2bd6`)의 렌더러가 읽는 `metrics:quality`와 형식이 달라, 같은 키를 쓰면 롤백하거나 버전이 섞일 때 `/metrics` 전체가 실패하기 때문입니다. 이전 키에 남은 수동 평가는 새 대시보드에 나타나지 않으므로 필요하면 다시 게시합니다.
 
 ## 로그 이벤트
 
@@ -42,6 +58,7 @@ Cloud는 Prometheus에 두 API 인스턴스의 사설 주소를 등록하고 Gra
 | `ai_job_finished` | 작업이 종료 상태가 될 때 | `result`, `failure_stage`, `queue_ms`, `execution_ms`, `duration_ms` |
 | `ai_job_summary` | 작업 실행 프로세스가 끝날 때 | `stages_ms`, `model_calls`, `gpu_wait_ms`, `max_rss_mb`, CPU 시간 |
 | `ai_query` | 검색 요청이 끝날 때 | `result`, `error_code`, `answer_error`, `stages_ms`, `hit_count`, `top_score` |
+| `ai_evaluation` | 평가 데이터셋을 자동 채점했을 때 | `dataset`, `unclassified_policy`, `metrics`, `matched_photos` |
 
 질문 원문, 사진 키, presigned URL, 인증값, 모델 응답 본문과 예외 메시지는 남기지 않습니다. 예외는 종류(`error_type`, `error_chain`)와 `app/` 안의 발생 위치(`error_frames`)만 남깁니다.
 

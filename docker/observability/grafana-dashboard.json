@@ -133,7 +133,7 @@
         {
           "refId": "A",
           "expr": "yeodam:evaluation:max{environment=\"$environment\",metric!~\"samples|timestamp\"}",
-          "legendFormat": "{{feature}} {{metric}} / {{dataset}} / {{model}} / k={{k}} / {{unclassified_policy}}"
+          "legendFormat": "{{feature}} {{metric}} / {{dataset}} / {{model}} / k={{k}} / {{unclassified_policy}} / {{source}}"
         }
       ],
       "fieldConfig": {
@@ -161,7 +161,7 @@
         {
           "refId": "A",
           "expr": "yeodam:evaluation:max{environment=\"$environment\",metric=\"samples\"}",
-          "legendFormat": "{{feature}} {{metric}} / {{dataset}} / {{model}} / k={{k}} / {{unclassified_policy}}"
+          "legendFormat": "{{feature}} {{metric}} / {{dataset}} / {{model}} / k={{k}} / {{unclassified_policy}} / {{source}}"
         }
       ],
       "fieldConfig": {
@@ -189,7 +189,7 @@
         {
           "refId": "A",
           "expr": "time() - yeodam:evaluation:max{environment=\"$environment\",metric=\"timestamp\"}",
-          "legendFormat": "{{feature}} {{metric}} / {{dataset}} / {{model}} / k={{k}} / {{unclassified_policy}}"
+          "legendFormat": "{{feature}} {{metric}} / {{dataset}} / {{model}} / k={{k}} / {{unclassified_policy}} / {{source}}"
         }
       ],
       "fieldConfig": {
