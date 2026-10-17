@@ -3,6 +3,7 @@
 import asyncio
 import importlib
 import inspect
+import resource
 import sys
 import time
 
@@ -29,8 +30,12 @@ log = get_logger(__name__)
 
 
 class JobReporter:
-    def __init__(self, store: RedisJobStore, identity: str, owner: str) -> None:
+    def __init__(
+        self, store: RedisJobStore, identity: str, owner: str, kind: JobKind | None = None
+    ) -> None:
         self.store, self.identity, self.owner = store, identity, owner
+        # 처리량(사진/초)은 진행률이 사진 수인 정리에서만 의미가 있다.
+        self.kind = kind
         # 실패 로그에 남길 마지막 진행 단계. 저장 성공 여부와 무관하게 시도한 단계
         self.last_step: str | None = None
         self._step_started: float | None = None
@@ -48,6 +53,10 @@ class JobReporter:
                 StageRecord(stage_name(self.last_step), result, seconds),
                 progress_done=done,
                 progress_total=total,
+                # 정리의 다운로드와 임베딩 처리량(사진/초). 스토리의 진행률은 단계 번호라 제외
+                items_per_sec=round(done / seconds, 2)
+                if self.kind == "process" and done and seconds > 0
+                else None,
             )
         self._step_started = None
 
@@ -91,7 +100,7 @@ async def execute(store: RedisJobStore, identity: str, owner: str, handler) -> N
     record = await store.get(identity)
     if record is None or not store.owns(record, owner, await store.now()):
         return
-    reporter = JobReporter(store, identity, owner)
+    reporter = JobReporter(store, identity, owner, record.kind)
 
     def failure(exc: BaseException, code: ErrorCode) -> dict:
         fields = {
@@ -161,6 +170,7 @@ async def execute(store: RedisJobStore, identity: str, owner: str, handler) -> N
                 status = str(stored.status)
             log_summary(record.kind, status, trace)
             await store.observe_stages(record.kind, trace.stages)
+            await store.record_peak_memory(record.kind, max_rss_bytes())
     except Exception as exc:
         # 관측 실패가 이미 저장한 작업 결과를 바꾸지 않는다. 취소(CancelledError)는 그대로 전파된다.
         log.warning(
@@ -170,9 +180,19 @@ async def execute(store: RedisJobStore, identity: str, owner: str, handler) -> N
             log_summary(record.kind, status, trace)
 
 
+def max_rss_bytes() -> int:
+    """이 실행 프로세스의 최대 상주 메모리. 작업마다 새 프로세스라 작업 하나의 최댓값이다.
+
+    getrusage는 Linux에서 KiB, macOS에서 바이트 단위로 반환한다.
+    """
+    value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return int(value if sys.platform == "darwin" else value * 1024)
+
+
 def log_summary(kind: str, status: str, trace) -> None:
-    """작업 하나를 한 줄로 요약. 단계별 시간과 외부 호출 결과"""
+    """작업 하나를 한 줄로 요약. 단계별 시간, 외부 호출 결과, 자원 사용량"""
     trace.summarized = True
+    usage = resource.getrusage(resource.RUSAGE_SELF)
     log.info(
         "작업 실행 요약",
         extra={
@@ -182,6 +202,9 @@ def log_summary(kind: str, status: str, trace) -> None:
             "stages_ms": trace.stage_ms() or None,
             "model_calls": trace.call_counts(),
             "gpu_wait_ms": round(trace.gpu_wait_seconds * 1000, 2),
+            "max_rss_mb": round(max_rss_bytes() / (1024 * 1024), 1),
+            "cpu_user_sec": round(usage.ru_utime, 2),
+            "cpu_system_sec": round(usage.ru_stime, 2),
             **trace.fields,
         },
     )

@@ -32,7 +32,7 @@ Cloud는 Prometheus에 두 API 인스턴스의 사설 주소를 등록하고 Gra
 | --- | --- | --- |
 | `ai_job_received` | Kafka 요청을 접수하거나 거절할 때 | `operation`, `result`, `attachment_count`, 형식 오류의 `invalid_fields` |
 | `ai_job_invalid_retry` | 처리할 수 없는 요청을 다시 시도할 때(3회째에는 `kafka_dlt_published`로 DLT에 보관) | `result`(오류 분류), `attempts`, `partition`, `offset` |
-| `ai_stage` | 정리와 스토리의 단계 하나가 끝날 때 | `stage`, `parent_stage`, `result`, `duration_ms`, 처리 수 |
+| `ai_stage` | 정리와 스토리의 단계 하나가 끝날 때 | `stage`, `parent_stage`, `result`, `duration_ms`, 처리 수와 `items_per_sec` |
 | `ai_model_call` | VLM을 호출하거나 S3 URL을 발급할 때 | `target`, `result`, `status_code`, `finish_reason`, 토큰 수, `tokens_per_sec`. `result=cancelled`는 호출자의 더 짧은 시간 제한(검색 단계별 제한 등)이나 작업 취소로 중단된 경우다 |
 | `ai_process_dependency_failed` | 정리 작업의 사진 임베딩 호출이 실패했을 때 | `target`, `status_code`, 예외 종류 |
 | `ai_gpu_gate_unavailable` | GPU 호출 슬롯을 확보하지 못했을 때 | `gate`, `limit`, `wait_ms` |
@@ -40,7 +40,7 @@ Cloud는 Prometheus에 두 API 인스턴스의 사설 주소를 등록하고 Gra
 | `ai_job_failed` | 작업이 실패했을 때 | `failure_stage`, `error_code`, `error_reason`, 예외 종류와 발생 위치 |
 | `ai_worker_exit`, `ai_job_lease_lost` | 실행 프로세스가 결과 없이 끝나거나 소유권을 잃었을 때 | `exit_code`(-9는 강제 종료), `status` |
 | `ai_job_finished` | 작업이 종료 상태가 될 때 | `result`, `failure_stage`, `queue_ms`, `execution_ms`, `duration_ms` |
-| `ai_job_summary` | 작업 실행 프로세스가 끝날 때 | `stages_ms`, `model_calls`, `gpu_wait_ms` |
+| `ai_job_summary` | 작업 실행 프로세스가 끝날 때 | `stages_ms`, `model_calls`, `gpu_wait_ms`, `max_rss_mb`, CPU 시간 |
 | `ai_query` | 검색 요청이 끝날 때 | `result`, `error_code`, `answer_error`, `stages_ms`, `hit_count`, `top_score` |
 
 질문 원문, 사진 키, presigned URL, 인증값, 모델 응답 본문과 예외 메시지는 남기지 않습니다. 예외는 종류(`error_type`, `error_chain`)와 `app/` 안의 발생 위치(`error_frames`)만 남깁니다.
@@ -48,5 +48,21 @@ Cloud는 Prometheus에 두 API 인스턴스의 사설 주소를 등록하고 Gra
 ## 세부 단계 지표
 
 `yeodam_ai_operation_duration_seconds`의 `phase`에는 `total`, `queue`, `execution`, `request` 외에 세부 단계 이름이 들어가고, `outcome`에는 단계 결과(`success`, `error`, `timeout`, `cancelled`)가 들어갑니다. 검색은 요청이 끝났는데 중단된 단계를 단계별 시간 제한에 걸린 것으로 보고 `timeout`으로 기록합니다. 로그의 `stage`, `stages_ms`와 지표의 `phase`는 같은 이름(`selecting.filter` 등)을 씁니다. 정리는 `download`, `embedding`, `clock_correction`, `locating`, `clustering`, `filtering`, `finalizing`이고, 스토리는 `selecting`, `writing`, `verifying`과 그 아래 세부 단계(`selecting.filter` 등)입니다. 검색은 `interpret`, `embed`, `retrieve`, `sign_url`, `answer`입니다.
+
+작업 실행 프로세스의 최대 메모리는 `yeodam_ai_job_peak_memory_bytes`(기능별 최근 작업), API 인스턴스의 메모리와 CPU는 `process_resident_memory_bytes`와 `process_cpu_seconds_total`로 봅니다. 앞의 값은 Redis 공유값이라 복제본마다 같고, 뒤의 값은 인스턴스마다 다릅니다.
+
+## 모델 서버와 GPU 지표
+
+`prometheus.yml`의 `yeodam-vllm`과 `yeodam-gpu` job은 각각 `/etc/prometheus/yeodam-vllm-targets.json`, `/etc/prometheus/yeodam-gpu-targets.json`을 읽습니다. `vllm-targets.example.json`과 `gpu-targets.example.json`을 참고해 실제 사설 주소로 바꾼 파일을 기존 `yeodam-targets.json`과 같은 위치에 마운트합니다. 파일이 없으면 해당 job은 대상 없이 비어 있습니다.
+
+GPU 수집기의 포트는 기본으로 `127.0.0.1`에만 열립니다. Prometheus가 다른 호스트에서 수집한다면 `DCGM_EXPORTER_BIND_HOST`나 `NVIDIA_GPU_EXPORTER_BIND_HOST`를 사설 주소로 지정하고, 보안 그룹에서 Prometheus만 허용합니다.
+
+| 대상 | 수집 경로 | 대표 지표 | 배포 담당 |
+| --- | --- | --- | --- |
+| 임베딩과 생성 vLLM | 각 서버의 `/metrics` | `vllm:num_requests_waiting`, `vllm:num_requests_running`, `vllm:kv_cache_usage_perc`, `vllm:generation_tokens_total` | 수집 대상 등록은 Cloud |
+| AWS 임베딩 GPU | `gpu-exporters.compose.yaml`의 `dcgm` 프로필(9400) | `DCGM_FI_DEV_GPU_UTIL`, `DCGM_FI_DEV_FB_USED`(MiB) | 실행과 보안 그룹은 Cloud |
+| RunPod 생성 GPU | 같은 파일의 `nvidia-smi` 프로필(9835) | `nvidia_smi_utilization_gpu_ratio`, `nvidia_smi_memory_used_bytes` | Pod 구성은 Kael |
+
+vLLM의 API 키는 `/v1` 경로에만 적용되고 GPU 수집기에는 인증이 없습니다. 세 대상 모두 공개 주소로 열지 말고 Prometheus만 접근하게 합니다. RunPod는 AWS의 Prometheus와 사설망으로 연결되어 있지 않으므로, 생성 서버의 vLLM과 GPU 지표를 어떻게 수집할지는 아직 정하지 않았습니다. 공개 프록시를 쓰려면 인증 방안을 먼저 정해야 하며, Cloud와 Kael의 협의가 필요합니다. 지표 이름은 vLLM `v0.31.0`, dcgm-exporter `4.6.0-4.8.3`, nvidia_gpu_exporter `1.15.1` 기준이며, 버전을 바꾸면 실제 `/metrics` 출력으로 확인합니다.
 
 Prometheus 형식은 [공식 Python 클라이언트](https://prometheus.github.io/client_python/collector/custom/)로 생성하고 [공식 스크레이프 설정](https://prometheus.io/docs/prometheus/latest/configuration/configuration/)을 사용합니다. 실제 서버 스크레이프와 Grafana 화면 확인은 Cloud 환경에서 수행해야 합니다.

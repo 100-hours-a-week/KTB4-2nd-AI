@@ -254,6 +254,171 @@
         },
         "overrides": []
       }
+    },
+    {
+      "id": 9,
+      "title": "GPU 사용률",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "avg by (server) (DCGM_FI_DEV_GPU_UTIL{environment=\"$environment\"}) / 100",
+          "legendFormat": "{{server}} dcgm"
+        },
+        {
+          "refId": "B",
+          "expr": "avg by (server) (nvidia_smi_utilization_gpu_ratio{environment=\"$environment\"})",
+          "legendFormat": "{{server}} nvidia-smi"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "title": "GPU 메모리 사용량",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 32,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (server) (DCGM_FI_DEV_FB_USED{environment=\"$environment\"}) * 1024 * 1024",
+          "legendFormat": "{{server}} dcgm"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (server) (nvidia_smi_memory_used_bytes{environment=\"$environment\"})",
+          "legendFormat": "{{server}} nvidia-smi"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "title": "vLLM 대기와 실행 요청",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 40,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (server) (vllm:num_requests_waiting{environment=\"$environment\"})",
+          "legendFormat": "{{server}} 대기"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (server) (vllm:num_requests_running{environment=\"$environment\"})",
+          "legendFormat": "{{server}} 실행"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "title": "vLLM KV 캐시 사용률과 생성 토큰 처리량",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 40,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (server) (vllm:kv_cache_usage_perc{environment=\"$environment\"})",
+          "legendFormat": "{{server}} KV 캐시"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (server) (rate(vllm:generation_tokens_total{environment=\"$environment\"}[5m]))",
+          "legendFormat": "{{server}} 생성 토큰/초"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "title": "AI 프로세스 메모리",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 48,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "process_resident_memory_bytes{job=\"yeodam-ai\",environment=\"$environment\"}",
+          "legendFormat": "API {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "max by (operation) (yeodam_ai_job_peak_memory_bytes{environment=\"$environment\"})",
+          "legendFormat": "최근 {{operation}} 작업 최대"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      }
     }
   ]
 }

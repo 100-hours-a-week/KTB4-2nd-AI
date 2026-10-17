@@ -418,6 +418,15 @@ class RedisJobStore:
                 )
             await pipe.execute()
 
+    async def record_peak_memory(self, kind: JobKind, peak_bytes: int) -> None:
+        """가장 최근 작업의 실행 프로세스 최대 메모리
+
+        정리 실행기는 /metrics가 없어 Redis로 공유한다.
+        """
+        await self.redis.hset(
+            self.key("metrics:resources"), f"{kind}|peak_memory_bytes", peak_bytes
+        )
+
     async def recover(self) -> None:
         now = await self.now()
         for identity in await self.redis.zrangebyscore(
