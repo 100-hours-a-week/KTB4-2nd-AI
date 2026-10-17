@@ -1,6 +1,7 @@
 """복제본들이 공유하는 외부 GPU HTTP 호출 한도. 작업 대기열과는 별개다."""
 
 import asyncio
+import time
 import uuid
 
 from redis.exceptions import RedisError, WatchError
@@ -10,6 +11,8 @@ from app.infra.vlm import VLMUnavailable
 from app.search.context import ModelUnavailable
 
 log = get_logger(__name__)
+# 호출 전체 제한에 더하는 여유. 클라이언트 자체의 시간 제한이 먼저 걸려야 원인이 호출 로그에 남는다.
+CALL_TIMEOUT_GRACE_SEC = 5
 
 
 class GateUnavailable(Exception):
@@ -40,15 +43,28 @@ class RequestGate:
 
     async def run(self, operation, timeout_sec):
         token = uuid.uuid4().hex
+        started = time.monotonic()
         try:
             try:
                 async with asyncio.timeout(self.wait_sec):
                     while not await self._claim(token, timeout_sec + 10):
                         await asyncio.sleep(0.05)
-            except (TimeoutError, RedisError):
+            except (TimeoutError, RedisError) as exc:
+                waited = time.monotonic() - started
+                # 슬롯 부족과 Redis 장애를 구분한다. 둘 다 호출 전에 실패한 경우다.
+                log.warning(
+                    "GPU 호출 슬롯 확보 실패",
+                    extra={
+                        "event": "ai_gpu_gate_unavailable",
+                        "result": "timeout" if isinstance(exc, TimeoutError) else "redis_error",
+                        "gate": self.key.rsplit(":", 1)[-1],
+                        "limit": self.limit,
+                        "wait_ms": round(waited * 1000, 2),
+                    },
+                )
                 raise GateUnavailable("GPU 호출 슬롯을 확보하지 못했습니다.") from None
             # client의 I/O timeout 외에 호출 전체 시간을 제한한다.
-            async with asyncio.timeout(timeout_sec):
+            async with asyncio.timeout(timeout_sec + CALL_TIMEOUT_GRACE_SEC):
                 return await operation()
         finally:
             # claim 중 응답을 잃어도 같은 토큰을 정리한다. 실패 시 lease가 회수한다.

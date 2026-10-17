@@ -24,4 +24,23 @@ Cloud는 Prometheus에 두 API 인스턴스의 사설 주소를 등록하고 Gra
 
 공통 입력은 `feature`, `dataset`, `model`, `items`입니다. 정리의 미분류 예측은 null로 입력하고 `unclassified_policy`를 `singleton` 또는 `exclude`로 명시합니다. 어느 채점 정책을 서비스 평가에 채택할지는 별도 결정이며, 누락하면 임의로 선택하지 않고 실패합니다. 제외 방식은 분류된 사진에 대한 점수이며 coverage를 함께 봐야 합니다. 스토리의 `verification.passed`는 이 평가의 사실성 정답으로 사용할 수 없습니다. 실제 평가 입력이 없으면 품질 지표를 0이나 1로 만들지 않고 미수집 상태로 둡니다.
 
+## 로그 이벤트
+
+모든 로그는 한 줄 JSON이며 `trip_id`와 `job_id`로 같은 작업을 찾습니다. `release`는 이미지 빌드 시점의 커밋입니다.
+
+| 이벤트 | 남는 시점 | 문제 위치를 찾는 데 쓰는 필드 |
+| --- | --- | --- |
+| `ai_job_received` | Kafka 요청을 접수하거나 거절할 때 | `operation`, `result`, `attachment_count`, 형식 오류의 `invalid_fields` |
+| `ai_job_invalid_retry` | 처리할 수 없는 요청을 다시 시도할 때(3회째에는 `kafka_dlt_published`로 DLT에 보관) | `result`(오류 분류), `attempts`, `partition`, `offset` |
+| `ai_model_call` | VLM을 호출하거나 S3 URL을 발급할 때 | `target`, `result`, `status_code`, `finish_reason`, 토큰 수, `tokens_per_sec`. `result=cancelled`는 호출자의 더 짧은 시간 제한(검색 단계별 제한 등)이나 작업 취소로 중단된 경우다 |
+| `ai_process_dependency_failed` | 정리 작업의 사진 임베딩 호출이 실패했을 때 | `target`, `status_code`, 예외 종류 |
+| `ai_gpu_gate_unavailable` | GPU 호출 슬롯을 확보하지 못했을 때 | `gate`, `limit`, `wait_ms` |
+| `ai_story_output_invalid` | 생성된 스토리가 출력 규칙을 어겼을 때 | `rule`, 검증 오류 위치 |
+| `ai_job_failed` | 작업이 실패했을 때 | `failure_stage`, `error_code`, `error_reason`, 예외 종류와 발생 위치 |
+| `ai_worker_exit`, `ai_job_lease_lost` | 실행 프로세스가 결과 없이 끝나거나 소유권을 잃었을 때 | `exit_code`(-9는 강제 종료), `status` |
+| `ai_job_finished` | 작업이 종료 상태가 될 때 | `result`, `failure_stage`, `queue_ms`, `execution_ms`, `duration_ms` |
+| `ai_query` | 검색 요청이 끝날 때 | `result`, `error_code`, `answer_error`, `duration_ms` |
+
+질문 원문, 사진 키, presigned URL, 인증값, 모델 응답 본문과 예외 메시지는 남기지 않습니다. 예외는 종류(`error_type`, `error_chain`)와 `app/` 안의 발생 위치(`error_frames`)만 남깁니다.
+
 Prometheus 형식은 [공식 Python 클라이언트](https://prometheus.github.io/client_python/collector/custom/)로 생성하고 [공식 스크레이프 설정](https://prometheus.io/docs/prometheus/latest/configuration/configuration/)을 사용합니다. 실제 서버 스크레이프와 Grafana 화면 확인은 Cloud 환경에서 수행해야 합니다.

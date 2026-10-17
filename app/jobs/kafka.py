@@ -18,7 +18,7 @@ from pydantic import ValidationError
 from redis.exceptions import RedisError, WatchError
 
 from app.core.errors import ErrorCode
-from app.core.logging import get_logger
+from app.core.logging import get_logger, validation_fields
 from app.jobs.config import JobsSettings
 from app.jobs.models import MESSAGE, JobRecord, PhotosReadyMessage
 from app.jobs.redis_store import RedisJobStore
@@ -101,6 +101,7 @@ class RequestReceiver:
                     "event": "ai_photos_ready_received",
                     "result": outcome,
                     "trip_id": trip_id,
+                    "job_id": execution_id,
                     "execution_id": execution_id,
                     "batch_no": batch.batch_no,
                     "attachment_count": len(batch.attachments),
@@ -108,10 +109,12 @@ class RequestReceiver:
             )
             return outcome
         error = None
+        invalid_fields = None
         try:
             request = MESSAGE.validate_python(data)
             data = request.model_dump(mode="json")
-        except ValidationError:
+        except ValidationError as exc:
+            invalid_fields = validation_fields(exc.errors())
             # 식별 가능한 잘못된 본문은 기존 INVALID_REQUEST -> FAILED 계약을 지킨다.
             error = ErrorBody(
                 code=ErrorCode.INVALID_REQUEST, message="요청 형식이 올바르지 않습니다."
@@ -135,9 +138,15 @@ class RequestReceiver:
             "작업 요청 처리",
             extra={
                 "event": "ai_job_received",
+                "operation": kind,
                 "result": outcome,
                 "trip_id": trip_id,
+                # 종료 로그와 같은 이름으로 찾을 수 있게 job_id를 함께 남긴다.
+                "job_id": execution_id,
                 "execution_id": execution_id,
+                "source_topic": message.topic,
+                "attachment_count": len(attachments) if isinstance(attachments, list) else None,
+                "invalid_fields": invalid_fields,
             },
         )
         return outcome
@@ -158,6 +167,17 @@ class RequestReceiver:
                 except WatchError:
                     continue
         if attempts < 3:
+            log.warning(
+                "처리할 수 없는 요청, 같은 메시지 재시도",
+                extra={
+                    "event": "ai_job_invalid_retry",
+                    "result": reason,
+                    "source_topic": message.topic,
+                    "partition": message.partition,
+                    "offset": message.offset,
+                    "attempts": attempts,
+                },
+            )
             raise InvalidMessage(reason)
         return await self.quarantine(message, reason)
 
@@ -245,6 +265,18 @@ async def consume_requests(consumer: AIOKafkaConsumer, receiver: RequestReceiver
                 await asyncio.sleep(1)
 
 
+def result_fields(record: JobRecord) -> dict:
+    """결과 발행 루프는 작업 맥락을 bind하지 않으므로 식별자를 직접 붙인다."""
+    return {
+        "operation": record.kind,
+        "trip_id": record.trip_id,
+        "job_id": record.execution_id,
+        "execution_id": record.execution_id,
+        # result는 이 로그가 기록하는 발행 결과에 쓰고, 작업 상태는 job_status로 따로 둔다.
+        "job_status": str(record.event.status) if record.event else None,
+    }
+
+
 async def publish_results(store: RedisJobStore, producer: Producer) -> None:
     publisher = uuid.uuid4().hex
     while True:
@@ -268,8 +300,9 @@ async def publish_results(store: RedisJobStore, producer: Producer) -> None:
                     log.info(
                         "결과 발행 완료",
                         extra={
+                            **result_fields(record),
                             "event": "ai_job_result_published",
-                            "execution_id": record.execution_id,
+                            "result": "success",
                             "payload_bytes": len(payload),
                         },
                     )
@@ -278,15 +311,21 @@ async def publish_results(store: RedisJobStore, producer: Producer) -> None:
                     log.error(
                         "Kafka 메시지 크기 제한 초과, 결과 보관 유지",
                         extra={
+                            **result_fields(record),
                             "event": "ai_job_result_too_large",
-                            "execution_id": record.execution_id,
+                            "result": "too_large",
                             "payload_bytes": len(payload),
                         },
                     )
-                except (KafkaError, RedisError, OSError):
+                except (KafkaError, RedisError, OSError) as exc:
                     log.warning(
                         "결과 전달 대기 유지",
-                        extra={"event": "ai_job_result_retry", "execution_id": record.execution_id},
+                        extra={
+                            **result_fields(record),
+                            "event": "ai_job_result_retry",
+                            "result": "retry",
+                            "error_type": type(exc).__name__,
+                        },
                     )
         except (RedisError, OSError):
             log.warning("작업 저장소 재연결 대기", extra={"event": "ai_job_store_retry"})

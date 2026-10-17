@@ -4,7 +4,7 @@ import asyncio
 import time
 
 from app.core.errors import AppError, ErrorCode
-from app.core.logging import get_logger
+from app.core.logging import error_fields, get_logger
 from app.schemas.query import ParseRequest, ParseResponse, SearchRequest, SearchResponse
 from app.search import pipeline
 from app.search.context import ModelUnavailable, SearchContext, SearchOptions
@@ -31,6 +31,9 @@ class QueryService:
     ) -> ParseResponse | SearchResponse:
         started = time.monotonic()
         outcome = "error"
+        error_code = None
+        answer_error = None
+        failure: dict = {}
         intent = request.intent if isinstance(request, SearchRequest) else None
         candidate_count = len(request.candidates) if isinstance(request, SearchRequest) else None
         returned_count = None
@@ -54,18 +57,27 @@ class QueryService:
                         outcome = "fallback"
                 else:
                     returned_count = len(result.attachments)
+                    answer_error = result.answer_error
                     if result.answer_error:
                         outcome = "partial"
                 return result
-        except AppError:
+        except AppError as exc:
+            error_code = str(exc.code)
             raise
         except ModelUnavailable as exc:
+            error_code = str(ErrorCode.MODEL_NOT_READY)
             raise AppError(ErrorCode.MODEL_NOT_READY) from exc
         except TimeoutError as exc:
+            error_code = str(ErrorCode.TIMEOUT)
             raise AppError(ErrorCode.TIMEOUT, http_status=504) from exc
         except Exception as exc:
             # 원질문·사진 키·외부 예외 본문은 로그와 응답에 남기지 않는다.
-            log.error("검색 처리 실패", extra={"error_type": type(exc).__name__})
+            error_code = str(ErrorCode.INTERNAL_ERROR)
+            failure = error_fields(exc)
+            log.error(
+                "검색 처리 실패",
+                extra={"event": "ai_query_failed", "operation": operation, **failure},
+            )
             raise AppError(ErrorCode.INTERNAL_ERROR) from exc
         finally:
             duration = time.monotonic() - started
@@ -77,11 +89,14 @@ class QueryService:
                     "event": "ai_query",
                     "operation": operation,
                     "result": outcome,
+                    "error_code": error_code,
                     "intent": intent,
                     "candidate_count": candidate_count,
                     "returned_count": returned_count,
                     "parsed": parsed,
+                    "answer_error": answer_error,
                     "duration_ms": round(duration * 1000, 2),
+                    **failure,
                 },
             )
 

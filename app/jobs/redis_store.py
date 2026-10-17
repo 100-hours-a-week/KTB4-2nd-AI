@@ -160,7 +160,7 @@ class RedisJobStore:
                         )
                     await pipe.execute()
                     if record.event:
-                        log_terminal(record, record.created_at)
+                        log_terminal(record, record.created_at, intake=True)
                     return "accepted"
                 except WatchError:
                     continue
@@ -249,6 +249,8 @@ class RedisJobStore:
                         return None
                     record = JobRecord.model_validate_json(raw)
                     was_terminal = record.status in TERMINAL_STATUSES
+                    # 종료 처리가 current_step을 비우므로 실패 단계 로그용으로 먼저 보관한다.
+                    previous_step = record.current_step
                     now = await self.now()
                     if not update(record, now):
                         return None
@@ -283,7 +285,7 @@ class RedisJobStore:
                         pipe.zadd(self.key(f"queue:{record.kind}"), {identity: queue_score})
                     await pipe.execute()
                     if not was_terminal and record.status in TERMINAL_STATUSES:
-                        log_terminal(record, now)
+                        log_terminal(record, now, previous_step)
                     return record
                 except WatchError:
                     continue

@@ -2,12 +2,14 @@
 
 import asyncio
 import math
+import time
 from typing import Any, Self
 
 import httpx
 
 from app.core.config import Settings
 from app.infra.vlm import ChatMessage, VLMUnavailable
+from app.observability.calls import log_model_call, usage_fields
 
 
 class VllmClient:
@@ -102,27 +104,64 @@ class VllmClient:
         }
         if response_format is not None:
             body["response_format"] = response_format
+        call = {
+            "image_count": len(image_urls),
+            "max_tokens": max_tokens,
+            "structured": response_format is not None,
+        }
+        started = time.monotonic()
         try:
             # HTTPX의 I/O별 제한 외에 응답 본문을 모두 받기까지의 전체 시간도 제한한다.
             async with asyncio.timeout(self._timeout_sec):
                 response = await self._client.post("chat/completions", json=body)
                 response.raise_for_status()
         except (httpx.TimeoutException, TimeoutError):
+            log_model_call("vlm", started, "timeout", **call)
             raise TimeoutError("VLM 요청 시간이 초과되었습니다.") from None
-        except httpx.HTTPError:
-            # 인증키, presigned URL과 모델 응답 본문을 오류 메시지에 포함하지 않는다.
+        except asyncio.CancelledError:
+            # 호출자의 더 짧은 시간 제한(검색 단계별 제한 등)이나 작업 취소로 중단된 경우다.
+            log_model_call("vlm", started, "cancelled", **call)
+            raise
+        except httpx.HTTPStatusError as exc:
+            log_model_call(
+                "vlm", started, "http_error", status_code=exc.response.status_code, **call
+            )
             raise VLMUnavailable("VLM 요청에 실패했습니다.") from None
+        except httpx.HTTPError as exc:
+            # 인증키, presigned URL과 모델 응답 본문을 오류 메시지에 포함하지 않는다.
+            log_model_call("vlm", started, "connect_error", error_type=type(exc).__name__, **call)
+            raise VLMUnavailable("VLM 요청에 실패했습니다.") from None
+        finish_reason, usage = None, None
         try:
-            choice = response.json()["choices"][0]
+            data = response.json()
+            usage = data.get("usage") if isinstance(data, dict) else None
+            choice = data["choices"][0]
+            finish_reason = choice.get("finish_reason")
             content = choice["message"]["content"]
-            if (
-                choice["finish_reason"] != "stop"
-                or not isinstance(content, str)
-                or not content.strip()
-            ):
+            if finish_reason != "stop" or not isinstance(content, str) or not content.strip():
                 raise ValueError("완성된 텍스트가 아님")
-        except (ValueError, KeyError, IndexError, TypeError):
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+            # finish_reason=length는 max_tokens에 도달해 출력이 잘린 경우다.
+            log_model_call(
+                "vlm",
+                started,
+                "incomplete_output",
+                status_code=response.status_code,
+                finish_reason=finish_reason if isinstance(finish_reason, str) else None,
+                **usage_fields(usage),
+                **call,
+            )
             raise VLMUnavailable("VLM이 완성된 텍스트 응답을 반환하지 않았습니다.") from None
+        log_model_call(
+            "vlm",
+            started,
+            "success",
+            status_code=response.status_code,
+            finish_reason=finish_reason,
+            output_chars=len(content),
+            **usage_fields(usage),
+            **call,
+        )
         return content
 
     async def aclose(self) -> None:

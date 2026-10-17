@@ -6,6 +6,7 @@ import httpx
 from pydantic import ValidationError
 
 from app.core.errors import ErrorCode, PipelineCancelled, PipelineError
+from app.core.logging import error_fields, get_logger
 from app.embedding.client import MODEL_VERSION, EmbeddingUnavailable
 from app.infra.qdrant import QdrantStore
 from app.jobs.config import JobsSettings
@@ -14,6 +15,8 @@ from app.jobs.models import ProcessMessage
 from app.jobs.sync_bridge import run_sync
 from app.pipeline.bootstrap import build_context, build_engine, build_images, wait_for_qdrant
 from app.pipeline.run import run as run_pipeline
+
+log = get_logger(__name__)
 
 
 def _failure(code: ErrorCode, message: str) -> PipelineError:
@@ -54,6 +57,21 @@ def _run(request: ProcessMessage, cfg: JobsSettings, progress, cancelled) -> dic
             for nested in (cause.__cause__, cause.__context__, getattr(cause, "source", None)):
                 if isinstance(nested, BaseException):
                     pending.append(nested)
+        # 임베딩 클라이언트는 상태 코드를 오류 메시지에 담지 않으므로 원인 사슬에서 꺼낸다.
+        status = next(
+            (c.response.status_code for c in causes if isinstance(c, httpx.HTTPStatusError)), None
+        )
+        embedding = any(isinstance(c, EmbeddingUnavailable) for c in causes)
+        if status is not None or embedding:
+            log.warning(
+                "정리 작업의 외부 호출 실패",
+                extra={
+                    "event": "ai_process_dependency_failed",
+                    "target": "embedding" if embedding else "unknown",
+                    "status_code": status,
+                    **error_fields(exc),
+                },
+            )
         if any(isinstance(cause, (httpx.TimeoutException, TimeoutError)) for cause in causes):
             raise _failure(
                 ErrorCode.TIMEOUT, "정리 작업의 외부 호출 시간이 초과되었습니다."
