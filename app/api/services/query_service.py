@@ -5,6 +5,7 @@ import time
 
 from app.core.errors import AppError, ErrorCode
 from app.core.logging import error_fields, get_logger
+from app.core.tracing import end_trace, start_trace
 from app.schemas.query import ParseRequest, ParseResponse, SearchRequest, SearchResponse
 from app.search import pipeline
 from app.search.context import ModelUnavailable, SearchContext, SearchOptions
@@ -30,10 +31,12 @@ class QueryService:
         self, operation: str, request: ParseRequest | SearchRequest
     ) -> ParseResponse | SearchResponse:
         started = time.monotonic()
+        trace, token = start_trace(operation)
         outcome = "error"
         error_code = None
         answer_error = None
         failure: dict = {}
+        cancelled = False
         intent = request.intent if isinstance(request, SearchRequest) else None
         candidate_count = len(request.candidates) if isinstance(request, SearchRequest) else None
         returned_count = None
@@ -61,6 +64,10 @@ class QueryService:
                     if result.answer_error:
                         outcome = "partial"
                 return result
+        except asyncio.CancelledError:
+            # 요청 자체가 취소된 경우. 아래의 단계 결과 보정을 하지 않는다.
+            cancelled = True
+            raise
         except AppError as exc:
             error_code = str(exc.code)
             raise
@@ -80,9 +87,18 @@ class QueryService:
             )
             raise AppError(ErrorCode.INTERNAL_ERROR) from exc
         finally:
+            end_trace(token)
+            if not cancelled:
+                # 요청이 끝났는데 중단된 단계는 검색 파이프라인의 단계별 시간 제한에 걸린 것이다.
+                for record in trace.stages:
+                    if record.result == "cancelled":
+                        record.result = "timeout"
+                for key in [key for key in trace.calls if key.endswith("|cancelled")]:
+                    trace.calls[key.removesuffix("cancelled") + "timeout"] += trace.calls.pop(key)
             duration = time.monotonic() - started
             if self.metrics is not None:
-                await self.metrics.query(operation, outcome, duration)
+                await self.metrics.query(operation, outcome, duration, stages=trace.stages)
+            # 대체 처리(fallback)에서 interpret 호출이 성공했다면 모델 출력 형식 오류다.
             log.info(
                 "검색 요청 완료",
                 extra={
@@ -96,6 +112,10 @@ class QueryService:
                     "parsed": parsed,
                     "answer_error": answer_error,
                     "duration_ms": round(duration * 1000, 2),
+                    "stages_ms": trace.stage_ms() or None,
+                    "model_calls": trace.call_counts(),
+                    "gpu_wait_ms": round(trace.gpu_wait_seconds * 1000, 2),
+                    **trace.fields,
                     **failure,
                 },
             )

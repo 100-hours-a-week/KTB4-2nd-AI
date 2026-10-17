@@ -15,6 +15,8 @@ from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any
 
+from app.core.tracing import current_trace
+
 SERVICE = "ai"
 
 # 클라우드 관측 계약의 공통 필드. 값이 없어도 null로 남김
@@ -209,6 +211,10 @@ class JsonFormatter(logging.Formatter):
         }
         for key in COMMON_FIELDS:
             payload[key] = extras.pop(key, context.get(key))
+        # 진행 중인 단계가 있으면 외부 호출 로그에도 단계 이름을 붙임
+        trace = current_trace()
+        if "stage" not in extras and trace is not None and trace.current_stage:
+            payload["stage"] = trace.current_stage
         payload["release"] = self.release
         payload.update(extras)
         if record.exc_info:

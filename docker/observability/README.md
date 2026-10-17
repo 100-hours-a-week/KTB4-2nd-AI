@@ -32,6 +32,7 @@ Cloud는 Prometheus에 두 API 인스턴스의 사설 주소를 등록하고 Gra
 | --- | --- | --- |
 | `ai_job_received` | Kafka 요청을 접수하거나 거절할 때 | `operation`, `result`, `attachment_count`, 형식 오류의 `invalid_fields` |
 | `ai_job_invalid_retry` | 처리할 수 없는 요청을 다시 시도할 때(3회째에는 `kafka_dlt_published`로 DLT에 보관) | `result`(오류 분류), `attempts`, `partition`, `offset` |
+| `ai_stage` | 정리와 스토리의 단계 하나가 끝날 때 | `stage`, `parent_stage`, `result`, `duration_ms`, 처리 수 |
 | `ai_model_call` | VLM을 호출하거나 S3 URL을 발급할 때 | `target`, `result`, `status_code`, `finish_reason`, 토큰 수, `tokens_per_sec`. `result=cancelled`는 호출자의 더 짧은 시간 제한(검색 단계별 제한 등)이나 작업 취소로 중단된 경우다 |
 | `ai_process_dependency_failed` | 정리 작업의 사진 임베딩 호출이 실패했을 때 | `target`, `status_code`, 예외 종류 |
 | `ai_gpu_gate_unavailable` | GPU 호출 슬롯을 확보하지 못했을 때 | `gate`, `limit`, `wait_ms` |
@@ -39,8 +40,13 @@ Cloud는 Prometheus에 두 API 인스턴스의 사설 주소를 등록하고 Gra
 | `ai_job_failed` | 작업이 실패했을 때 | `failure_stage`, `error_code`, `error_reason`, 예외 종류와 발생 위치 |
 | `ai_worker_exit`, `ai_job_lease_lost` | 실행 프로세스가 결과 없이 끝나거나 소유권을 잃었을 때 | `exit_code`(-9는 강제 종료), `status` |
 | `ai_job_finished` | 작업이 종료 상태가 될 때 | `result`, `failure_stage`, `queue_ms`, `execution_ms`, `duration_ms` |
-| `ai_query` | 검색 요청이 끝날 때 | `result`, `error_code`, `answer_error`, `duration_ms` |
+| `ai_job_summary` | 작업 실행 프로세스가 끝날 때 | `stages_ms`, `model_calls`, `gpu_wait_ms` |
+| `ai_query` | 검색 요청이 끝날 때 | `result`, `error_code`, `answer_error`, `stages_ms`, `hit_count`, `top_score` |
 
 질문 원문, 사진 키, presigned URL, 인증값, 모델 응답 본문과 예외 메시지는 남기지 않습니다. 예외는 종류(`error_type`, `error_chain`)와 `app/` 안의 발생 위치(`error_frames`)만 남깁니다.
+
+## 세부 단계 지표
+
+`yeodam_ai_operation_duration_seconds`의 `phase`에는 `total`, `queue`, `execution`, `request` 외에 세부 단계 이름이 들어가고, `outcome`에는 단계 결과(`success`, `error`, `timeout`, `cancelled`)가 들어갑니다. 검색은 요청이 끝났는데 중단된 단계를 단계별 시간 제한에 걸린 것으로 보고 `timeout`으로 기록합니다. 로그의 `stage`, `stages_ms`와 지표의 `phase`는 같은 이름(`selecting.filter` 등)을 씁니다. 정리는 `download`, `embedding`, `clock_correction`, `locating`, `clustering`, `filtering`, `finalizing`이고, 스토리는 `selecting`, `writing`, `verifying`과 그 아래 세부 단계(`selecting.filter` 등)입니다. 검색은 `interpret`, `embed`, `retrieve`, `sign_url`, `answer`입니다.
 
 Prometheus 형식은 [공식 Python 클라이언트](https://prometheus.github.io/client_python/collector/custom/)로 생성하고 [공식 스크레이프 설정](https://prometheus.io/docs/prometheus/latest/configuration/configuration/)을 사용합니다. 실제 서버 스크레이프와 Grafana 화면 확인은 Cloud 환경에서 수행해야 합니다.

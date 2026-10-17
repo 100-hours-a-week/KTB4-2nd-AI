@@ -91,12 +91,17 @@ class Metrics:
         self.redis, self.prefix = redis, prefix
         self.key = prefix + "metrics:operations"
 
-    async def query(self, operation, outcome, seconds):
+    async def query(self, operation, outcome, seconds, stages=()):
         # 관측 실패가 이미 계산한 검색 응답을 바꾸지 않도록 분리한다.
+        # 단계는 phase에 단계 이름, outcome에 단계 결과(success, error, timeout, cancelled)를 둔다.
         try:
             async with asyncio.timeout(0.2):
                 async with self.redis.pipeline(transaction=True) as pipe:
                     observe_commands(pipe, self.key, operation, outcome, "request", seconds)
+                    for stage in stages:
+                        observe_commands(
+                            pipe, self.key, operation, stage.result, stage.full_name, stage.seconds
+                        )
                     await pipe.execute()
         except (TimeoutError, RedisError):
             log.warning("검색 지표 기록 실패", extra={"event": "ai_metrics_write_failed"})

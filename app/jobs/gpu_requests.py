@@ -7,6 +7,7 @@ import uuid
 from redis.exceptions import RedisError, WatchError
 
 from app.core.logging import get_logger
+from app.core.tracing import current_trace
 from app.infra.vlm import VLMUnavailable
 from app.search.context import ModelUnavailable
 
@@ -51,6 +52,8 @@ class RequestGate:
                         await asyncio.sleep(0.05)
             except (TimeoutError, RedisError) as exc:
                 waited = time.monotonic() - started
+                if trace := current_trace():
+                    trace.add_gpu_wait(waited)
                 # 슬롯 부족과 Redis 장애를 구분한다. 둘 다 호출 전에 실패한 경우다.
                 log.warning(
                     "GPU 호출 슬롯 확보 실패",
@@ -63,6 +66,8 @@ class RequestGate:
                     },
                 )
                 raise GateUnavailable("GPU 호출 슬롯을 확보하지 못했습니다.") from None
+            if trace := current_trace():
+                trace.add_gpu_wait(time.monotonic() - started)
             # client의 I/O timeout 외에 호출 전체 시간을 제한한다.
             async with asyncio.timeout(timeout_sec + CALL_TIMEOUT_GRACE_SEC):
                 return await operation()

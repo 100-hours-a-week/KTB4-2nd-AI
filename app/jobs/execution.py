@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import inspect
 import sys
+import time
 
 from redis.asyncio import Redis
 
@@ -17,6 +18,7 @@ from app.core.logging import (
     setup_logging,
     stage_name,
 )
+from app.core.tracing import StageRecord, current_trace, end_trace, start_trace
 from app.jobs.config import JobsSettings
 from app.jobs.models import JobKind
 from app.jobs.process_guard import parent_guard
@@ -31,9 +33,32 @@ class JobReporter:
         self.store, self.identity, self.owner = store, identity, owner
         # 실패 로그에 남길 마지막 진행 단계. 저장 성공 여부와 무관하게 시도한 단계
         self.last_step: str | None = None
+        self._step_started: float | None = None
+        self._step_progress = (0, 0)
+
+    def close_step(self, result: str) -> None:
+        """진행 중인 단계의 시간을 Trace에 기록. 단계가 바뀔 때와 작업이 끝날 때 호출"""
+        if self.last_step is None or self._step_started is None:
+            return
+        trace = current_trace()
+        if trace:
+            done, total = self._step_progress
+            seconds = time.monotonic() - self._step_started
+            trace.add_stage(
+                StageRecord(stage_name(self.last_step), result, seconds),
+                progress_done=done,
+                progress_total=total,
+            )
+        self._step_started = None
 
     async def report(self, step: str, done: int, total: int) -> None:
-        self.last_step = step
+        if step != self.last_step:
+            self.close_step("success")
+            self.last_step = step
+            self._step_started = time.monotonic()
+            if trace := current_trace():
+                trace.current_stage = stage_name(step)
+        self._step_progress = (done, total)
         if not await self.store.progress(self.identity, self.owner, step, done, total):
             raise PipelineCancelled()
 
@@ -89,14 +114,22 @@ async def execute(store: RedisJobStore, identity: str, owner: str, handler) -> N
             fields["error_type"] = type(exc).__name__
         return fields
 
+    trace, token = start_trace(record.kind, emit_stage_logs=True)
+    status = "ABORTED"
     try:
         await reporter.check_cancel()
         result = await handler(record.request, reporter)
+        status = "COMPLETED"
+        reporter.close_step("success")
         await store.finish(identity, owner, "COMPLETED", result=result)
     except PipelineCancelled:
+        status = "CANCELED"
+        reporter.close_step("cancelled")
         await store.finish(identity, owner, "CANCELED")
     except PipelineError as exc:
+        status = "FAILED"
         log.warning("작업 실패", extra=failure(exc, exc.code))
+        reporter.close_step("error")
         await store.finish(
             identity,
             owner,
@@ -104,7 +137,9 @@ async def execute(store: RedisJobStore, identity: str, owner: str, handler) -> N
             error=ErrorBody(code=exc.code, message=exc.message, detail=exc.detail),
         )
     except Exception as exc:
+        status = "FAILED"
         log.error("작업 내부 오류", extra=failure(exc, ErrorCode.INTERNAL_ERROR))
+        reporter.close_step("error")
         # 입력 사진이나 인증값을 오류 문자열로 외부에 노출하지 않는다.
         await store.finish(
             identity,
@@ -112,6 +147,44 @@ async def execute(store: RedisJobStore, identity: str, owner: str, handler) -> N
             "FAILED",
             error=ErrorBody(code=ErrorCode.INTERNAL_ERROR, message="작업 실행에 실패했습니다."),
         )
+    finally:
+        # 소유권 상실로 태스크가 취소되면 status는 ABORTED로 남고 아래 지표 기록은 실행되지 않는다.
+        reporter.close_step("cancelled")
+        if status == "ABORTED":
+            log_summary(record.kind, status, trace)
+        end_trace(token)
+    try:
+        async with asyncio.timeout(2):
+            # 취소 요청이 있으면 저장소가 CANCELED로 바꿔 저장하므로 실제 저장된 상태를 요약에 쓴다.
+            stored = await store.get(identity)
+            if stored is not None and stored.event is not None:
+                status = str(stored.status)
+            log_summary(record.kind, status, trace)
+            await store.observe_stages(record.kind, trace.stages)
+    except Exception as exc:
+        # 관측 실패가 이미 저장한 작업 결과를 바꾸지 않는다. 취소(CancelledError)는 그대로 전파된다.
+        log.warning(
+            "단계 지표 기록 실패", extra={"event": "ai_metrics_write_failed", **error_fields(exc)}
+        )
+        if not trace.summarized:
+            log_summary(record.kind, status, trace)
+
+
+def log_summary(kind: str, status: str, trace) -> None:
+    """작업 하나를 한 줄로 요약. 단계별 시간과 외부 호출 결과"""
+    trace.summarized = True
+    log.info(
+        "작업 실행 요약",
+        extra={
+            "event": "ai_job_summary",
+            "operation": kind,
+            "result": status,
+            "stages_ms": trace.stage_ms() or None,
+            "model_calls": trace.call_counts(),
+            "gpu_wait_ms": round(trace.gpu_wait_seconds * 1000, 2),
+            **trace.fields,
+        },
+    )
 
 
 async def main(identity: str, owner: str) -> None:
