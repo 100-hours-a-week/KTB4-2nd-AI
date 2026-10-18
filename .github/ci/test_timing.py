@@ -29,6 +29,8 @@ def execution_context():
         ".github/workflows/ai-pr-gate.yml",
         ".github/ci/ai_pytest_timing.py",
         ".github/ci/test_timing.py",
+        ".github/ci/test_shards.py",
+        ".github/ci/test-duration-hints.json",
     ]
     data = {
         key: os.environ.get(key)
@@ -42,6 +44,8 @@ def execution_context():
             "ImageVersion",
             "UV_VERSION",
             "UV_CACHE_HIT",
+            "AI_TEST_SHARDS",
+            "AI_TEST_SHARD",
         )
     }
     data.update(
@@ -117,6 +121,7 @@ def report():
         "collectionSeconds": data["collectionSeconds"],
         "collected": data["collected"],
         "outcomes": data["outcomes"],
+        "partition": data.get("partition"),
         "phaseSeconds": dict(phases),
         "slowCases": sorted(slow, key=lambda row: row["seconds"], reverse=True),
         "fixtures": sorted(

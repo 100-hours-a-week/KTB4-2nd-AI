@@ -8,6 +8,7 @@ from collections import Counter
 from pathlib import Path
 
 import pytest
+from test_shards import case_outcome, load_hints, make_plan, settings
 
 STATE = {}
 
@@ -31,6 +32,7 @@ def pytest_configure(config):
         fixtureStack=[],
         collectionComplete=False,
         collectionFailures=0,
+        partition=None,
     )
 
 
@@ -68,6 +70,21 @@ def pytest_collectreport(report):
 @pytest.hookimpl(wrapper=True, tryfirst=True)
 def pytest_collection_modifyitems(session, config, items):
     result = yield
+    if STATE["collectionFailures"]:
+        STATE["inventory"] = [identity(item.nodeid) for item in items]
+        return result
+    count, shard = settings()
+    records = [
+        {"id": identity(item.nodeid), "module": item.path.relative_to(config.rootpath).as_posix()}
+        for item in items
+    ]
+    plan = make_plan(records, count, load_hints())
+    selected = [item for item in items if plan["assignments"][identity(item.nodeid)] == shard]
+    deselected = [item for item in items if plan["assignments"][identity(item.nodeid)] != shard]
+    items[:] = selected
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+    STATE["partition"] = {"plan": plan, "shard": shard}
     STATE["inventory"] = [identity(item.nodeid) for item in items]
     return result
 
@@ -115,19 +132,6 @@ def pytest_runtest_logreport(report):
     )
 
 
-def case_outcome(case):
-    phases = case["phases"]
-    if any(row["outcome"] == "failed" for row in phases):
-        return "failed"
-    if any(row["wasXfail"] for row in phases):
-        return "xfailed" if any(row["outcome"] == "skipped" for row in phases) else "xpassed"
-    if any(row["outcome"] == "skipped" for row in phases):
-        return "skipped"
-    if any(row["phase"] == "call" and row["outcome"] == "passed" for row in phases):
-        return "passed"
-    return "incomplete"
-
-
 @pytest.hookimpl(wrapper=True, tryfirst=True)
 def pytest_sessionfinish(session, exitstatus):
     result = yield
@@ -156,6 +160,7 @@ def pytest_sessionfinish(session, exitstatus):
         "selectedIdentities": dict(sorted(inventory.items())),
         "outcomes": dict(Counter(case_outcome(case) for case in cases.values())),
         "cases": cases,
+        "partition": STATE["partition"],
         "collectors": STATE["collectors"],
         "fixtures": STATE["fixtures"],
         "limits": [

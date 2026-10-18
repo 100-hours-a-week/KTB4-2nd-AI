@@ -109,6 +109,8 @@ jobs:
       - name: Test
         run: uv run python .github/ci/test_timing.py run
         env:
+          AI_TEST_SHARDS: "1"
+          AI_TEST_SHARD: "1"
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           UV_VERSION: ${{ steps.uv.outputs.uv-version }}
           UV_CACHE_HIT: ${{ steps.uv.outputs.cache-hit }}
@@ -127,7 +129,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ai-test-timing-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ai-test-timing-${{ github.run_id }}-${{ github.run_attempt }}-shard-1
           path: build/ci-timing/
           retention-days: 7
           if-no-files-found: error
