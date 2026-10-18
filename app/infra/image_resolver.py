@@ -1,6 +1,7 @@
 """선별된 분석용 사진에만 S3 GET URL을 발급한다. 이미지 바이트는 내려받지 않는다."""
 
 import asyncio
+import time
 from threading import Lock
 from typing import Self
 
@@ -10,6 +11,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from app.core.config import Settings
 from app.infra.vlm import VLMUnavailable
+from app.observability.calls import log_model_call
 
 
 class S3ImageResolver:
@@ -72,6 +74,7 @@ class S3ImageResolver:
             raise
 
     async def resolve(self, storage_key: str) -> str:
+        started = time.monotonic()
         try:
             if not storage_key or len(storage_key.encode("utf-8")) > 1024:
                 raise ValueError("분석용 사진 키가 올바르지 않습니다.")
@@ -83,9 +86,20 @@ class S3ImageResolver:
                 ExpiresIn=self._expires_sec,
                 HttpMethod="GET",
             )
-        except (BotoCoreError, ClientError, ValueError):
+        except (BotoCoreError, ClientError, ValueError) as exc:
             # 기존 검색의 답변 실패 계약에 맞춰 사진 목록은 유지한다.
             # 저장소 키나 자격 증명이 포함된 외부 예외 본문은 노출하지 않는다.
+            # AWS 오류 코드(AccessDenied, ExpiredToken 등)는 고정된 분류값이라 남긴다.
+            aws_code = (
+                exc.response.get("Error", {}).get("Code") if isinstance(exc, ClientError) else None
+            )
+            log_model_call(
+                "s3",
+                started,
+                "invalid_key" if isinstance(exc, ValueError) else "sign_error",
+                error_type=type(exc).__name__,
+                aws_error_code=aws_code,
+            )
             raise VLMUnavailable("답변용 사진의 접근 URL을 발급하지 못했습니다.") from None
 
     async def aclose(self) -> None:

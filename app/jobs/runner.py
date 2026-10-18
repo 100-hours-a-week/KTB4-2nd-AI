@@ -10,14 +10,19 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from app.core.errors import ErrorCode
-from app.core.logging import get_logger, setup_logging
+from app.core.logging import error_fields, get_logger, setup_logging
 from app.jobs.config import JobsSettings
 from app.jobs.execution import handler_for
 from app.jobs.models import JobKind, JobRecord
 from app.jobs.redis_store import RedisJobStore
-from app.schemas.task import ErrorBody
+from app.schemas.task import TERMINAL_STATUSES, ErrorBody
 
 log = get_logger(__name__)
+
+
+def job_fields(record: JobRecord) -> dict:
+    """실행기 프로세스는 작업 맥락을 bind하지 않으므로 식별자를 직접 붙인다."""
+    return {"operation": record.kind, "trip_id": record.trip_id, "job_id": record.execution_id}
 
 
 async def stop_child(process) -> None:
@@ -57,11 +62,23 @@ async def run_claimed(store: RedisJobStore, record: JobRecord) -> None:
                 await asyncio.wait_for(process.wait(), timeout=store.cfg.JOBS_HEARTBEAT_SEC)
             except TimeoutError:
                 if not await store.heartbeat(record.identity, record.owner):
+                    current = await store.get(record.identity)
+                    if current is not None and current.status in TERMINAL_STATUSES:
+                        # 자식이 결과를 저장하고 지표 기록을 마무리하는 중이며 소유권 상실이 아니다.
+                        try:
+                            await asyncio.wait_for(process.wait(), timeout=5)
+                        except TimeoutError:
+                            pass
+                    else:
+                        log.warning(
+                            "heartbeat 갱신 실패로 실행 프로세스 중단",
+                            extra={**job_fields(record), "event": "ai_job_lease_lost"},
+                        )
                     await stop_child(process)
                     await store.recover()
                     return
         # 정상 종료라면 자식이 결과를 저장했다. 미저장 상태만 실패로 회수한다.
-        await store.finish(
+        recovered = await store.finish(
             record.identity,
             record.owner,
             "FAILED",
@@ -69,6 +86,18 @@ async def run_claimed(store: RedisJobStore, record: JobRecord) -> None:
                 code=ErrorCode.WORKER_DEAD, message="실행 프로세스가 결과 저장 전에 종료되었습니다."
             ),
         )
+        if recovered:
+            # 음수 종료 코드는 신호 번호. -9는 메모리 부족 등으로 강제 종료된 경우가 많다.
+            log.error(
+                "실행 프로세스가 결과 저장 전에 종료",
+                extra={
+                    **job_fields(record),
+                    "event": "ai_worker_exit",
+                    "result": "failed",
+                    "error_code": str(ErrorCode.WORKER_DEAD),
+                    "exit_code": process.returncode,
+                },
+            )
     finally:
         await stop_child(process)
 
@@ -96,10 +125,20 @@ async def runner_loop(
                     "FAILED",
                     error=ErrorBody(code=ErrorCode.WORKER_DEAD, message="실행기가 종료되었습니다."),
                 )
+                log.warning(
+                    "실행기 종료로 진행 중인 작업 실패 처리",
+                    extra={
+                        **job_fields(record),
+                        "event": "ai_job_runner_stopped",
+                        "result": "failed",
+                        "error_code": str(ErrorCode.WORKER_DEAD),
+                    },
+                )
             raise
-        except (RedisError, OSError):
+        except (RedisError, OSError) as exc:
             log.warning(
-                "실행기 연결 실패, 소유권 만료 후 회수", extra={"event": "ai_job_runner_retry"}
+                "실행기 연결 실패, 소유권 만료 후 회수",
+                extra={"event": "ai_job_runner_retry", **error_fields(exc)},
             )
         try:
             await asyncio.wait_for(stop.wait(), timeout=store.cfg.JOBS_POLL_SEC)

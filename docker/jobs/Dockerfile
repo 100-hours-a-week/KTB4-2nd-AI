@@ -9,6 +9,9 @@ COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev && python -c "from aiokafka.codec import has_lz4; assert has_lz4()"
 COPY app ./app
 RUN groupadd --system ai && useradd --system --gid ai ai && chown -R ai:ai /app
+# 모든 로그의 release 필드. 의존성 층의 캐시를 유지하도록 마지막 층에서 지정한다.
+ARG RELEASE=unknown
+ENV RELEASE=${RELEASE}
 USER ai
 EXPOSE 8000
 CMD ["uvicorn", "app.v2_main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "35"]
