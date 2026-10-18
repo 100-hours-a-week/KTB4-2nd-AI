@@ -8,13 +8,36 @@ from prometheus_client import CollectorRegistry, generate_latest
 from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily, HistogramMetricFamily
 from redis.exceptions import RedisError
 
-from app.core.logging import get_logger
+from app.core.logging import (
+    FAILURE_INTAKE,
+    FAILURE_QUEUE,
+    FAILURE_STARTUP,
+    get_logger,
+    stage_name,
+)
 
 BUCKETS = (0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600, float("inf"))
 log = get_logger(__name__)
 
 
-def log_terminal(record, now):
+def _ms(seconds):
+    return round(max(0, seconds) * 1000, 2)
+
+
+def log_terminal(record, now, previous_step=None, *, intake=False):
+    """종료 상태로 처음 바뀔 때 한 번. previous_step은 종료 직전의 진행 단계
+
+    intake는 Kafka 접수 때 이미 실패로 등록된 작업(형식 오류)이다.
+    """
+    error = record.event.error if record.event else None
+    failure_stage = None
+    if str(record.status) != "COMPLETED":
+        if intake:
+            failure_stage = FAILURE_INTAKE
+        elif record.started_at is None:
+            failure_stage = FAILURE_QUEUE
+        else:
+            failure_stage = stage_name(previous_step) or FAILURE_STARTUP
     log.info(
         "AI 작업 종료",
         extra={
@@ -23,10 +46,14 @@ def log_terminal(record, now):
             "trip_id": record.trip_id,
             "job_id": record.execution_id,
             "result": str(record.status),
-            "duration_ms": round(max(0, now - record.created_at) * 1000, 2),
-            "error_code": str(record.event.error.code)
-            if record.event and record.event.error
-            else None,
+            "duration_ms": _ms(now - record.created_at),
+            "queue_ms": _ms((record.started_at or now) - record.created_at),
+            "execution_ms": _ms(now - record.started_at) if record.started_at else 0,
+            "failure_stage": failure_stage,
+            "error_code": str(error.code) if error else None,
+            "error_reason": error.detail.get("reason") if error and error.detail else None,
+            "progress_done": record.progress.done,
+            "progress_total": record.progress.total,
         },
     )
 

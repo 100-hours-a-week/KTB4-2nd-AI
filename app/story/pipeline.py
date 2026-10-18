@@ -6,12 +6,15 @@ from zoneinfo import ZoneInfo
 from pydantic import ValidationError
 
 from app.core.errors import ErrorCode
+from app.core.logging import get_logger, validation_fields
 from app.infra.vlm import VLMUnavailable
 from app.jobs.models import StoryBlock, StoryMessage, StoryResult, Verification
 from app.jobs.sync_bridge import run_sync
 from app.search.context import ModelUnavailable
 from app.story.prompts import StoryDraft, messages, response_format
 from app.story.selection import failure, filter_candidates, select
+
+log = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -44,15 +47,41 @@ def validate_request(request: dict) -> StoryMessage:
         raise failure(ErrorCode.INVALID_REQUEST, "스토리 요청 형식이 올바르지 않습니다.") from None
 
 
+def invalid_output(rule: str, **fields) -> Exception:
+    """검증에서 어긴 규칙을 남기고 기존 실패를 만든다. 생성된 글 본문은 남기지 않는다."""
+    log.warning(
+        "생성된 스토리가 출력 규칙을 만족하지 못했습니다.",
+        extra={"event": "ai_story_output_invalid", "result": "failed", "rule": rule, **fields},
+    )
+    return failure(
+        ErrorCode.INTERNAL_ERROR,
+        "생성된 스토리가 출력 규칙을 만족하지 못했습니다.",
+        reason="INVALID_STORY_OUTPUT",
+    )
+
+
 def finalize(raw: str, request: StoryMessage, selected) -> dict:
     try:
         draft = StoryDraft.model_validate_json(raw)
-        photos = {photo.trip_attachment_id: (place_id, photo) for place_id, photo in selected}
-        ids = [block.trip_attachment_id for block in draft.blocks]
-        if len(set(ids)) != len(ids) or set(ids) != set(photos):
-            raise ValueError("선별 사진 누락 또는 선별되지 않은 사진 또는 중복 사진")
-        if {photos[photo_id][0] for photo_id in ids} != {p.trip_place_id for p in request.places}:
-            raise ValueError("선택 장소 누락")
+    except ValidationError as exc:
+        raise invalid_output(
+            "draft_schema",
+            validation_errors=validation_fields(exc.errors()),
+            output_chars=len(raw),
+        ) from None
+    photos = {photo.trip_attachment_id: (place_id, photo) for place_id, photo in selected}
+    ids = [block.trip_attachment_id for block in draft.blocks]
+    if len(set(ids)) != len(ids):
+        raise invalid_output("duplicate_photo", blocks=len(ids), unique_photos=len(set(ids)))
+    if set(ids) != set(photos):
+        raise invalid_output(
+            "photo_set_mismatch",
+            missing_photos=len(set(photos) - set(ids)),
+            unexpected_photos=len(set(ids) - set(photos)),
+        )
+    if {photos[photo_id][0] for photo_id in ids} != {p.trip_place_id for p in request.places}:
+        raise invalid_output("place_missing")
+    try:
         places = {place.trip_place_id: place.place_name for place in request.places}
         ordered = sorted(
             draft.blocks,
@@ -84,12 +113,12 @@ def finalize(raw: str, request: StoryMessage, selected) -> dict:
             blocks=blocks,
             verification=Verification(passed=True, retry_count=0),
         ).model_dump(mode="json")
-    except (ValidationError, ValueError):
-        raise failure(
-            ErrorCode.INTERNAL_ERROR,
-            "생성된 스토리가 출력 규칙을 만족하지 못했습니다.",
-            reason="INVALID_STORY_OUTPUT",
+    except ValidationError as exc:
+        raise invalid_output(
+            "result_schema", validation_errors=validation_fields(exc.errors())
         ) from None
+    except ValueError:
+        raise invalid_output("result_value") from None
 
 
 async def run(request: dict, reporter, ctx: StoryContext, options: StoryOptions) -> dict:

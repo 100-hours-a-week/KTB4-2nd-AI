@@ -7,7 +7,10 @@
 
 import json
 import logging
+import os
 import sys
+import traceback
+from collections.abc import Iterable
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any
@@ -48,6 +51,16 @@ FAILURE_WORKER_DISPATCH = "worker_dispatch"
 FAILURE_MODEL_LOAD = "model_load"
 FAILURE_CALLBACK = "callback"
 FAILURE_INTERNAL = "internal"
+# v2 실행이 첫 진행률 보고 전에 끊긴 경우. 요청 검증과 클라이언트 준비 구간
+FAILURE_STARTUP = "startup"
+
+# 스택에서 남길 최대 프레임 수. 발생 지점과 가까운 쪽을 남김
+_MAX_FRAMES = 8
+# 이 패키지(app)의 실제 경로. 컨테이너에서는 /app/app이고 가상환경은 /app/.venv라서
+# 경로 안의 "/app/" 문자열로 고르면 라이브러리 프레임이 섞인다.
+APP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+# 단계 밖에서 끊긴 경우 가운데, Kafka 접수 단계에서 실패로 등록된 작업
+FAILURE_INTAKE = "intake"
 
 # LOG_LEVEL을 DEBUG로 올리면 루트를 물려받아 이것들도 DEBUG가 됨
 # botocore는 S3 요청마다 수십 줄이라 사진 200장이면 우리 로그가 묻힘
@@ -95,6 +108,57 @@ def clear_context() -> None:
     _request_id.set(None)
     _trip_id.set(None)
     _job_id.set(None)
+
+
+def stage_name(step: str | None) -> str | None:
+    """진행률 단계 이름을 로그의 단계 이름으로. 정리는 STEP_NAMES, 스토리는 소문자"""
+    if step is None:
+        return None
+    return STEP_NAMES.get(step, step.lower())
+
+
+def error_fields(exc: BaseException) -> dict[str, Any]:
+    """예외의 종류, 원인 사슬과 app 안의 발생 위치
+
+    예외 메시지는 presigned URL이나 사본 키를 담을 수 있어 남기지 않음.
+    위치는 app/ 아래 파일만, 발생 지점에서 가까운 _MAX_FRAMES개
+    """
+    chain, seen, current = [], set(), exc
+    while current is not None and id(current) not in seen and len(chain) < 5:
+        seen.add(id(current))
+        chain.append(type(current).__name__)
+        current = current.__cause__ or (
+            None if current.__suppress_context__ else current.__context__
+        )
+    frames = []
+    for frame in traceback.extract_tb(exc.__traceback__):
+        relative = app_relative(frame.filename)
+        if relative:
+            frames.append(f"{relative}:{frame.lineno} {frame.name}")
+    return {
+        "error_type": chain[0],
+        "error_chain": chain[1:] or None,
+        "error_frames": frames[-_MAX_FRAMES:] or None,
+    }
+
+
+def app_relative(filename: str, app_dir: str = APP_DIR) -> str | None:
+    """app 패키지 안의 파일이면 app/로 시작하는 상대 경로, 아니면 None"""
+    path = os.path.realpath(filename)
+    if os.path.commonpath([path, app_dir]) != app_dir:
+        return None
+    return "app/" + os.path.relpath(path, app_dir).replace(os.sep, "/")
+
+
+def validation_fields(errors: Iterable[dict[str, Any]], limit: int = 20) -> list[str]:
+    """pydantic 검증 오류의 위치와 종류만. 입력값은 사진 키와 좌표를 담을 수 있어 제외"""
+    fields = []
+    for error in errors:
+        location = ".".join(str(part) for part in error.get("loc", ()))
+        fields.append(f"{location}:{error.get('type', 'unknown')}")
+        if len(fields) >= limit:
+            break
+    return fields
 
 
 def current_request() -> str | None:
