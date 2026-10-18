@@ -146,16 +146,19 @@ jobs:
           fi
 
       - name: Compute model cache key
+        if: steps.changes.outputs.model_runtime == 'true'
         id: model
         run: echo "key=$(uv run scripts/fetch_model.py --cache-key)" >> "$GITHUB_OUTPUT"
 
       - name: Cache model weights
+        if: steps.changes.outputs.model_runtime == 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: models/siglip2
           key: model-${{ steps.model.outputs.key }}
 
       - name: Fetch model if cache missed
+        if: steps.changes.outputs.model_runtime == 'true'
         run: uv run scripts/fetch_model.py
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
