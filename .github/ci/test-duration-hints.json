@@ -1,0 +1,75 @@
+{
+  "schema": 1,
+  "source": {
+    "repository": "100-hours-a-week/KTB4-2nd-AI",
+    "head": "581bcfac6cf85f58ce44ca2d9c8eb33c579ff38c",
+    "method": "Per-module median of summed case setup/call/teardown durations from six #116 samples; excludes collection and process startup",
+    "samples": [
+      {
+        "mode": "baseline",
+        "attempt": 2,
+        "run": 39104160692
+      },
+      {
+        "mode": "selected",
+        "attempt": 2,
+        "run": 39104160570
+      },
+      {
+        "mode": "selected",
+        "attempt": 3,
+        "run": 39104160570
+      },
+      {
+        "mode": "baseline",
+        "attempt": 3,
+        "run": 39104160692
+      },
+      {
+        "mode": "baseline",
+        "attempt": 4,
+        "run": 39104160692
+      },
+      {
+        "mode": "selected",
+        "attempt": 4,
+        "run": 39104160570
+      }
+    ]
+  },
+  "modules": {
+    "tests/test_ai_e2e.py": 16.782848,
+    "tests/test_api.py": 0.429175,
+    "tests/test_bootstrap.py": 0.03586,
+    "tests/test_clock.py": 0.033863,
+    "tests/test_download.py": 0.111567,
+    "tests/test_embedding_client.py": 0.157054,
+    "tests/test_fake_pipeline.py": 0.094757,
+    "tests/test_filtering.py": 0.093832,
+    "tests/test_finalizing.py": 0.036054,
+    "tests/test_gpu_requests.py": 0.546311,
+    "tests/test_images.py": 0.086322,
+    "tests/test_location_steps.py": 0.040468,
+    "tests/test_metrics.py": 0.321944,
+    "tests/test_observability.py": 0.131175,
+    "tests/test_photos_ready.py": 2.047774,
+    "tests/test_pipeline.py": 1.23257,
+    "tests/test_pipeline_observability.py": 0.092097,
+    "tests/test_pipeline_state.py": 0.009793,
+    "tests/test_process_handler.py": 0.23807,
+    "tests/test_progress.py": 0.023402,
+    "tests/test_qdrant.py": 0.25876,
+    "tests/test_query.py": 2.73909,
+    "tests/test_runtime_check.py": 0.042933,
+    "tests/test_schemas.py": 0.012141,
+    "tests/test_search_bootstrap.py": 0.527048,
+    "tests/test_siglip_naflex.py": 0.033036,
+    "tests/test_story.py": 0.08531,
+    "tests/test_story_runner.py": 0.393443,
+    "tests/test_task_service.py": 0.041951,
+    "tests/test_v2_jobs.py": 2.963901,
+    "tests/test_v2_jobs_integration.py": 44.6969,
+    "tests/test_vllm_client.py": 0.102815,
+    "tests/test_worker.py": 0.154401
+  }
+}
