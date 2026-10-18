@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .env
+/build/ci-timing/
 .DS_Store
 data/
 models/
