@@ -21,7 +21,7 @@ from app.jobs.models import (
     PhotosReadyMessage,
     TerminalStatus,
 )
-from app.observability.metrics import log_terminal, terminal_commands
+from app.observability.metrics import log_terminal, observe_commands, terminal_commands
 from app.schemas.task import TERMINAL_STATUSES, ErrorBody, Progress, TaskStatus
 
 
@@ -401,6 +401,22 @@ class RedisJobStore:
         if changed is None:
             raise AppError(ErrorCode.TASK_NOT_FOUND)
         return changed
+
+    async def observe_stages(self, kind: JobKind, stages) -> None:
+        """작업의 단계별 시간을 지연 히스토그램에 더한다. phase는 단계 이름, outcome은 단계 결과"""
+        if not stages:
+            return
+        async with self.redis.pipeline(transaction=True) as pipe:
+            for record in stages:
+                observe_commands(
+                    pipe,
+                    self.key("metrics:operations"),
+                    kind,
+                    record.result,
+                    record.full_name,
+                    record.seconds,
+                )
+            await pipe.execute()
 
     async def recover(self) -> None:
         now = await self.now()

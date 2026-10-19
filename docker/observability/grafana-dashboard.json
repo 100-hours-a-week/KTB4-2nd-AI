@@ -198,6 +198,62 @@
         },
         "overrides": []
       }
+    },
+    {
+      "id": 7,
+      "title": "세부 단계별 p95 지연 시간",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, operation, phase) (rate(yeodam:operation_duration_seconds_bucket:max{environment=\"$environment\",phase!~\"total|queue|execution|request\"}[15m])))",
+          "legendFormat": "{{operation}} {{phase}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "title": "세부 단계별 오류와 취소",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (operation, phase, outcome) (rate(yeodam:operation_duration_seconds_count:max{environment=\"$environment\",phase!~\"total|queue|execution|request\",outcome=~\"error|cancelled\"}[15m]))",
+          "legendFormat": "{{operation}} {{phase}} {{outcome}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
     }
   ]
 }

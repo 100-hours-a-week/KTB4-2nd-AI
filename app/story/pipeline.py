@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from app.core.errors import ErrorCode
 from app.core.logging import get_logger, validation_fields
+from app.core.tracing import stage
 from app.infra.vlm import VLMUnavailable
 from app.jobs.models import StoryBlock, StoryMessage, StoryResult, Verification
 from app.jobs.sync_bridge import run_sync
@@ -139,29 +140,43 @@ async def run(request: dict, reporter, ctx: StoryContext, options: StoryOptions)
                 cancelled=cancel,
             )
 
-    groups = await run_sync(filter_images, reporter)
+    candidates = sum(len(place.attachments) for place in message.places)
+    with stage("filter", parent="selecting", places=len(message.places)) as fields:
+        fields["candidates"] = candidates
+        groups = await run_sync(filter_images, reporter)
+        fields["retained"] = sum(len(group) for group in groups.values())
+        fields["excluded"] = candidates - fields["retained"]
     await reporter.report("SELECTING", 1, 4)
     try:
         ids = [p.trip_attachment_id for group in groups.values() for p in group]
         await reporter.check_cancel()
-        vectors = await ctx.vectors.fetch(ids)
-        selected = select(groups, vectors, budget=options.image_budget)
+        with stage("vectors", parent="selecting", requested=len(ids)) as fields:
+            vectors = await ctx.vectors.fetch(ids)
+            fields["missing"] = len(set(ids) - set(vectors))
+        with stage("select", parent="selecting", budget=options.image_budget) as fields:
+            selected = select(groups, vectors, budget=options.image_budget)
+            fields["selected"] = len(selected)
         await reporter.check_cancel()
         urls = []
-        for _, photo in selected:
-            await reporter.check_cancel()
-            urls.append(await ctx.urls.resolve(photo.analyze_storage_key))
+        with stage("urls", parent="selecting", count=len(selected)):
+            for _, photo in selected:
+                await reporter.check_cancel()
+                urls.append(await ctx.urls.resolve(photo.analyze_storage_key))
         await reporter.report("WRITING", 2, 4)
         await reporter.check_cancel()
-        raw = await ctx.vlm.chat(
-            messages(message, selected),
-            urls,
-            options.max_tokens,
-            response_format=response_format([photo.trip_attachment_id for _, photo in selected]),
-        )
+        with stage("generate", parent="writing", images=len(urls)):
+            raw = await ctx.vlm.chat(
+                messages(message, selected),
+                urls,
+                options.max_tokens,
+                response_format=response_format(
+                    [photo.trip_attachment_id for _, photo in selected]
+                ),
+            )
         await reporter.check_cancel()
         await reporter.report("VERIFYING", 3, 4)
-        result = finalize(raw, message, selected)
+        with stage("validate", parent="verifying"):
+            result = finalize(raw, message, selected)
         await reporter.report("VERIFYING", 4, 4)
         await reporter.check_cancel()
         return result

@@ -4,6 +4,12 @@ from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 
 from app.api.services.query_service import QueryService
+from app.api.services.search_tracing import (
+    TracedEmbedder,
+    TracedImages,
+    TracedVectors,
+    TracedVlm,
+)
 from app.core.config import Settings
 from app.embedding.client import DIM, MODEL_VERSION, QwenTextEmbedder
 from app.embedding.contracts import TextEmbedder
@@ -45,8 +51,14 @@ async def search_service(
 
             vlm = generation_client(vlm, redis, settings)
             embedder = embedding_client(embedder, redis, settings)
+        # 감싸기는 GPU 호출 한도 밖에 둔다. 단계 시간에는 슬롯 대기 시간도 포함된다.
         yield QueryService(
-            SearchContext(vlm=vlm, embedder=embedder, vectors=vectors, images=images),
+            SearchContext(
+                vlm=TracedVlm(vlm),
+                embedder=TracedEmbedder(embedder),
+                vectors=TracedVectors(vectors),
+                images=TracedImages(images),
+            ),
             options,
             metrics=Metrics(redis, settings.redis_prefix) if redis is not None else None,
         )

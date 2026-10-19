@@ -500,7 +500,7 @@ async def test_default_qdrant_uses_qwen_collection_and_is_closed(monkeypatch, im
                 pytest.fail("invalid image configuration must fail startup")
     else:
         async with search_service(cfg) as service:
-            assert service.context.vectors is vectors
+            assert service.context.vectors.inner is vectors
         images.aclose.assert_awaited_once()
     factory.assert_called_once_with(cfg.QDRANT_URL, MODEL_VERSION, DIM, 2)
     vectors.aclose.assert_awaited_once()
