@@ -28,29 +28,20 @@ def photo(photo_id, gps=None, vector=(1.0, 0.0), taken_at=None):
 
 
 @pytest.mark.parametrize(
-    "taken_at",
+    ("taken_at", "excluded"),
     [
-        "2026-09-09T14:59:59+00:00",
-        "2026-09-09T15:00:00+00:00",
-        "2026-09-12T14:59:59+00:00",
-        "2026-09-12T15:00:00+00:00",
+        ("2026-09-09T14:59:59+00:00", True),
+        ("2026-09-09T15:00:00+00:00", False),
+        ("2026-09-12T14:59:59+00:00", False),
+        ("2026-09-12T15:00:00+00:00", True),
     ],
 )
-def test_gps_remains_available_across_period_boundaries(taken_at):
+def test_period_uses_kst_and_includes_both_dates(taken_at, excluded):
     item = photo(1, gps=(0.0, 0.0), vector=None, taken_at=taken_at)
     locate_photos([item], PERIOD, inherit_min_sim=0.8)
-    assert item.issue is None
+    assert item.issue is (Issue.UNCLEAR_LOCATION if excluded else None)
     assert (item.latitude, item.longitude) == (0.0, 0.0)
     assert item.region_origin is RegionOrigin.EXIF
-
-
-def test_outside_period_gps_joins_cluster():
-    inside = photo(1, gps=(0.0, 0.0), taken_at="2026-09-10T12:00:00+09:00")
-    outside = photo(2, gps=(0.0, 0.001), taken_at="2026-09-13T12:00:00+09:00")
-    locate_photos([inside, outside], PERIOD, inherit_min_sim=0.8)
-    cluster_photos([inside, outside], dbscan_eps_m=150, min_samples=1)
-    assert inside.place_id == outside.place_id == "p1"
-    assert outside.issue is None
 
 
 @pytest.mark.parametrize("status", [TimeStatus.UNKNOWN, TimeStatus.CORRECTED])
@@ -63,6 +54,28 @@ def test_does_not_use_untrusted_original_date(status):
     locate_photos([item], PERIOD, inherit_min_sim=0.8)
     assert item.issue is None
     assert item.source.taken_at.year == 2010
+
+
+def test_photo_without_gps_outside_period_does_not_inherit_location():
+    anchor = photo(1, gps=(37.0, 127.0), taken_at="2026-09-10T12:00:00+09:00")
+    target = photo(2, taken_at="2026-09-13T12:00:00+09:00")
+    locate_photos([anchor, target], PERIOD, inherit_min_sim=0.8)
+    assert anchor.issue is None
+    assert target.issue is Issue.UNCLEAR_LOCATION
+    assert (target.latitude, target.longitude) == (None, None)
+    assert target.region_origin is RegionOrigin.UNKNOWN
+
+
+def test_corrected_time_outside_period_is_excluded_even_if_original_is_inside():
+    anchor = photo(1, gps=(37.0, 127.0), taken_at="2026-09-10T12:00:00+09:00")
+    target = photo(2, taken_at="2026-09-13T12:00:00+09:00")
+    target.source = replace(
+        target.source, taken_at=datetime.fromisoformat("2026-09-11T12:00:00+09:00")
+    )
+    target.time_status = TimeStatus.CORRECTED
+    locate_photos([anchor, target], PERIOD, inherit_min_sim=0.8)
+    assert target.issue is Issue.UNCLEAR_LOCATION
+    assert (target.latitude, target.longitude) == (None, None)
 
 
 def test_highest_similarity_inherits_at_threshold_but_low_similarity_is_unclear():
@@ -111,20 +124,14 @@ def test_inferred_coordinates_never_become_anchors():
     assert second.latitude is None
 
 
-def test_no_anchor_is_unclear_without_embedding_lookup():
+@pytest.mark.parametrize("outside_anchor", [False, True])
+def test_no_eligible_anchor_is_unclear_without_embedding_lookup(outside_anchor):
     target = photo(2, vector=None)
-    locate_photos([target], PERIOD, inherit_min_sim=0.8)
+    photos = [target]
+    if outside_anchor:
+        photos.append(photo(1, gps=(37.0, 127.0), taken_at="2026-09-13T00:00:00+09:00"))
+    locate_photos(photos, PERIOD, inherit_min_sim=0.8)
     assert target.issue is Issue.UNCLEAR_LOCATION
-
-
-@pytest.mark.parametrize("taken_at", ["2026-09-10T12:00:00+09:00", "2026-09-14T00:00:00+09:00"])
-def test_outside_period_gps_can_supply_location_to_photo_without_gps(taken_at):
-    anchor = photo(1, gps=(37.0, 127.0), taken_at="2026-09-13T00:00:00+09:00")
-    target = photo(2, taken_at=taken_at)
-    locate_photos([target, anchor], PERIOD, inherit_min_sim=0.8)
-    assert target.issue is None
-    assert (target.latitude, target.longitude) == (37.0, 127.0)
-    assert target.region_origin is RegionOrigin.INFERRED
 
 
 @pytest.mark.parametrize("vector", [None, (0.0, 0.0), (2.0, 0.0), (np.nan, 0.0), (1.0,)])
