@@ -4,7 +4,7 @@ import asyncio
 import json
 from collections import defaultdict
 
-from prometheus_client import CollectorRegistry, generate_latest
+from prometheus_client import CollectorRegistry, ProcessCollector, generate_latest
 from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily, HistogramMetricFamily
 from redis.exceptions import RedisError
 
@@ -113,6 +113,7 @@ class Metrics:
                 pipe.zcard(self.prefix + name)
             pipe.hgetall(self.prefix + "metrics:quality")
             pipe.hgetall(self.prefix + "metrics:quality_context")
+            pipe.hgetall(self.prefix + "metrics:resources")
             values = await pipe.execute()
         histogram = HistogramMetricFamily(
             "yeodam_ai_operation_duration_seconds",
@@ -180,10 +181,22 @@ class Metrics:
                 1,
             )
 
+        memory = GaugeMetricFamily(
+            "yeodam_ai_job_peak_memory_bytes",
+            "Peak resident memory of the most recent job process, per operation.",
+            labels=["operation"],
+        )
+        for field, value in values[7].items():
+            operation, name = field.split("|", 1)
+            if name == "peak_memory_bytes":
+                memory.add_metric([operation], float(value))
+
         class Snapshot:
             def collect(self):
-                return iter([histogram, queue, photos, blocks, quality, evaluation_info])
+                return iter([histogram, queue, photos, blocks, quality, evaluation_info, memory])
 
         registry = CollectorRegistry()
         registry.register(Snapshot())
+        # 이 API 인스턴스의 메모리와 CPU. Redis 공유값이 아니므로 인스턴스별로 본다.
+        ProcessCollector(registry=registry)
         return generate_latest(registry)

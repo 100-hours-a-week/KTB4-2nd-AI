@@ -25,6 +25,11 @@ def samples(content):
     ]
 
 
+def shared(content):
+    """복제본 사이에 같아야 하는 Redis 공유 지표. process_*는 인스턴스별 값이라 제외"""
+    return [sample for sample in samples(content) if not sample.name.startswith("process_")]
+
+
 @scenario
 async def test_terminal_metrics_are_atomic_and_not_duplicated_by_publication_or_replica():
     async with environment() as (cfg, a, b, producer):
@@ -36,7 +41,7 @@ async def test_terminal_metrics_are_atomic_and_not_duplicated_by_publication_or_
         await b.acknowledge_result(record.identity, "publisher")
         one = await Metrics(a.redis, a.prefix).render()
         two = await Metrics(b.redis, b.prefix).render()
-        assert one == two
+        assert shared(one) == shared(two)
         values = samples(one)
         count = [
             s.value

@@ -1,0 +1,35 @@
+# GPU 사용률 수집기. 모델 서버와 같은 호스트에서 실행하고 Prometheus가 수집한다.
+# AWS 임베딩 서버(g6.xlarge)는 dcgm, RunPod 생성 서버는 nvidia-smi 수집기를 사용한다.
+# RunPod Pod 안에서는 DCGM이 요구하는 권한을 받을 수 없을 수 있어 nvidia-smi 방식을 둔다.
+#
+#   AWS:    docker compose -f gpu-exporters.compose.yaml --profile dcgm up -d
+#   RunPod: Pod 시작 명령에 nvidia_gpu_exporter를 함께 실행하거나 아래 이미지를 사이드카로 사용
+#
+# 두 수집기 모두 인증이 없다. 사설망이나 보안 그룹으로 Prometheus만 접근하게 한다.
+services:
+  dcgm-exporter:
+    profiles: [dcgm]
+    image: ${DCGM_EXPORTER_IMAGE:-nvcr.io/nvidia/k8s/dcgm-exporter:4.6.0-4.8.3-distroless}
+    cap_add: [SYS_ADMIN]
+    ports: ["${DCGM_EXPORTER_BIND_HOST:-127.0.0.1}:${DCGM_EXPORTER_PORT:-9400}:9400"]
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  nvidia-gpu-exporter:
+    profiles: [nvidia-smi]
+    image: ${NVIDIA_GPU_EXPORTER_IMAGE:-utkuozdemir/nvidia_gpu_exporter:1.15.1}
+    ports: ["${NVIDIA_GPU_EXPORTER_BIND_HOST:-127.0.0.1}:${NVIDIA_GPU_EXPORTER_PORT:-9835}:9835"]
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

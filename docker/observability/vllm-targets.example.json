@@ -1,0 +1,1 @@
+[{"targets":["embedding-gpu.internal:8003"],"labels":{"environment":"staging","server":"embedding"}},{"targets":["generation-gpu.internal:8004"],"labels":{"environment":"staging","server":"generation"}}]

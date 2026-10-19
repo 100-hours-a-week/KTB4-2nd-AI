@@ -10,3 +10,14 @@ scrape_configs:
       credentials_file: /etc/prometheus/secrets/ai_api_key
     file_sd_configs:
       - files: [/etc/prometheus/yeodam-targets.json]
+  # 임베딩과 생성 vLLM의 /metrics. 대기와 실행 요청 수, KV 캐시 사용률, 토큰 처리량
+  # vLLM의 API 키는 /v1 경로에만 적용되므로 사설 주소로만 수집한다.
+  - job_name: yeodam-vllm
+    metrics_path: /metrics
+    file_sd_configs:
+      - files: [/etc/prometheus/yeodam-vllm-targets.json]
+  # GPU 사용률과 메모리. dcgm(9400)과 nvidia-smi(9835) 수집기를 같은 job에서 수집한다.
+  - job_name: yeodam-gpu
+    metrics_path: /metrics
+    file_sd_configs:
+      - files: [/etc/prometheus/yeodam-gpu-targets.json]

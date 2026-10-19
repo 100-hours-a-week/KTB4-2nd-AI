@@ -1,0 +1,1 @@
+[{"targets":["embedding-gpu.internal:9400"],"labels":{"environment":"staging","server":"embedding","exporter":"dcgm"}},{"targets":["generation-gpu.internal:9835"],"labels":{"environment":"staging","server":"generation","exporter":"nvidia-smi"}}]
