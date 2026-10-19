@@ -48,6 +48,10 @@ class JobsSettings(Settings):
     GPU_WAIT_SEC: float = Field(default=2, gt=0, allow_inf_nan=False)
     # 정리 결과를 알려진 평가 데이터셋과 사진 지문으로 대조해 정확도를 자동 기록한다.
     EVAL_AUTO_DETECT: bool = True
+    # /runpod/status의 Pod 상태 조회. Read Only 키 권장, 미설정이면 running은 null이다.
+    RUNPOD_API_KEY: SecretStr | None = None
+    RUNPOD_STATUS_CACHE_SEC: float = Field(default=10, ge=0, allow_inf_nan=False)
+    RUNPOD_STATUS_TIMEOUT_SEC: float = Field(default=3, gt=0, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def check_jobs_settings(self) -> Self:

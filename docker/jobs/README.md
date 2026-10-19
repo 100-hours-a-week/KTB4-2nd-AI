@@ -48,6 +48,7 @@ async def run(request: dict, reporter: JobReporter) -> dict:
 | `EMBEDDING_BASE_URL`, `EMBEDDING_SERVED_MODEL_NAME`, `EMBEDDING_API_KEY` | AWS Qwen 임베딩 서버의 주소와 모델 이름, 서버가 인증을 사용할 때의 키 |
 | `QDRANT_URL`, `QDRANT_TIMEOUT_SEC` | Qdrant 주소와 개별 HTTP 요청의 시간 상한. 기본 5초 |
 | `VLM_BASE_URL`, `VLM_MODEL`, `VLM_API_KEY` | RunPod 생성 서버의 주소와 모델 이름, 서버가 인증을 사용할 때의 키 |
+| `RUNPOD_API_KEY`, `RUNPOD_STATUS_CACHE_SEC`, `RUNPOD_STATUS_TIMEOUT_SEC` | `/runpod/status`의 Pod 상태 조회용 RunPod 키(Read Only 권장), 결과 재사용 시간과 호출 상한. 기본 10초와 3초 |
 | `IMAGE_SOURCE=s3`, `S3_BUCKET`, `AWS_REGION`, `S3_PRESIGN_EXPIRES_SEC` | 분석용 사진 위치와 URL 유효기간. 기본 300초 |
 
 검색은 `vectors_qwen3-vl-embedding-2b` 컬렉션의 2048차원 벡터를 읽습니다. 정리 실행기가 같은 Qwen 모델로 사진을 임베딩하고 BE의 `trip_attachment_id`를 point ID로 저장해야 합니다. v1 벡터를 대신 검색하지 않습니다. 컬렉션이나 후보의 벡터가 없으면 해당 사진은 결과에서 빠지므로, 검색 검증 전에 사진 적재 여부를 확인합니다.
@@ -103,6 +104,8 @@ BE가 모든 사진의 업로드와 분석용 사본 생성을 마친 뒤 보내
 - 완료 및 무시 기록은 자동 삭제하지 않습니다. 재처리 가능 기간에 맞춘 보관 및 정리 정책과 Redis 용량을 배포 전에 확인해야 합니다. Redis는 `noeviction`을 사용합니다.
 
 `/health`는 API의 Redis 연결과 백그라운드 루프 생존을 확인합니다. Kafka 연결 실패 자체로 503을 반환하지 않으며 예상하지 못한 내부 루프 종료는 비정상으로 구분합니다. GPU 모델 준비나 Qdrant 상태는 이 검사만으로 확인되지 않습니다. API 프로세스에는 모델을 적재하지 않으므로 `model_loaded`는 false이며 유휴 종료 판단은 하지 않습니다.
+
+`GET /runpod/status`는 BE가 RunPod 생성 서버의 상태를 확인하는 경로이며 `API_KEY` 인증을 사용합니다. 응답은 `{"running": true, "ready": false}`처럼 두 값입니다. `running`은 RunPod API에서 읽은 Pod의 `desiredStatus`가 `RUNNING`이면 true, `EXITED`나 `TERMINATED`이면 false이고, 키가 없거나 RunPod API를 읽지 못하면 null입니다. Pod ID는 `VLM_BASE_URL`의 `https://<pod-id>-8000.proxy.runpod.net` 주소에서 읽습니다. `ready`는 vLLM `/v1/models`에 `VLM_MODEL`이 있으면 true이고 그 밖에는 false입니다. Pod가 켜진 뒤 모델 적재가 끝날 때까지(재시작 약 3분) `running=true`, `ready=false`가 됩니다. RunPod나 vLLM이 응답하지 않아도 200으로 응답하고, API마다 결과를 `RUNPOD_STATUS_CACHE_SEC` 동안 재사용합니다. 상태가 바뀔 때만 `ai_runpod_status` 로그를 남깁니다.
 
 Kafka는 사설 네트워크의 PLAINTEXT로 연결합니다. 접속 주소와 토픽 이름은 이미지에 넣지 않고 클라우드가 환경변수로 전달합니다. SG 접근 제어는 클라우드 설정을 따릅니다.
 
