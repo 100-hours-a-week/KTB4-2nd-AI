@@ -15,6 +15,7 @@ from app.api.deps import require_api_key
 from app.api.routers import query
 from app.api.search_bootstrap import search_service
 from app.api.services.query_service import QueryService
+from app.api.services.runpod_status import RunpodStatus
 from app.core.http_errors import register_error_handlers
 from app.core.logging import bind_request, setup_logging
 from app.jobs.config import JobsSettings
@@ -23,6 +24,7 @@ from app.jobs.kafka import KafkaRuntime
 from app.jobs.models import JobStatusResponse
 from app.jobs.redis_store import RedisJobStore
 from app.jobs.runner import drain_story_runners, story_runners
+from app.schemas.runpod import RunpodStatusResponse
 from app.schemas.task import CancelResponse, TaskStatus
 
 
@@ -66,6 +68,9 @@ def create_app(
         search_resources = AsyncExitStack()
         try:
             await jobs.redis.ping()
+            app.state.runpod_status = await search_resources.enter_async_context(
+                RunpodStatus.from_settings(cfg)
+            )
             factory = query_service_factory
             if query_service is None and factory is None and cfg.SEARCH_ENABLED:
                 factory = partial(search_service, redis=jobs.redis)
@@ -132,6 +137,15 @@ def create_app(
         return CancelResponse(
             trip_id=trip_id, execution_id=record.execution_id, status=TaskStatus.CANCELED
         )
+
+    @app.get(
+        "/runpod/status",
+        response_model=RunpodStatusResponse,
+        dependencies=[Depends(require_api_key)],
+    )
+    async def runpod_status(request: Request):
+        # RunPod나 vLLM이 응답하지 않아도 200으로 두 값을 돌려준다.
+        return await request.app.state.runpod_status.status()
 
     @app.get("/metrics", dependencies=[Depends(require_api_key)], include_in_schema=False)
     async def metrics(request: Request):
