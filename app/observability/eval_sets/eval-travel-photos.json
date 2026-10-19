@@ -1,244 +1,112 @@
 {
  "dataset": "eval-travel-photos",
  "fingerprint": "phash8-upright-gray",
- "photos": 198,
- "photo_map_sha256": "2dfc1464ae094cd9ee9e306ec7dec3f8f60ec9a9e8fef46585fc5ce454c802ad",
+ "photos": 200,
+ "photo_map_sha256": "ab171c30a5443211ed7c73675bb571c5bc15db94af4e8df8e8bb58e08463bf24",
  "items": [
-  {
-   "phash": "cb0af475eaa08576",
-   "label": "place_004"
-  },
-  {
-   "phash": "95812167cf19635f",
-   "label": "place_004"
-  },
-  {
-   "phash": "cfa5b066ba087c1d",
-   "label": "place_005"
-  },
-  {
-   "phash": "fec589778a04996a",
-   "label": "place_005"
-  },
-  {
-   "phash": "b54ac7e41ae07c96",
-   "label": "place_005"
-  },
-  {
-   "phash": "ea508781d2d5be99",
-   "label": "place_001"
-  },
-  {
-   "phash": "ab56c095d7c0a4af",
-   "label": "place_001"
-  },
-  {
-   "phash": "aa5585d5d587a2b8",
-   "label": "place_001"
-  },
-  {
-   "phash": "aa1085d5d5aba2bd",
-   "label": "place_001"
-  },
-  {
-   "phash": "b5db4ce689360b2a",
-   "label": "place_001"
-  },
-  {
-   "phash": "aac4c59cca3e2e4b",
-   "label": "place_001"
-  },
-  {
-   "phash": "add2c094e8a83f7c",
-   "label": "place_001"
-  },
-  {
-   "phash": "fbf1c41dc12ee062",
-   "label": "place_001"
-  },
-  {
-   "phash": "ea94c5bcea2a7941",
-   "label": "place_001"
-  },
-  {
-   "phash": "b15ca002c6fbfdc4",
-   "label": "place_001"
-  },
-  {
-   "phash": "b3cdcd22ce3114ce",
-   "label": "place_001"
-  },
-  {
-   "phash": "fa8a252d4d871a9b",
-   "label": "place_001"
-  },
-  {
-   "phash": "f251dd27c8e0e2c9",
-   "label": "place_001"
-  },
-  {
-   "phash": "e4f0a72fc9f0e00b",
-   "label": "place_001"
-  },
-  {
-   "phash": "e4d2aec9c9e00b1f",
-   "label": "place_001"
-  },
-  {
-   "phash": "e592bc49db44cb92",
-   "label": "place_001"
-  },
-  {
-   "phash": "e1f22cdad2c1d21e",
-   "label": "place_001"
-  },
-  {
-   "phash": "ec939319664dd296",
-   "label": "place_001"
-  },
-  {
-   "phash": "a17f8ccc4a6b5332",
-   "label": "place_001"
-  },
-  {
-   "phash": "e0f01e0f160f2f1f",
-   "label": "place_001"
-  },
-  {
-   "phash": "de7e3a8b0ba6228a",
-   "label": "place_001"
-  },
-  {
-   "phash": "d3d2e0e602e8f74a",
-   "label": "place_002"
-  },
-  {
-   "phash": "d3dae06648e4774a",
-   "label": "place_002"
-  },
-  {
-   "phash": "f891cf3cc92399a4",
-   "label": "place_002"
-  },
-  {
-   "phash": "fe9ec0738c6195e0",
-   "label": "place_002"
-  },
-  {
-   "phash": "8fdc832913d16b9c",
-   "label": "place_002"
-  },
-  {
-   "phash": "9766863b61c61fa2",
-   "label": "place_002"
-  },
-  {
-   "phash": "d59885957565784b",
-   "label": "place_002"
-  },
   {
    "phash": "cba69114dd9ba352",
    "label": null
   },
   {
    "phash": "d625793e769ad140",
-   "label": "place_003"
+   "label": "place_004"
   },
   {
    "phash": "e973d0e56470d32a",
-   "label": "place_003"
+   "label": "place_004"
   },
   {
    "phash": "b532d22d68b53dc4",
-   "label": "place_003"
+   "label": "place_004"
   },
   {
    "phash": "d2812c3e815a7b7d",
-   "label": "place_003"
+   "label": "place_004"
   },
   {
    "phash": "87b3c7f66cb44188",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "b5eaf875e8e2a401",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "85dcd8a2c05fc89f",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "878e8db63e7cf010",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "c3d0b4a9139f7c32",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "d3d3a4a803977c3a",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "b1c17e72e866c3e0",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "be938d3401f1742f",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "b6dc853d02e17f0c",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "a116df6d1ce36c48",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "a116de6950c77f18",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "e1ded3259e610cb2",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "e30096fb291ca75e",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "aae4b7cdc0a583c6",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "8196f08b74afa28f",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "8196f08b74afa28f",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "c196f08b742fa0af",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "c994f08a517ea3ae",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "d480baffcae0ada0",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "a4e79718ebe20565",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "f444ba7e25d1b312",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "c062797055bc2bfa",
@@ -426,87 +294,95 @@
   },
   {
    "phash": "cb3790dc366b6984",
-   "label": "place_003"
+   "label": "place_004"
+  },
+  {
+   "phash": "cb3790dc366b6984",
+   "label": "place_004"
   },
   {
    "phash": "d5fe0ba57082f08e",
-   "label": "place_003"
+   "label": "place_004"
+  },
+  {
+   "phash": "d5fe0ba57082f08e",
+   "label": "place_004"
   },
   {
    "phash": "d6cfb8340f1a1e0b",
-   "label": "place_003"
+   "label": "place_004"
   },
   {
    "phash": "f69de27940f02e4a",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "a59b860dde7836c8",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "f8865414be30e78f",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "ef49ada073488de2",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "d84aafb1d1cc9358",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "e496f38a9526a2ad",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "e496fb889526a2ad",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "e496ff889526a28d",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "e496ff889526a2a5",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "e496ff889526a28d",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "e496ff889526a2a5",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "e496ff889526a2a5",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "e496bf8a9126a2ad",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "e4c6ffca9025a2a5",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "e4c6ffca9025a2a5",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "e486f3cad075a2a5",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "e486f3cad075a2a5",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "e486f3cad075a2a5",
-   "label": "place_004"
+   "label": "place_003"
   },
   {
    "phash": "ad9288dcf32a3dc1",
@@ -702,11 +578,11 @@
   },
   {
    "phash": "c95f3036f861f720",
-   "label": null
+   "label": "place_007"
   },
   {
    "phash": "c57cac2b5b83c51c",
-   "label": null
+   "label": "place_007"
   },
   {
    "phash": "c59ecdc00cd346db",
@@ -722,15 +598,15 @@
   },
   {
    "phash": "ddc5c05a59fc8d88",
-   "label": null
+   "label": "place_008"
   },
   {
    "phash": "dd858858ddbfe00a",
-   "label": null
+   "label": "place_008"
   },
   {
    "phash": "a6f9177c06336992",
-   "label": null
+   "label": "place_002"
   },
   {
    "phash": "857c7e0f7d4528c2",
@@ -794,6 +670,138 @@
   },
   {
    "phash": "fe51850d296ba87a",
+   "label": "place_002"
+  },
+  {
+   "phash": "cb0af475eaa08576",
+   "label": "place_003"
+  },
+  {
+   "phash": "95812167cf19635f",
+   "label": "place_003"
+  },
+  {
+   "phash": "cfa5b066ba087c1d",
+   "label": "place_005"
+  },
+  {
+   "phash": "fec589778a04996a",
+   "label": "place_005"
+  },
+  {
+   "phash": "b54ac7e41ae07c96",
+   "label": "place_005"
+  },
+  {
+   "phash": "ea508781d2d5be99",
+   "label": "place_001"
+  },
+  {
+   "phash": "ab56c095d7c0a4af",
+   "label": "place_001"
+  },
+  {
+   "phash": "aa5585d5d587a2b8",
+   "label": "place_001"
+  },
+  {
+   "phash": "aa1085d5d5aba2bd",
+   "label": "place_001"
+  },
+  {
+   "phash": "b5db4ce689360b2a",
+   "label": "place_001"
+  },
+  {
+   "phash": "aac4c59cca3e2e4b",
+   "label": "place_001"
+  },
+  {
+   "phash": "add2c094e8a83f7c",
+   "label": "place_001"
+  },
+  {
+   "phash": "fbf1c41dc12ee062",
+   "label": "place_001"
+  },
+  {
+   "phash": "ea94c5bcea2a7941",
+   "label": "place_001"
+  },
+  {
+   "phash": "b15ca002c6fbfdc4",
+   "label": "place_001"
+  },
+  {
+   "phash": "b3cdcd22ce3114ce",
+   "label": "place_001"
+  },
+  {
+   "phash": "fa8a252d4d871a9b",
+   "label": "place_001"
+  },
+  {
+   "phash": "f251dd27c8e0e2c9",
+   "label": "place_001"
+  },
+  {
+   "phash": "e4f0a72fc9f0e00b",
+   "label": "place_001"
+  },
+  {
+   "phash": "e4d2aec9c9e00b1f",
+   "label": "place_001"
+  },
+  {
+   "phash": "e592bc49db44cb92",
+   "label": "place_001"
+  },
+  {
+   "phash": "e1f22cdad2c1d21e",
+   "label": "place_001"
+  },
+  {
+   "phash": "ec939319664dd296",
+   "label": "place_001"
+  },
+  {
+   "phash": "a17f8ccc4a6b5332",
+   "label": "place_001"
+  },
+  {
+   "phash": "e0f01e0f160f2f1f",
+   "label": "place_001"
+  },
+  {
+   "phash": "de7e3a8b0ba6228a",
+   "label": "place_001"
+  },
+  {
+   "phash": "d3d2e0e602e8f74a",
+   "label": "place_006"
+  },
+  {
+   "phash": "d3dae06648e4774a",
+   "label": "place_006"
+  },
+  {
+   "phash": "f891cf3cc92399a4",
+   "label": "place_002"
+  },
+  {
+   "phash": "fe9ec0738c6195e0",
+   "label": "place_002"
+  },
+  {
+   "phash": "8fdc832913d16b9c",
+   "label": "place_002"
+  },
+  {
+   "phash": "9766863b61c61fa2",
+   "label": "place_002"
+  },
+  {
+   "phash": "d59885957565784b",
    "label": "place_002"
   }
  ]
