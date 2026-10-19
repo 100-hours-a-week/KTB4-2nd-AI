@@ -10,4 +10,4 @@ groups:
       - record: yeodam:jobs:max
         expr: max without(instance, pod, replica) (yeodam_ai_jobs)
       - record: yeodam:evaluation:max
-        expr: max without(instance, pod, replica) (yeodam_ai_evaluation * on(job, environment, instance, feature) group_left(dataset, model, k, unclassified_policy) yeodam_ai_evaluation_info)
+        expr: max without(instance, pod, replica) (yeodam_ai_evaluation * on(job, environment, instance, feature, dataset, unclassified_policy) group_left(model, k, release, source) yeodam_ai_evaluation_info)

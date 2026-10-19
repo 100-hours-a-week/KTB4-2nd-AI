@@ -17,6 +17,10 @@ from app.core.logging import (
 )
 
 BUCKETS = (0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600, float("inf"))
+# 데이터셋별 평가 형식은 새 키에 둔다. 이전 버전(22d2bd6)의 렌더러는 metrics:quality를 기능|지표
+# 형식으로 읽으므로, 같은 키에 쓰면 롤백하거나 버전이 섞일 때 /metrics 전체가 실패한다.
+QUALITY_KEY = "metrics:quality_v2"
+QUALITY_CONTEXT_KEY = "metrics:quality_context_v2"
 log = get_logger(__name__)
 
 
@@ -111,8 +115,8 @@ class Metrics:
             pipe.hgetall(self.key)
             for name in ["queue:process", "queue:story", "running", "pending"]:
                 pipe.zcard(self.prefix + name)
-            pipe.hgetall(self.prefix + "metrics:quality")
-            pipe.hgetall(self.prefix + "metrics:quality_context")
+            pipe.hgetall(self.prefix + QUALITY_KEY)
+            pipe.hgetall(self.prefix + QUALITY_CONTEXT_KEY)
             pipe.hgetall(self.prefix + "metrics:resources")
             values = await pipe.execute()
         histogram = HistogramMetricFamily(
@@ -160,23 +164,37 @@ class Metrics:
 
         quality = GaugeMetricFamily(
             "yeodam_ai_evaluation",
-            "Latest labeled evaluation, not live accuracy.",
-            labels=["feature", "metric"],
+            "Latest labeled evaluation per dataset and unclassified policy, not live accuracy.",
+            labels=["feature", "dataset", "unclassified_policy", "metric"],
         )
         for field, value in values[5].items():
-            quality.add_metric(field.split("|"), float(value))
+            parts = field.split("|")
+            # 데이터셋 구분 전의 기록(기능|지표)은 조건을 알 수 없어 노출하지 않는다.
+            if len(parts) == 4:
+                quality.add_metric(parts, float(value))
         evaluation_info = GaugeMetricFamily(
             "yeodam_ai_evaluation_info",
             "Conditions for the latest labeled evaluation.",
-            labels=["feature", "dataset", "model", "k", "unclassified_policy"],
+            labels=[
+                "feature",
+                "dataset",
+                "unclassified_policy",
+                "model",
+                "k",
+                "release",
+                "source",
+            ],
         )
-        for feature, raw in values[6].items():
+        for series, raw in values[6].items():
+            parts = series.split("|")
+            if len(parts) != 3:
+                continue
             metadata = json.loads(raw)
             evaluation_info.add_metric(
-                [feature]
+                parts
                 + [
-                    str(metadata[name]) if metadata[name] is not None else "none"
-                    for name in ["dataset", "model", "k", "unclassified_policy"]
+                    str(metadata.get(name)) if metadata.get(name) is not None else "none"
+                    for name in ["model", "k", "release", "source"]
                 ],
                 1,
             )

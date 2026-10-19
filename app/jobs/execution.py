@@ -171,6 +171,7 @@ async def execute(store: RedisJobStore, identity: str, owner: str, handler) -> N
             log_summary(record.kind, status, trace)
             await store.observe_stages(record.kind, trace.stages)
             await store.record_peak_memory(record.kind, max_rss_bytes())
+            await record_evaluations(store, status, trace.evaluations)
     except Exception as exc:
         # 관측 실패가 이미 저장한 작업 결과를 바꾸지 않는다. 취소(CancelledError)는 그대로 전파된다.
         log.warning(
@@ -178,6 +179,25 @@ async def execute(store: RedisJobStore, identity: str, owner: str, handler) -> N
         )
         if not trace.summarized:
             log_summary(record.kind, status, trace)
+
+
+async def record_evaluations(store: RedisJobStore, status: str, reports: list[dict]) -> None:
+    """정답 기반 자동 평가는 결과가 COMPLETED로 저장된 작업만 로그와 지표로 남긴다."""
+    if not reports:
+        return
+    if status != "COMPLETED":
+        log.info(
+            "작업이 완료되지 않아 자동 평가를 기록하지 않음",
+            extra={"event": "ai_evaluation_skipped", "result": status},
+        )
+        return
+    from app.observability.quality import publish
+
+    for report in reports:
+        log.info("정답 기반 자동 평가", extra=report)
+        # 데이터셋 일부만 올린 여행은 로그로만 남기고 대시보드 지표는 덮어쓰지 않는다.
+        if report.get("dashboard", True):
+            await publish(store.redis, store.prefix, report)
 
 
 def max_rss_bytes() -> int:

@@ -1,0 +1,800 @@
+{
+ "dataset": "eval-travel-photos",
+ "fingerprint": "phash8-upright-gray",
+ "photos": 198,
+ "photo_map_sha256": "2dfc1464ae094cd9ee9e306ec7dec3f8f60ec9a9e8fef46585fc5ce454c802ad",
+ "items": [
+  {
+   "phash": "cb0af475eaa08576",
+   "label": "place_004"
+  },
+  {
+   "phash": "95812167cf19635f",
+   "label": "place_004"
+  },
+  {
+   "phash": "cfa5b066ba087c1d",
+   "label": "place_005"
+  },
+  {
+   "phash": "fec589778a04996a",
+   "label": "place_005"
+  },
+  {
+   "phash": "b54ac7e41ae07c96",
+   "label": "place_005"
+  },
+  {
+   "phash": "ea508781d2d5be99",
+   "label": "place_001"
+  },
+  {
+   "phash": "ab56c095d7c0a4af",
+   "label": "place_001"
+  },
+  {
+   "phash": "aa5585d5d587a2b8",
+   "label": "place_001"
+  },
+  {
+   "phash": "aa1085d5d5aba2bd",
+   "label": "place_001"
+  },
+  {
+   "phash": "b5db4ce689360b2a",
+   "label": "place_001"
+  },
+  {
+   "phash": "aac4c59cca3e2e4b",
+   "label": "place_001"
+  },
+  {
+   "phash": "add2c094e8a83f7c",
+   "label": "place_001"
+  },
+  {
+   "phash": "fbf1c41dc12ee062",
+   "label": "place_001"
+  },
+  {
+   "phash": "ea94c5bcea2a7941",
+   "label": "place_001"
+  },
+  {
+   "phash": "b15ca002c6fbfdc4",
+   "label": "place_001"
+  },
+  {
+   "phash": "b3cdcd22ce3114ce",
+   "label": "place_001"
+  },
+  {
+   "phash": "fa8a252d4d871a9b",
+   "label": "place_001"
+  },
+  {
+   "phash": "f251dd27c8e0e2c9",
+   "label": "place_001"
+  },
+  {
+   "phash": "e4f0a72fc9f0e00b",
+   "label": "place_001"
+  },
+  {
+   "phash": "e4d2aec9c9e00b1f",
+   "label": "place_001"
+  },
+  {
+   "phash": "e592bc49db44cb92",
+   "label": "place_001"
+  },
+  {
+   "phash": "e1f22cdad2c1d21e",
+   "label": "place_001"
+  },
+  {
+   "phash": "ec939319664dd296",
+   "label": "place_001"
+  },
+  {
+   "phash": "a17f8ccc4a6b5332",
+   "label": "place_001"
+  },
+  {
+   "phash": "e0f01e0f160f2f1f",
+   "label": "place_001"
+  },
+  {
+   "phash": "de7e3a8b0ba6228a",
+   "label": "place_001"
+  },
+  {
+   "phash": "d3d2e0e602e8f74a",
+   "label": "place_002"
+  },
+  {
+   "phash": "d3dae06648e4774a",
+   "label": "place_002"
+  },
+  {
+   "phash": "f891cf3cc92399a4",
+   "label": "place_002"
+  },
+  {
+   "phash": "fe9ec0738c6195e0",
+   "label": "place_002"
+  },
+  {
+   "phash": "8fdc832913d16b9c",
+   "label": "place_002"
+  },
+  {
+   "phash": "9766863b61c61fa2",
+   "label": "place_002"
+  },
+  {
+   "phash": "d59885957565784b",
+   "label": "place_002"
+  },
+  {
+   "phash": "cba69114dd9ba352",
+   "label": null
+  },
+  {
+   "phash": "d625793e769ad140",
+   "label": "place_003"
+  },
+  {
+   "phash": "e973d0e56470d32a",
+   "label": "place_003"
+  },
+  {
+   "phash": "b532d22d68b53dc4",
+   "label": "place_003"
+  },
+  {
+   "phash": "d2812c3e815a7b7d",
+   "label": "place_003"
+  },
+  {
+   "phash": "87b3c7f66cb44188",
+   "label": "place_004"
+  },
+  {
+   "phash": "b5eaf875e8e2a401",
+   "label": "place_004"
+  },
+  {
+   "phash": "85dcd8a2c05fc89f",
+   "label": "place_004"
+  },
+  {
+   "phash": "878e8db63e7cf010",
+   "label": "place_004"
+  },
+  {
+   "phash": "c3d0b4a9139f7c32",
+   "label": "place_004"
+  },
+  {
+   "phash": "d3d3a4a803977c3a",
+   "label": "place_004"
+  },
+  {
+   "phash": "b1c17e72e866c3e0",
+   "label": "place_004"
+  },
+  {
+   "phash": "be938d3401f1742f",
+   "label": "place_004"
+  },
+  {
+   "phash": "b6dc853d02e17f0c",
+   "label": "place_004"
+  },
+  {
+   "phash": "a116df6d1ce36c48",
+   "label": "place_004"
+  },
+  {
+   "phash": "a116de6950c77f18",
+   "label": "place_004"
+  },
+  {
+   "phash": "e1ded3259e610cb2",
+   "label": "place_004"
+  },
+  {
+   "phash": "e30096fb291ca75e",
+   "label": "place_004"
+  },
+  {
+   "phash": "aae4b7cdc0a583c6",
+   "label": "place_004"
+  },
+  {
+   "phash": "8196f08b74afa28f",
+   "label": "place_004"
+  },
+  {
+   "phash": "8196f08b74afa28f",
+   "label": "place_004"
+  },
+  {
+   "phash": "c196f08b742fa0af",
+   "label": "place_004"
+  },
+  {
+   "phash": "c994f08a517ea3ae",
+   "label": "place_004"
+  },
+  {
+   "phash": "d480baffcae0ada0",
+   "label": "place_004"
+  },
+  {
+   "phash": "a4e79718ebe20565",
+   "label": "place_004"
+  },
+  {
+   "phash": "f444ba7e25d1b312",
+   "label": "place_004"
+  },
+  {
+   "phash": "c062797055bc2bfa",
+   "label": "place_005"
+  },
+  {
+   "phash": "c74523bbf17e0099",
+   "label": "place_005"
+  },
+  {
+   "phash": "addbc394c0a1bc3c",
+   "label": "place_001"
+  },
+  {
+   "phash": "accbc192e9a13c7c",
+   "label": "place_001"
+  },
+  {
+   "phash": "accbc392c9a13c7c",
+   "label": "place_001"
+  },
+  {
+   "phash": "accbc392e8a13c7c",
+   "label": "place_001"
+  },
+  {
+   "phash": "accbc392c9a13c7c",
+   "label": "place_001"
+  },
+  {
+   "phash": "accbc392e8a13c7c",
+   "label": "place_001"
+  },
+  {
+   "phash": "accbc392caa13c7c",
+   "label": "place_001"
+  },
+  {
+   "phash": "accbc392e9a13c6c",
+   "label": "place_001"
+  },
+  {
+   "phash": "ad5bc0329aad9fa0",
+   "label": "place_001"
+  },
+  {
+   "phash": "fa27c23cb2611b59",
+   "label": "place_001"
+  },
+  {
+   "phash": "a938d04b6bc31e3e",
+   "label": "place_001"
+  },
+  {
+   "phash": "c427d5243809fa7f",
+   "label": "place_001"
+  },
+  {
+   "phash": "ead9cc73e698c212",
+   "label": "place_001"
+  },
+  {
+   "phash": "d15ba0770ba479b2",
+   "label": "place_006"
+  },
+  {
+   "phash": "d1d948a45ba0f47b",
+   "label": "place_006"
+  },
+  {
+   "phash": "d3d948a45ba0f47a",
+   "label": "place_006"
+  },
+  {
+   "phash": "95ce6a949270bce6",
+   "label": "place_006"
+  },
+  {
+   "phash": "86c429bb68607a7f",
+   "label": null
+  },
+  {
+   "phash": "b4d70b6a54856b9a",
+   "label": null
+  },
+  {
+   "phash": "899f5088279b3f36",
+   "label": null
+  },
+  {
+   "phash": "966d716398d63271",
+   "label": "place_002"
+  },
+  {
+   "phash": "b5939562c1750ed5",
+   "label": "place_002"
+  },
+  {
+   "phash": "b5939762c17506d5",
+   "label": "place_002"
+  },
+  {
+   "phash": "b59b9762c57402d5",
+   "label": "place_002"
+  },
+  {
+   "phash": "b59b9762c17502d5",
+   "label": "place_002"
+  },
+  {
+   "phash": "b4999b70eb761a84",
+   "label": "place_002"
+  },
+  {
+   "phash": "b4999b70ea762a94",
+   "label": "place_002"
+  },
+  {
+   "phash": "b4999b70ea763a84",
+   "label": "place_002"
+  },
+  {
+   "phash": "b6999b70ea762a84",
+   "label": "place_002"
+  },
+  {
+   "phash": "b4999b70eb760a86",
+   "label": "place_002"
+  },
+  {
+   "phash": "b687d76a6cd08332",
+   "label": "place_002"
+  },
+  {
+   "phash": "ba83d76a6cd0833a",
+   "label": "place_002"
+  },
+  {
+   "phash": "b685d76a6cd0833a",
+   "label": "place_002"
+  },
+  {
+   "phash": "87587cf29df0680e",
+   "label": "place_002"
+  },
+  {
+   "phash": "85ea3ef46aff6000",
+   "label": "place_002"
+  },
+  {
+   "phash": "b2c5c9363892cbcb",
+   "label": "place_002"
+  },
+  {
+   "phash": "d7906a976a946a87",
+   "label": "place_002"
+  },
+  {
+   "phash": "d53f28389ed6e0e0",
+   "label": "place_002"
+  },
+  {
+   "phash": "fc53272ca38ea398",
+   "label": "place_002"
+  },
+  {
+   "phash": "fc53272ca38ea398",
+   "label": "place_002"
+  },
+  {
+   "phash": "fcd32728331ea718",
+   "label": "place_002"
+  },
+  {
+   "phash": "b569089ee2f27658",
+   "label": "place_002"
+  },
+  {
+   "phash": "d0d0830f6ad4367f",
+   "label": "place_002"
+  },
+  {
+   "phash": "cedc8ed7e2f0a00c",
+   "label": "place_002"
+  },
+  {
+   "phash": "cb3790dc366b6984",
+   "label": "place_003"
+  },
+  {
+   "phash": "d5fe0ba57082f08e",
+   "label": "place_003"
+  },
+  {
+   "phash": "d6cfb8340f1a1e0b",
+   "label": "place_003"
+  },
+  {
+   "phash": "f69de27940f02e4a",
+   "label": "place_004"
+  },
+  {
+   "phash": "a59b860dde7836c8",
+   "label": "place_004"
+  },
+  {
+   "phash": "f8865414be30e78f",
+   "label": "place_004"
+  },
+  {
+   "phash": "ef49ada073488de2",
+   "label": "place_004"
+  },
+  {
+   "phash": "d84aafb1d1cc9358",
+   "label": "place_004"
+  },
+  {
+   "phash": "e496f38a9526a2ad",
+   "label": "place_004"
+  },
+  {
+   "phash": "e496fb889526a2ad",
+   "label": "place_004"
+  },
+  {
+   "phash": "e496ff889526a28d",
+   "label": "place_004"
+  },
+  {
+   "phash": "e496ff889526a2a5",
+   "label": "place_004"
+  },
+  {
+   "phash": "e496ff889526a28d",
+   "label": "place_004"
+  },
+  {
+   "phash": "e496ff889526a2a5",
+   "label": "place_004"
+  },
+  {
+   "phash": "e496ff889526a2a5",
+   "label": "place_004"
+  },
+  {
+   "phash": "e496bf8a9126a2ad",
+   "label": "place_004"
+  },
+  {
+   "phash": "e4c6ffca9025a2a5",
+   "label": "place_004"
+  },
+  {
+   "phash": "e4c6ffca9025a2a5",
+   "label": "place_004"
+  },
+  {
+   "phash": "e486f3cad075a2a5",
+   "label": "place_004"
+  },
+  {
+   "phash": "e486f3cad075a2a5",
+   "label": "place_004"
+  },
+  {
+   "phash": "e486f3cad075a2a5",
+   "label": "place_004"
+  },
+  {
+   "phash": "ad9288dcf32a3dc1",
+   "label": "place_005"
+  },
+  {
+   "phash": "cc4c40d2fd8be8e6",
+   "label": "place_005"
+  },
+  {
+   "phash": "cc4c40d2fd8ba9e6",
+   "label": "place_005"
+  },
+  {
+   "phash": "cc4dd1d9a50ba956",
+   "label": "place_005"
+  },
+  {
+   "phash": "e9d6ce7891ca1ce0",
+   "label": "place_001"
+  },
+  {
+   "phash": "c7fad02cbb06e8e0",
+   "label": "place_001"
+  },
+  {
+   "phash": "a6d935a6ad6812d6",
+   "label": "place_001"
+  },
+  {
+   "phash": "a6dbc91472b287ac",
+   "label": "place_001"
+  },
+  {
+   "phash": "a856f085c7d0d1e7",
+   "label": "place_001"
+  },
+  {
+   "phash": "a856f085c5f0d1e7",
+   "label": "place_001"
+  },
+  {
+   "phash": "a856fc85c5f891a5",
+   "label": "place_001"
+  },
+  {
+   "phash": "ab57d085c7c0f0a7",
+   "label": "place_001"
+  },
+  {
+   "phash": "ab56d08dc5c0d5a7",
+   "label": "place_001"
+  },
+  {
+   "phash": "a856d085d6f087e7",
+   "label": "place_001"
+  },
+  {
+   "phash": "a856d095d5f087d6",
+   "label": "place_001"
+  },
+  {
+   "phash": "abd4c0c085ae3e3f",
+   "label": "place_001"
+  },
+  {
+   "phash": "a9d0c2a7d42fa22f",
+   "label": "place_001"
+  },
+  {
+   "phash": "a9d4c0a7d42fa22f",
+   "label": "place_001"
+  },
+  {
+   "phash": "aa15d5d5c5c0f0f8",
+   "label": "place_001"
+  },
+  {
+   "phash": "aa15d5d5c5c0f0dc",
+   "label": "place_001"
+  },
+  {
+   "phash": "add2c0fe692d56c0",
+   "label": "place_001"
+  },
+  {
+   "phash": "add2c0fe6f2d1640",
+   "label": "place_001"
+  },
+  {
+   "phash": "add2c0bf2f2d5640",
+   "label": "place_001"
+  },
+  {
+   "phash": "ac96b23acb0f6c2c",
+   "label": "place_001"
+  },
+  {
+   "phash": "b613b33bc9037626",
+   "label": "place_001"
+  },
+  {
+   "phash": "b613b33bc903742e",
+   "label": "place_001"
+  },
+  {
+   "phash": "b613bb3bc9017626",
+   "label": "place_001"
+  },
+  {
+   "phash": "b613b33bc9037626",
+   "label": "place_001"
+  },
+  {
+   "phash": "b613b33bc903742e",
+   "label": "place_001"
+  },
+  {
+   "phash": "c7d2e1fcc383b830",
+   "label": "place_001"
+  },
+  {
+   "phash": "e9c4b9d2c3e11e38",
+   "label": "place_001"
+  },
+  {
+   "phash": "a1f48bfac2e1961a",
+   "label": "place_001"
+  },
+  {
+   "phash": "a5708f9fc2f4c01b",
+   "label": "place_001"
+  },
+  {
+   "phash": "e1d69ddac2e01f18",
+   "label": "place_001"
+  },
+  {
+   "phash": "eb4499f896e1871c",
+   "label": "place_001"
+  },
+  {
+   "phash": "c9b495966d4e294e",
+   "label": "place_001"
+  },
+  {
+   "phash": "c93495946d4e2d5e",
+   "label": "place_001"
+  },
+  {
+   "phash": "ccb3db9b65079083",
+   "label": "place_001"
+  },
+  {
+   "phash": "e6bbc89d6287d881",
+   "label": "place_001"
+  },
+  {
+   "phash": "daa596b54a998794",
+   "label": "place_001"
+  },
+  {
+   "phash": "85caaa6495a59bb6",
+   "label": "place_001"
+  },
+  {
+   "phash": "dae596b14a99869c",
+   "label": "place_001"
+  },
+  {
+   "phash": "ecb3d2991ce22de0",
+   "label": "place_001"
+  },
+  {
+   "phash": "ecb3d29934e62dc0",
+   "label": "place_001"
+  },
+  {
+   "phash": "ecb3929934e62de0",
+   "label": "place_001"
+  },
+  {
+   "phash": "ecb2d29934e62dd0",
+   "label": "place_001"
+  },
+  {
+   "phash": "ecb3d29934e62dc0",
+   "label": "place_001"
+  },
+  {
+   "phash": "ecb3929934e22de8",
+   "label": "place_001"
+  },
+  {
+   "phash": "c95f3036f861f720",
+   "label": null
+  },
+  {
+   "phash": "c57cac2b5b83c51c",
+   "label": null
+  },
+  {
+   "phash": "c59ecdc00cd346db",
+   "label": "place_006"
+  },
+  {
+   "phash": "dfbcc10018f37d13",
+   "label": "place_006"
+  },
+  {
+   "phash": "dfbcc10018f71d33",
+   "label": "place_006"
+  },
+  {
+   "phash": "ddc5c05a59fc8d88",
+   "label": null
+  },
+  {
+   "phash": "dd858858ddbfe00a",
+   "label": null
+  },
+  {
+   "phash": "a6f9177c06336992",
+   "label": null
+  },
+  {
+   "phash": "857c7e0f7d4528c2",
+   "label": "place_002"
+  },
+  {
+   "phash": "baf2cdc1b42d3072",
+   "label": "place_002"
+  },
+  {
+   "phash": "baf0cdc3342d3472",
+   "label": "place_002"
+  },
+  {
+   "phash": "fe80953f1e6878a2",
+   "label": "place_002"
+  },
+  {
+   "phash": "eed4912b066d7a32",
+   "label": "place_002"
+  },
+  {
+   "phash": "de70556f0a091d3e",
+   "label": "place_002"
+  },
+  {
+   "phash": "f8072e79928ccb78",
+   "label": "place_002"
+  },
+  {
+   "phash": "f9072e79868ccb58",
+   "label": "place_002"
+  },
+  {
+   "phash": "88e72a5cb72c363c",
+   "label": "place_002"
+  },
+  {
+   "phash": "88630b5cb72c3e3d",
+   "label": "place_002"
+  },
+  {
+   "phash": "d8030a5ca72d7e3d",
+   "label": "place_002"
+  },
+  {
+   "phash": "d8430a5ca72c7e3d",
+   "label": "place_002"
+  },
+  {
+   "phash": "ce43034cd1af713e",
+   "label": "place_002"
+  },
+  {
+   "phash": "dc432b5cb32c713c",
+   "label": "place_002"
+  },
+  {
+   "phash": "d5d8dac09787b823",
+   "label": "place_002"
+  },
+  {
+   "phash": "fe51850d296ba87a",
+   "label": "place_002"
+  }
+ ]
+}

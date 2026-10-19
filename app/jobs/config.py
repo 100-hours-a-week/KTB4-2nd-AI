@@ -46,6 +46,8 @@ class JobsSettings(Settings):
     GPU_GENERATION_INFLIGHT: int = Field(default=8, ge=1)
     GPU_SEARCH_EMBEDDING_INFLIGHT: int = Field(default=2, ge=1)
     GPU_WAIT_SEC: float = Field(default=2, gt=0, allow_inf_nan=False)
+    # 정리 결과를 알려진 평가 데이터셋과 사진 지문으로 대조해 정확도를 자동 기록한다.
+    EVAL_AUTO_DETECT: bool = True
 
     @model_validator(mode="after")
     def check_jobs_settings(self) -> Self:

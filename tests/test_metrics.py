@@ -143,7 +143,13 @@ async def test_labeled_evaluation_is_computed_and_separate_from_live_metrics(
         values = samples(await Metrics(a.redis, a.prefix).render())
         assert any(
             s.name == "yeodam_ai_evaluation"
-            and s.labels == {"feature": feature, "metric": metric}
+            and s.labels
+            == {
+                "feature": feature,
+                "dataset": "synthetic-labels",
+                "unclassified_policy": "none",
+                "metric": metric,
+            }
             and s.value == expected
             for s in values
         )
