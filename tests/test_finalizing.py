@@ -142,6 +142,44 @@ def test_empty_and_all_unclear_results_are_valid():
     assert not result.places and len(result.unclassified) == 1
 
 
+def unclear(photo_id, issue=Issue.UNCLEAR_LOCATION, *, minute=0):
+    state = photo(photo_id, place=None, issue=issue, minute=minute)
+    state.latitude = state.longitude = None
+    state.region_origin = RegionOrigin.UNKNOWN
+    return state
+
+
+def test_location_unknown_blur_and_duplicate_have_no_place():
+    photos = [photo(1), unclear(5), unclear(6, Issue.BLURRY), unclear(7, Issue.DUPLICATED)]
+    photos[3].duplicate_of_attachment_id = 5
+    result = finalize_photos(photos, {1: 300, 5: 300, 6: 25, 7: 300}, [])
+    assert [p.place_id for p in result.places] == ["p1"]
+    rows = [(u.trip_attachment_id, u.issue, u.place_id) for u in result.unclassified]
+    assert rows == [
+        (5, Issue.UNCLEAR_LOCATION, None),
+        (6, Issue.BLURRY, None),
+        (7, Issue.DUPLICATED, None),
+    ]
+    assert result.unclassified[2].duplicate_of_attachment_id == 5
+    assert [u.evaluation for u in result.unclassified] == [None, 20, 75]
+
+
+@pytest.mark.parametrize("original", ["place_photo", "blurry", "unclear_with_place_id_mismatch"])
+def test_location_unknown_duplicate_needs_retained_unclear_original(original):
+    photos = [photo(1), unclear(5), unclear(7, Issue.DUPLICATED)]
+    photos[2].duplicate_of_attachment_id = 5
+    if original == "place_photo":
+        photos[2].duplicate_of_attachment_id = 1
+    elif original == "blurry":
+        photos[1].issue = Issue.BLURRY
+    else:
+        photos[2].place_id = "p1"
+        photos[2].latitude, photos[2].longitude = 37.5, 127.0
+        photos[2].region_origin = RegionOrigin.EXIF
+    with pytest.raises(PipelineError, match="중복 원본"):
+        finalize_photos(photos, {1: 300, 5: 300, 7: 300}, [])
+
+
 def test_no_candidate_is_assumption_violation_without_restoring_blurry_photo():
     blurry = photo(1, issue=Issue.BLURRY)
     with pytest.raises(PipelineError, match="후보가 없음"):

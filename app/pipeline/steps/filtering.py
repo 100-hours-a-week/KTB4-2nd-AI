@@ -1,4 +1,4 @@
-"""FILTERING: 장소별 흐림과 중복 판정. 원본과 장소 연결은 보존한다."""
+"""FILTERING: 장소별, 위치 불명 사진끼리 흐림과 중복 판정. 원본과 장소 연결은 보존한다."""
 
 from collections import defaultdict
 from collections.abc import Mapping
@@ -57,7 +57,8 @@ def filter_photos(
 
     BLURRY를 먼저 판정하며, 남은 사진 중 촬영 시각순으로 앞선 보존 사진을 중복 원본으로
     삼는다. 동시각과 미확정 시각은 ID로 정렬한다. 중복 사진을 다시 원본으로 쓰지 않는다.
-    기존 UNCLEAR_LOCATION은 건드리지 않는다. 재실행 시 품질 판정만 다시 계산한다.
+    place_id가 없는 위치 불명 사진도 같은 규칙으로 판정하되 위치 불명 사진끼리만 비교하고,
+    흐림과 중복이 아니면 UNCLEAR_LOCATION을 유지한다. 재실행 시 품질 판정만 다시 계산한다.
     분산은 후속 evaluation 산출에 재사용하며, 여기서는 정규화나 대표 사진 선정을 하지 않는다.
     """
     if not np.isfinite(blur_var_min) or blur_var_min < 0:
@@ -69,13 +70,15 @@ def filter_photos(
     ):
         raise PipelineError("phash_max_dist는 0 이상 64 이하의 정수여야 함")
 
-    groups: dict[str, list[PhotoState]] = defaultdict(list)
+    # 위치 불명 사진은 None 키로 모은다. 재실행이면 이전 판정의 BLURRY나 DUPLICATED일 수 있다.
+    groups: dict[str | None, list[PhotoState]] = defaultdict(list)
     measurements: dict[int, tuple[float, imagehash.ImageHash]] = {}
     for photo in photos:
-        if photo.issue is Issue.UNCLEAR_LOCATION:
-            continue
-        if not photo.place_id:
-            raise PipelineError("FILTERING 대상 사진에 place_id가 필요함")
+        if photo.place_id is None:
+            if photo.issue is None:
+                raise PipelineError("FILTERING 대상 사진에 place_id나 위치 미분류 표시가 필요함")
+        elif not photo.place_id or photo.issue is Issue.UNCLEAR_LOCATION:
+            raise PipelineError("FILTERING 대상 사진의 place_id와 분류 사유가 맞지 않음")
         photo_id = photo.source.trip_attachment_id
         if photo_id in measurements:
             raise PipelineError("FILTERING 대상 사진 ID가 중복됨")
@@ -90,12 +93,13 @@ def filter_photos(
         groups[photo.place_id].append(photo)
 
     # 모든 입력의 측정이 성공한 뒤 분류를 갱신한다.
-    for group in groups.values():
+    for place_id, group in groups.items():
+        kept = None if place_id is not None else Issue.UNCLEAR_LOCATION
         retained: list[PhotoState] = []
         for photo in sorted(group, key=_order):
             photo_id = photo.source.trip_attachment_id
             variance, phash = measurements[photo_id]
-            photo.issue = None
+            photo.issue = kept
             photo.duplicate_of_attachment_id = None
             if variance < blur_var_min:
                 photo.issue = Issue.BLURRY
