@@ -84,10 +84,16 @@ class GatedVlm:
     def __init__(self, client, gate: RequestGate, timeout_sec: float):
         self.client, self.gate, self.timeout_sec = client, gate, timeout_sec
 
-    async def chat(self, messages, image_urls, max_tokens, response_format=None):
+    async def chat(
+        self, messages, image_urls, max_tokens, response_format=None, *, temperature=None
+    ):
+        # 값이 있을 때만 넘겨, temperature를 받지 않는 구현도 그대로 감쌀 수 있게 한다.
+        options = {} if temperature is None else {"temperature": temperature}
         try:
             return await self.gate.run(
-                lambda: self.client.chat(messages, image_urls, max_tokens, response_format),
+                lambda: self.client.chat(
+                    messages, image_urls, max_tokens, response_format, **options
+                ),
                 self.timeout_sec,
             )
         except GateUnavailable:
