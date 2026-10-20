@@ -114,6 +114,22 @@ async def test_one_vlm_call_and_code_derived_metadata():
     assert reporter.report.call_args.args == ("VERIFYING", 4, 4)
 
 
+@scenario
+async def test_each_image_is_labeled_and_precedes_photo_text():
+    ctx = context()
+    await run(request_two_places(), AsyncMock(), ctx, StoryOptions())
+    content = ctx.vlm.chat.call_args.args[0][-1]["content"]
+    assert content[:4] == [
+        {"type": "text", "text": "image_number 1, trip_attachment_id 101:"},
+        {"type": "image"},
+        {"type": "text", "text": "image_number 2, trip_attachment_id 102:"},
+        {"type": "image"},
+    ]
+    photos = json.loads(content[4]["text"])["photos"]
+    assert [(p["image_number"], p["trip_attachment_id"]) for p in photos] == [(1, 101), (2, 102)]
+    assert len(content) == 5
+
+
 @pytest.mark.parametrize(
     "raw",
     ["not json", draft((101,)), draft((101, 999)), draft((101, 101, 102)), draft((True, 102))],
@@ -269,8 +285,12 @@ async def test_actual_vlm_transport_and_job_result_outbox():
         ]
         assert body["max_tokens"] == 2048
         assert "40자 이내의 짧은 한 구절" in body["messages"][0]["content"]
-        images = [part for part in body["messages"][-1]["content"] if part["type"] == "image_url"]
-        assert len(images) == 2
+        content = body["messages"][-1]["content"]
+        assert [part["type"] for part in content] == ["text", "image_url"] * 2 + ["text"]
+        assert [part["image_url"]["url"] for part in content if part["type"] == "image_url"] == [
+            "https://images.test/a.jpg",
+            "https://images.test/b.jpg",
+        ]
         return httpx.Response(
             200, json={"choices": [{"finish_reason": "stop", "message": {"content": draft()}}]}
         )

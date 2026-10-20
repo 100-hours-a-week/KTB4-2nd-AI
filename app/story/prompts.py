@@ -52,8 +52,23 @@ def messages(request, selected):
                 "memo는 125자 이내로 작성하세요."
             ),
         },
-        {"role": "user", "content": json.dumps(data, ensure_ascii=False)},
+        {
+            "role": "user",
+            "content": [
+                *labeled_images(data["photos"]),
+                {"type": "text", "text": json.dumps(data, ensure_ascii=False)},
+            ],
+        },
     ]
+
+
+def labeled_images(photos):
+    # 라벨이 없으면 모델이 이미지 순번을 놓쳐 글에 다른 사진의 ID를 붙였다(v2 QA).
+    # 이미지마다 photos 항목의 번호와 ID를 붙이고, Gemma 4 권장대로 텍스트보다 앞에 둔다.
+    for photo in photos:
+        number, photo_id = photo["image_number"], photo["trip_attachment_id"]
+        yield {"type": "text", "text": f"image_number {number}, trip_attachment_id {photo_id}:"}
+        yield {"type": "image"}
 
 
 def response_format(selected_ids: list[int]):

@@ -142,6 +142,68 @@ async def test_images_attach_to_last_user_in_order_without_mutating_messages():
     assert messages == before
 
 
+async def test_image_slots_are_filled_in_order_between_caller_text():
+    messages = [
+        {"role": "system", "content": "지침"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "사진 1:"},
+                {"type": "image"},
+                {"type": "text", "text": "사진 2:"},
+                {"type": "image"},
+                {"type": "text", "text": "질문"},
+            ],
+        },
+    ]
+    before = deepcopy(messages)
+    urls = ["https://s3.example/b.jpg", "https://s3.example/a.jpg"]
+
+    def handler(request):
+        wire = json.loads(request.content)["messages"]
+        assert wire[0] == messages[0]
+        assert wire[1]["content"] == [
+            {"type": "text", "text": "사진 1:"},
+            {"type": "image_url", "image_url": {"url": urls[0]}},
+            {"type": "text", "text": "사진 2:"},
+            {"type": "image_url", "image_url": {"url": urls[1]}},
+            {"type": "text", "text": "질문"},
+        ]
+        return httpx.Response(200, json=completion())
+
+    async with client_for(handler) as client:
+        assert await client.chat(messages, urls, 256) == "응답"
+    assert messages == before
+
+
+@pytest.mark.parametrize(
+    "messages,urls",
+    [
+        # 자리 수와 URL 수가 다르다.
+        ([{"role": "user", "content": [{"type": "image"}]}], ["https://a", "https://b"]),
+        ([{"role": "user", "content": [{"type": "image"}, {"type": "image"}]}], ["https://a"]),
+        ([{"role": "user", "content": [{"type": "image"}]}], []),
+        # 마지막 user가 아닌 메시지에 자리가 있다.
+        (
+            [
+                {"role": "user", "content": [{"type": "image"}]},
+                {"role": "user", "content": "현재 질문"},
+            ],
+            ["https://a"],
+        ),
+        # 목록 content에 자리 없이 URL만 넘긴다.
+        ([{"role": "user", "content": [{"type": "text", "text": "질문"}]}], ["https://a"]),
+    ],
+)
+async def test_mismatched_image_slots_are_rejected_before_network(messages, urls):
+    def handler(request):
+        pytest.fail("잘못된 입력으로 HTTP 요청하면 안 됨")
+
+    async with client_for(handler) as client:
+        with pytest.raises(ValueError, match="이미지 자리"):
+            await client.chat(messages, urls, 128)
+
+
 @pytest.mark.parametrize("status", [302, 400, 401, 429, 500, 503])
 async def test_http_errors_are_not_retried_or_exposed(status):
     calls = []
