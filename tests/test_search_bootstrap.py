@@ -133,9 +133,10 @@ async def test_search_factory_signs_only_selected_question_photos_and_closes(
 
     def response(request):
         requests.append(json.loads(request.content))
+        content = json.dumps({"answerable": True, "answer": "바다입니다."}, ensure_ascii=False)
         return httpx.Response(
             200,
-            json={"choices": [{"finish_reason": "stop", "message": {"content": "바다입니다."}}]},
+            json={"choices": [{"finish_reason": "stop", "message": {"content": content}}]},
         )
 
     vlm = VllmClient(
@@ -169,6 +170,7 @@ async def test_search_factory_signs_only_selected_question_photos_and_closes(
                     assert not requests
                 else:
                     assert result["answer"] == "바다입니다."
+                    assert requests[0]["temperature"] == 0
                     content = requests[0]["messages"][-1]["content"]
                     urls = [
                         item["image_url"]["url"] for item in content if item["type"] == "image_url"

@@ -158,8 +158,9 @@ class Upstream:
                         ],
                     }
                 else:
+                    assert schema == "query_answer"
                     self.calls["answer"] += 1
-                    output = "사진에 여러 색이 보입니다."
+                    output = {"answerable": True, "answer": "사진에 여러 색이 보입니다."}
             return {
                 "choices": [
                     {

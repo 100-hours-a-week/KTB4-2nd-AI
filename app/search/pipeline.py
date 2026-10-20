@@ -2,6 +2,7 @@
 
 import asyncio
 
+from app.core.tracing import current_trace
 from app.infra.vlm import VLMUnavailable
 from app.schemas.query import (
     ParseRequest,
@@ -40,6 +41,7 @@ async def parse(
                 image_urls=[],
                 max_tokens=prompts.PARSE_MAX_TOKENS,
                 response_format=prompts.PARSE_RESPONSE_FORMAT,
+                temperature=prompts.PARSE_TEMPERATURE,
             )
             return prompts.parse_output(output, request)
     except (VLMUnavailable, InvalidModelOutput, TimeoutError):
@@ -97,14 +99,20 @@ async def search(
                 )
                 for hit in selected
             ]
-            answer = await context.vlm.chat(
+            output = await context.vlm.chat(
                 prompts.answer_messages(request.query, evidence),
                 image_urls=[item.image_url for item in evidence],
                 max_tokens=prompts.ANSWER_MAX_TOKENS,
+                response_format=prompts.ANSWER_RESPONSE_FORMAT,
+                temperature=prompts.ANSWER_TEMPERATURE,
             )
-            if not answer.strip():
-                raise InvalidModelOutput("빈 답변")
-            return SearchResponse(attachments=selected, answer=answer)
+            answer = prompts.parse_answer(output)
+        # 컷오프로 근거가 없을 때와 같은 NO_EVIDENCE라 로그에서는 answerable로 구분한다.
+        if trace := current_trace():
+            trace.fields["answerable"] = answer is not None
+        if answer is None:
+            return SearchResponse(attachments=selected, answer_error="NO_EVIDENCE")
+        return SearchResponse(attachments=selected, answer=answer)
     except TimeoutError:
         return SearchResponse(attachments=selected, answer_error="TIMEOUT")
     except (VLMUnavailable, InvalidModelOutput):
