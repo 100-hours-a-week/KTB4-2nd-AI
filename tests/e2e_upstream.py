@@ -143,7 +143,10 @@ class Upstream:
                         image = await http.get(url)
                         assert image.status_code == 200 and image.content in self.photos.values()
                         self.calls["vlm_image_read"] += 1
-                facts = json.loads(content[0]["text"])
+                # 스토리는 이미지마다 라벨 텍스트가 앞에 붙으므로 사진 정보 JSON은 마지막 텍스트다.
+                facts = json.loads(
+                    next(item["text"] for item in reversed(content) if item["type"] == "text")
+                )
                 if schema == "travel_story":
                     self.calls["story"] += 1
                     output = {
