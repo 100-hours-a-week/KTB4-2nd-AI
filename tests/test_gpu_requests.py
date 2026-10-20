@@ -45,6 +45,19 @@ async def test_limit_is_shared_across_api_and_story_clients(limit):
 
 
 @scenario
+async def test_generation_client_forwards_temperature_only_when_given():
+    async with environment() as (cfg, a, _, _):
+        model = AsyncMock()
+        model.chat.return_value = "ok"
+        client = generation_client(model, a.redis, cfg)
+        await client.chat([], [], 20, temperature=0)
+        await client.chat([], [], 20)
+        assert model.chat.await_args_list[0].kwargs == {"temperature": 0}
+        # 미지정이면 넘기지 않아, temperature를 받지 않는 구현도 감쌀 수 있다.
+        assert model.chat.await_args_list[1].kwargs == {}
+
+
+@scenario
 async def test_busy_and_redis_failure_never_start_http_call():
     async with environment() as (cfg, a, _, _):
         cfg.GPU_GENERATION_INFLIGHT = 2

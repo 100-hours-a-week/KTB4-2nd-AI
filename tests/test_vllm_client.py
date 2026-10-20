@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import logging
+import math
 from copy import deepcopy
 from dataclasses import replace
 
@@ -82,6 +84,36 @@ async def test_invalid_max_tokens_fails_before_http_request(max_tokens):
     async with client_for(handler) as client:
         with pytest.raises(ValueError, match="양의 정수 max_tokens"):
             await client.chat(MESSAGES, [], max_tokens)
+
+
+@pytest.mark.parametrize("temperature", [None, 0, 0.7, 2])
+async def test_temperature_is_sent_only_when_given_and_logged(temperature, caplog):
+    caplog.set_level(logging.INFO, logger="app.observability.calls")
+
+    def handler(request):
+        body = json.loads(request.content)
+        if temperature is None:
+            # 미지정이면 생성 서버의 모델 권장값을 쓰도록 본문에서 뺀다.
+            assert "temperature" not in body
+        else:
+            assert body["temperature"] == temperature
+        return httpx.Response(200, json=completion())
+
+    options = {} if temperature is None else {"temperature": temperature}
+    async with client_for(handler) as client:
+        assert await client.chat(MESSAGES, [], 64, **options) == "응답"
+    calls = [r for r in caplog.records if getattr(r, "event", None) == "ai_model_call"]
+    assert [r.temperature for r in calls] == [temperature]
+
+
+@pytest.mark.parametrize("temperature", [-0.1, 2.1, math.nan, math.inf, True, "0"])
+async def test_invalid_temperature_fails_before_http_request(temperature):
+    def handler(request):
+        pytest.fail("유효하지 않은 temperature로 HTTP 요청을 보내면 안 됩니다.")
+
+    async with client_for(handler) as client:
+        with pytest.raises(ValueError, match="temperature"):
+            await client.chat(MESSAGES, [], 64, temperature=temperature)
 
 
 async def test_images_attach_to_last_user_in_order_without_mutating_messages():

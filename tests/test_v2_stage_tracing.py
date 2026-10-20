@@ -154,6 +154,17 @@ async def test_search_log_summarizes_stages_scores_and_stage_metrics(caplog):
 
 
 @scenario
+async def test_traced_vlm_forwards_temperature_only_when_given():
+    inner = AsyncMock()
+    inner.chat.return_value = "ok"
+    vlm = TracedVlm(inner)
+    await vlm.chat([], [], 20, temperature=0)
+    await vlm.chat([], [], 20)
+    assert inner.chat.await_args_list[0].kwargs == {"temperature": 0}
+    assert inner.chat.await_args_list[1].kwargs == {}
+
+
+@scenario
 async def test_search_stage_stopped_by_time_limit_is_marked_timeout(caplog):
     async def slow(request):
         await asyncio.sleep(1)

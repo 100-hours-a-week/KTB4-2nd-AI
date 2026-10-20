@@ -15,8 +15,10 @@ class MockVLM:
         image_urls: list[str],
         max_tokens: int,
         response_format: dict[str, Any] | None = None,
+        *,
+        temperature: float | None = None,
     ) -> str:
-        # response_format은 받지만 모의 응답의 생성이나 검증에 사용하지 않는다.
+        # response_format과 temperature는 받지만 모의 응답의 생성이나 검증에 사용하지 않는다.
         if image_urls:
             return f"[MOCK] 근거 사진 {len(image_urls)}장으로 답변 경로를 확인했습니다."
         query = json.loads(messages[-1]["content"])["query"]

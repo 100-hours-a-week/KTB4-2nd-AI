@@ -12,11 +12,17 @@ class TracedVlm:
     def __init__(self, inner):
         self.inner = inner
 
-    async def chat(self, messages, image_urls, max_tokens, response_format=None):
+    async def chat(
+        self, messages, image_urls, max_tokens, response_format=None, *, temperature=None
+    ):
         trace = current_trace()
         name = "interpret" if trace and trace.operation == "parse" else "answer"
+        # 값이 있을 때만 넘겨, temperature를 받지 않는 구현도 그대로 감쌀 수 있게 한다.
+        options = {} if temperature is None else {"temperature": temperature}
         with stage(name, images=len(image_urls)):
-            return await self.inner.chat(messages, image_urls, max_tokens, response_format)
+            return await self.inner.chat(
+                messages, image_urls, max_tokens, response_format, **options
+            )
 
 
 class TracedEmbedder:

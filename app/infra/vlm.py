@@ -19,6 +19,8 @@ class VlmClient(Protocol):
         image_urls: list[str],
         max_tokens: int,
         response_format: dict[str, Any] | None = None,
+        *,
+        temperature: float | None = None,
     ) -> str:
         """모델이 생성한 텍스트를 반환한다. JSON 파싱이나 기능별 검증은 수행하지 않는다.
 
@@ -26,6 +28,8 @@ class VlmClient(Protocol):
         텍스트 전용 호출은 빈 목록을 전달한다. max_tokens는 출력 토큰 상한이다.
         response_format은 호출자가 구성한 OpenAI 호환 출력 형식이다.
         값이 있으면 /v1/chat/completions 요청 본문에 그대로 전달하고 None이면 생략한다.
+        temperature는 0 이상 2 이하의 샘플링 온도다. None이면 요청에서 생략해 생성 서버의
+        모델 권장값을 쓴다. 0이어도 vLLM은 배치 구성에 따라 결과가 달라질 수 있다.
         연결 실패는 VLMUnavailable, 시간 초과는 TimeoutError로 전달하고 취소는 전파한다.
         """
         ...

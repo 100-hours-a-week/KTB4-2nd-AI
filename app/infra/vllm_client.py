@@ -75,6 +75,8 @@ class VllmClient:
         image_urls: list[str],
         max_tokens: int,
         response_format: dict[str, Any] | None = None,
+        *,
+        temperature: float | None = None,
     ) -> str:
         if (
             not messages
@@ -83,6 +85,13 @@ class VllmClient:
             or max_tokens < 1
         ):
             raise ValueError("메시지와 양의 정수 max_tokens가 필요합니다.")
+        if temperature is not None and (
+            isinstance(temperature, bool)
+            or not isinstance(temperature, int | float)
+            or not math.isfinite(temperature)
+            or not 0 <= temperature <= 2
+        ):
+            raise ValueError("temperature는 0 이상 2 이하의 유한한 수여야 합니다.")
         # 호출자의 메시지를 바꾸지 않는다. 이미지는 마지막 user 메시지에만 붙인다.
         wire_messages: list[dict[str, Any]] = [dict(message) for message in messages]
         if image_urls:
@@ -104,10 +113,14 @@ class VllmClient:
         }
         if response_format is not None:
             body["response_format"] = response_format
+        if temperature is not None:
+            # 미지정이면 생성 서버가 모델 generation_config의 권장값으로 샘플링한다.
+            body["temperature"] = temperature
         call = {
             "image_count": len(image_urls),
             "max_tokens": max_tokens,
             "structured": response_format is not None,
+            "temperature": temperature,
         }
         started = time.monotonic()
         try:
