@@ -20,7 +20,8 @@ class MockVLM:
     ) -> str:
         # response_format과 temperature는 받지만 모의 응답의 생성이나 검증에 사용하지 않는다.
         if image_urls:
-            return f"[MOCK] 근거 사진 {len(image_urls)}장으로 답변 경로를 확인했습니다."
+            answer = f"[MOCK] 근거 사진 {len(image_urls)}장으로 답변 경로를 확인했습니다."
+            return json.dumps({"answerable": True, "answer": answer}, ensure_ascii=False)
         query = json.loads(messages[-1]["content"])["query"]
         return json.dumps(
             {
