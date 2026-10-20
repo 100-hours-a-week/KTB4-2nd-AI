@@ -171,18 +171,23 @@ def test_place_rejects_representative_outside_attachments():
         ProcessResult.model_validate({"places": [bad], "unclassified": []})
 
 
-@pytest.mark.parametrize(
-    "issue, extra, message",
-    [
-        ("BLURRY", {}, "place_id"),
-        ("DUPLICATED", {"place_id": "p1"}, "duplicate_of_attachment_id"),
-    ],
-)
-def test_unclassified_issue_rules(issue, extra, message):
-    with pytest.raises(ValidationError, match=message):
+@pytest.mark.parametrize("extra", [{"place_id": "p1"}, {}])
+def test_unclassified_duplicate_needs_original(extra):
+    with pytest.raises(ValidationError, match="duplicate_of_attachment_id"):
         UnclassifiedAttachment.model_validate(
-            {"trip_attachment_id": 1, "issue": issue, "region_origin": "EXIF", **extra}
+            {"trip_attachment_id": 1, "issue": "DUPLICATED", "region_origin": "EXIF", **extra}
         )
+
+
+@pytest.mark.parametrize(
+    "issue, extra",
+    [("BLURRY", {}), ("DUPLICATED", {"duplicate_of_attachment_id": 2})],
+)
+def test_unclassified_blur_and_duplicate_allow_no_place(issue, extra):
+    u = UnclassifiedAttachment.model_validate(
+        {"trip_attachment_id": 1, "issue": issue, "region_origin": "UNKNOWN", **extra}
+    )
+    assert u.place_id is None
 
 
 def test_unclassified_unclear_location_needs_nothing():

@@ -148,15 +148,49 @@ def test_earliest_retained_match_wins_and_rerun_recomputes(monkeypatch):
     assert all(p.issue is None and p.duplicate_of_attachment_id is None for p in photos)
 
 
-def test_unclear_location_is_untouched_and_all_blurry_keep_place(monkeypatch):
-    unclear = photo(9, place=None)
-    unclear.issue = Issue.UNCLEAR_LOCATION
-    before = vars(unclear).copy()
-    photos = [unclear, photo(1), photo(2)]
+def unclear(photo_id, *, minute=0):
+    state = photo(photo_id, minute=minute, place=None)
+    state.issue = Issue.UNCLEAR_LOCATION
+    state.latitude = state.longitude = None
+    state.region_origin = RegionOrigin.UNKNOWN
+    return state
+
+
+def test_location_unknown_photos_get_blur_and_duplicate_without_place(monkeypatch):
+    # 위치 불명 8과 장소 사진 1은 pHash가 같아도 서로 비교하지 않는다.
+    photos = [unclear(9, minute=2), unclear(8, minute=1), unclear(7), photo(1)]
+    values = {7: (10, 0), 8: (200, 0), 9: (200, 0), 1: (200, 0)}
+    result = run_fixed(monkeypatch, photos, values)
+    assert [p.issue for p in photos] == [
+        Issue.DUPLICATED,
+        Issue.UNCLEAR_LOCATION,
+        Issue.BLURRY,
+        None,
+    ]
+    assert [p.duplicate_of_attachment_id for p in photos] == [8, None, None, None]
+    assert [p.place_id for p in photos] == [None, None, None, "p1"]
+    assert all(p.latitude is None for p in photos[:3])
+    assert result == {7: 10, 8: 200, 9: 200, 1: 200}
+
+
+def test_location_unknown_rerun_restores_unclear_location(monkeypatch):
+    photos = [unclear(9, minute=1), unclear(8)]
+    values = {8: (10, 0), 9: (200, 1)}
+    run_fixed(monkeypatch, photos, values)
+    assert [p.issue for p in photos] == [Issue.UNCLEAR_LOCATION, Issue.BLURRY]
+    run_fixed(monkeypatch, photos, values, blur=0)
+    assert [p.issue for p in photos] == [Issue.DUPLICATED, Issue.UNCLEAR_LOCATION]
+    assert photos[0].duplicate_of_attachment_id == 8
+    run_fixed(monkeypatch, photos, values, blur=0, distance=0)
+    assert all(p.issue is Issue.UNCLEAR_LOCATION for p in photos)
+    assert all(p.duplicate_of_attachment_id is None and p.place_id is None for p in photos)
+
+
+def test_all_blurry_keep_place(monkeypatch):
+    photos = [photo(1), photo(2)]
     result = run_fixed(monkeypatch, photos, {1: (0, 0), 2: (0, 0)})
-    assert vars(unclear) == before
     assert result == {1: 0, 2: 0}
-    assert all(p.issue is Issue.BLURRY and p.place_id == "p1" for p in photos[1:])
+    assert all(p.issue is Issue.BLURRY and p.place_id == "p1" for p in photos)
     assert run_fixed(monkeypatch, [], {}) == {}
 
 
@@ -185,6 +219,9 @@ def test_invalid_thresholds_fail(kwargs):
         "invalid_image",
         "closed_image",
         "missing_place",
+        "empty_place",
+        "unclear_with_place",
+        "missing_unclear_image",
         "pending",
         "unknown_with_time",
         "known_without_time",
@@ -203,6 +240,12 @@ def test_invalid_inputs_fail_without_partial_classification(problem):
         images[2].close()
     elif problem == "missing_place":
         photos[1].place_id = None
+    elif problem == "empty_place":
+        photos[1].place_id = ""
+    elif problem == "unclear_with_place":
+        photos[1].issue = Issue.UNCLEAR_LOCATION
+    elif problem == "missing_unclear_image":
+        photos.append(unclear(3))
     elif problem == "pending":
         photos[1].time_status = TimeStatus.PENDING
     elif problem == "unknown_with_time":
@@ -213,6 +256,7 @@ def test_invalid_inputs_fail_without_partial_classification(problem):
         photos[1].taken_at = BASE.replace(tzinfo=None)
     elif problem == "duplicate_id":
         photos[1] = photo(1)
+    before = [(p.issue, p.duplicate_of_attachment_id) for p in photos]
     with pytest.raises(PipelineError):
         filtering.filter_photos(photos, images, blur_var_min=100, phash_max_dist=5)
-    assert all(p.issue is None for p in photos)
+    assert [(p.issue, p.duplicate_of_attachment_id) for p in photos] == before

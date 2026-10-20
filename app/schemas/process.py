@@ -133,7 +133,7 @@ class Place(BaseModel):
 
 
 class UnclassifiedAttachment(BaseModel):
-    """폴더에 넣지 않은 사진. BLURRY와 DUPLICATED는 복구 대상 폴더가 필수"""
+    """폴더에 넣지 않은 사진. place_id는 BLURRY와 DUPLICATED의 복구 대상 폴더, 위치 불명이면 null"""
 
     trip_attachment_id: int
     issue: Issue
@@ -147,8 +147,6 @@ class UnclassifiedAttachment(BaseModel):
 
     @model_validator(mode="after")
     def _issue_rules(self) -> Self:
-        if self.issue in (Issue.BLURRY, Issue.DUPLICATED) and self.place_id is None:
-            raise ValueError(f"{self.issue}는 place_id가 필수")
         if self.issue is Issue.DUPLICATED and self.duplicate_of_attachment_id is None:
             raise ValueError("DUPLICATED는 duplicate_of_attachment_id가 필수")
         return self

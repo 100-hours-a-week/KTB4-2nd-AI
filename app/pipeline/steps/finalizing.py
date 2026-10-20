@@ -44,6 +44,10 @@ def _validate(photo: PhotoState) -> None:
     if photo.issue is Issue.UNCLEAR_LOCATION:
         if photo.place_id is not None:
             raise PipelineError("위치 미분류 사진에 장소가 지정됨")
+    elif photo.place_id is None:
+        # 위치 불명 사진의 흐림과 중복은 복구 대상 폴더 없이 미분류로 나간다.
+        if photo.issue is None:
+            raise PipelineError("장소 사진의 좌표와 출처 및 place_id가 필요함")
     elif (
         not photo.place_id
         or photo.latitude is None
@@ -88,7 +92,12 @@ def finalize_photos(
         photo_id = photo.source.trip_attachment_id
         if photo.issue is not Issue.UNCLEAR_LOCATION and photo_id not in variances:
             raise PipelineError(f"품질 점수 계산에 필요한 분산이 없음: {photo_id}")
-        score = quality_score(variances[photo_id]) if photo_id in variances else None
+        # 위치 불명 사진도 분산을 재지만, 남은 위치 미분류 사진의 점수는 기존처럼 비운다.
+        score = (
+            quality_score(variances[photo_id])
+            if photo_id in variances and photo.issue is not Issue.UNCLEAR_LOCATION
+            else None
+        )
         fields[photo_id] = dict(
             trip_attachment_id=photo_id,
             taken_at=photo.taken_at,
@@ -99,9 +108,11 @@ def finalize_photos(
         )
         if photo.issue is Issue.DUPLICATED:
             original = by_id.get(photo.duplicate_of_attachment_id)
+            # 위치 불명 중복의 원본은 UNCLEAR_LOCATION으로 남은 위치 불명 사진이다.
+            kept = None if photo.place_id is not None else Issue.UNCLEAR_LOCATION
             if (
                 original is None
-                or original.issue is not None
+                or original.issue is not kept
                 or original.place_id != photo.place_id
             ):
                 raise PipelineError("중복 원본은 같은 장소에 보존된 사진이어야 함")
