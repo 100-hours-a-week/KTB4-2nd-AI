@@ -94,13 +94,33 @@ class VllmClient:
             raise ValueError("temperature는 0 이상 2 이하의 유한한 수여야 합니다.")
         # 호출자의 메시지를 바꾸지 않는다. 이미지는 마지막 user 메시지에만 붙인다.
         wire_messages: list[dict[str, Any]] = [dict(message) for message in messages]
-        if image_urls:
-            index = next(
-                (i for i in range(len(messages) - 1, -1, -1) if messages[i]["role"] == "user"),
-                None,
-            )
+        index = next(
+            (i for i in range(len(messages) - 1, -1, -1) if messages[i]["role"] == "user"),
+            None,
+        )
+        slots = [
+            i
+            for i, message in enumerate(messages)
+            if not isinstance(message["content"], str)
+            for part in message["content"]
+            if part["type"] == "image"
+        ]
+        if slots:
+            # 호출자가 이미지 자리를 지정했다. 텍스트 라벨과 이미지의 배치는 호출자가 정한다.
+            if any(i != index for i in slots) or len(slots) != len(image_urls):
+                raise ValueError("이미지 자리는 마지막 user 메시지에 이미지 수만큼 있어야 합니다.")
+            urls = iter(image_urls)
+            wire_messages[index]["content"] = [
+                {"type": "image_url", "image_url": {"url": next(urls)}}
+                if part["type"] == "image"
+                else dict(part)
+                for part in messages[index]["content"]
+            ]
+        elif image_urls:
             if index is None:
                 raise ValueError("이미지를 첨부할 user 메시지가 없습니다.")
+            if not isinstance(messages[index]["content"], str):
+                raise ValueError("이미지 자리는 마지막 user 메시지에 이미지 수만큼 있어야 합니다.")
             wire_messages[index]["content"] = [
                 {"type": "text", "text": messages[index]["content"]},
                 *({"type": "image_url", "image_url": {"url": url}} for url in image_urls),
