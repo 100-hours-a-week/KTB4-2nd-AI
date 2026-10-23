@@ -153,7 +153,8 @@ def test_selection_skips_photo_too_similar_to_chosen():
 def test_selection_leaves_slot_empty_when_only_duplicates_remain():
     groups = {5001: photos(1, 2)}
     vectors = {1: np.array([1.0, 0]), 2: np.array([0.99, 0.14])}
-    assert picked(groups, vectors, 2, 0.95) == [1]
+    # 후보가 2장이면 평균 근접도가 수학적으로 같아 어느 쪽이 먼저인지는 반올림으로 갈린다.
+    assert len(picked(groups, vectors, 2, 0.95)) == 1
 
 
 def test_similarity_equal_to_threshold_counts_as_duplicate():
