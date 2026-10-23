@@ -100,7 +100,7 @@ def finalize(raw: str, request: StoryMessage, selected) -> dict:
             if day < 1:
                 label = photo.taken_at.astimezone(ZoneInfo("Asia/Seoul")).date().isoformat()
             else:
-                label = f"{day}째 날"
+                label = f"{day}일차"
             blocks.append(
                 StoryBlock(
                     order_number=order,
