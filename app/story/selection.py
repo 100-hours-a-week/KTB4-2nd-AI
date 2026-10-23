@@ -1,4 +1,4 @@
-"""스토리 기준선: 품질 필터, 장소별 비례 배분과 평균 임베딩 기반 선별."""
+"""스토리 기준선: 품질 필터, 장소별 비례 배분, 평균 임베딩 기반 선별과 같은 장면 중복 제외."""
 
 from collections.abc import Callable
 
@@ -70,7 +70,8 @@ def allocate(counts: list[int], budget: int) -> list[int]:
     return [share + 1 for share in shares]
 
 
-def select(groups, vectors: dict[int, np.ndarray], *, budget: int):
+def unit_vectors(groups, vectors: dict[int, np.ndarray]) -> dict[int, np.ndarray]:
+    """장소별 후보 벡터를 확인하고, 행마다 L2 정규화한 행렬로 돌려준다."""
     missing = [
         photo.trip_attachment_id
         for group in groups.values()
@@ -84,9 +85,8 @@ def select(groups, vectors: dict[int, np.ndarray], *, budget: int):
             reason="MISSING_VECTORS",
             trip_attachment_ids=missing,
         )
-    allocations = allocate([len(group) for group in groups.values()], budget)
-    selected = []
-    for (place_id, group), count in zip(groups.items(), allocations, strict=True):
+    units = {}
+    for place_id, group in groups.items():
         matrix = np.asarray(
             [vectors[photo.trip_attachment_id] for photo in group], dtype=np.float64
         )
@@ -95,12 +95,64 @@ def select(groups, vectors: dict[int, np.ndarray], *, budget: int):
         norms = np.linalg.norm(matrix, axis=1)
         if np.any(norms == 0) or not np.isfinite(norms).all():
             raise failure(ErrorCode.MODEL_NOT_READY, "사진 벡터 크기가 올바르지 않습니다.")
-        matrix = matrix / norms[:, None]
+        units[place_id] = matrix / norms[:, None]
+    return units
+
+
+def similarities(units: dict[int, np.ndarray]) -> dict[int, np.ndarray]:
+    """장소마다 사진 쌍의 코사인 유사도 행렬.
+
+    기준 계산과 선택이 같은 값을 비교하도록 한 번만 구해 함께 쓴다. 행렬곱과 벡터 내적은
+    마지막 자리의 반올림이 달라 기준과 같은 유사도의 판정이 뒤바뀔 수 있고, 행렬곱도
+    정확히 대칭이 아닐 수 있어 대칭으로 맞춘다.
+    """
+    result = {}
+    for place_id, matrix in units.items():
+        gram = matrix @ matrix.T
+        result[place_id] = (gram + gram.T) / 2
+    return result
+
+
+def duplicate_threshold(sims: dict[int, np.ndarray], z: float) -> float | None:
+    """같은 장소 사진 쌍의 코사인 유사도 평균 + z × 표준편차. 같은 장소 쌍이 없으면 None.
+
+    서로 비슷한 사진이 많은 여행일수록 기준이 높아지도록 여행마다 정한다(v2 QA Q6, z 1.0).
+    쌍이 아주 적으면 기준이 불안정하다. 쌍이 하나면 기준이 그 쌍의 유사도와 같아져 두 장을
+    중복으로 본다.
+    """
+    pairs = [s[np.triu_indices(len(s), k=1)] for s in sims.values() if len(s) > 1]
+    if not pairs:
+        return None
+    values = np.concatenate(pairs)
+    return float(values.mean() + z * values.std())
+
+
+def select(
+    groups,
+    units: dict[int, np.ndarray],
+    sims: dict[int, np.ndarray],
+    *,
+    budget: int,
+    threshold: float | None,
+):
+    allocations = allocate([len(group) for group in groups.values()], budget)
+    selected = []
+    for (place_id, group), count in zip(groups.items(), allocations, strict=True):
+        matrix, similar = units[place_id], sims[place_id]
         # 평균의 길이는 모든 비교에 같으므로 내적으로 순위를 정한다.
         scores = matrix @ matrix.mean(axis=0)
         order = sorted(
             range(len(group)),
             key=lambda i: (-scores[i], group[i].taken_at, group[i].trip_attachment_id),
         )
-        selected.extend((place_id, group[i]) for i in order[:count])
+        chosen = []
+        for i in order:
+            if len(chosen) == count:
+                break
+            # 이미 고른 사진과 기준 이상으로 닮으면 같은 장면으로 보고 건너뛴다.
+            # 그래서 못 채운 자리는 비운다(사진 수를 예산에 맞추지 않음).
+            if threshold is not None and any(similar[i, j] >= threshold for j in chosen):
+                continue
+            chosen.append(i)
+        selected.extend((place_id, group[i]) for i in chosen)
     return sorted(selected, key=lambda item: (item[1].taken_at, item[1].trip_attachment_id))
