@@ -30,6 +30,7 @@ async def run(request: dict, reporter) -> dict:
         image_budget=cfg.STORY_IMAGE_BUDGET,
         blur_min=cfg.STORY_BLUR_VAR_MIN,
         phash_max=cfg.STORY_PHASH_MAX_DIST,
+        dedupe_z=cfg.STORY_DEDUPE_Z,
         max_tokens=cfg.STORY_MAX_TOKENS,
     )
     await reporter.check_cancel()

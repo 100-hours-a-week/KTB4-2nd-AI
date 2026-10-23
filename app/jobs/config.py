@@ -41,6 +41,7 @@ class JobsSettings(Settings):
     STORY_IMAGE_BUDGET: int = Field(default=10, ge=1, le=30)
     STORY_BLUR_VAR_MIN: float = Field(default=80, ge=0, allow_inf_nan=False)
     STORY_PHASH_MAX_DIST: int = Field(default=4, ge=0, le=64)
+    STORY_DEDUPE_Z: float = Field(default=1.0, ge=0, allow_inf_nan=False)
     STORY_MAX_TOKENS: int = Field(default=2048, ge=1)
     # API 복제본과 스토리 프로세스가 공유하는 HTTP 호출 한도. GPU 성능 보장값은 아니다.
     GPU_GENERATION_INFLIGHT: int = Field(default=8, ge=1)
