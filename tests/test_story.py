@@ -3,6 +3,7 @@
 import io
 import json
 from contextlib import nullcontext
+from datetime import datetime
 from unittest.mock import AsyncMock
 
 import numpy as np
@@ -109,7 +110,7 @@ async def test_one_vlm_call_and_code_derived_metadata():
     assert args.args[1] == ["https://images.test/a.jpg", "https://images.test/b.jpg"]
     assert args.kwargs["response_format"]["type"] == "json_schema"
     assert [b["trip_place_id"] for b in result["blocks"]] == [5001, 5002]
-    assert result["blocks"][1]["day_label"] == "2째 날, 공원"
+    assert result["blocks"][1]["day_label"] == "2일차, 공원"
     assert result["verification"] == {"passed": True, "retry_count": 0}
     assert reporter.report.call_args.args == ("VERIFYING", 4, 4)
 
@@ -151,6 +152,47 @@ def test_output_rejects_missing_photo_even_when_every_place_is_present():
         finalize(draft((101, 102)), message, selected)
     assert error.value.detail["reason"] == "INVALID_STORY_OUTPUT"
     assert len(finalize(draft((103, 102, 101)), message, selected)["blocks"]) == 3
+
+
+def test_day_label_counts_days_from_trip_start_in_kst():
+    # 여행 기간은 10/12~10/14다. 일차와 시작일 앞 사진의 날짜는 서울 시간 기준 날짜로 정하고,
+    # 종료일 뒤의 사진은 기간을 넘는 일차가 된다(Q9에서 바꾸지 않은 동작).
+    message = validate_request(request_two_places())
+    first = message.places[0].attachments[0]
+    taken = {
+        201: "2026-10-10T16:00:00+00:00",  # 서울 시간 10/11 01:00
+        202: "2026-10-11T15:10:00+00:00",  # 서울 시간 10/12 00:10
+        203: "2026-10-14T23:50:00+09:00",
+        204: "2026-10-15T09:00:00+09:00",
+    }
+    selected = [
+        (
+            5001,
+            first.model_copy(
+                update={"trip_attachment_id": i, "taken_at": datetime.fromisoformat(t)}
+            ),
+        )
+        for i, t in taken.items()
+    ] + [(5002, message.places[1].attachments[0])]
+    result = finalize(draft((201, 202, 203, 204, 102)), message, selected)
+    labels = {b["trip_attachment_id"]: b["day_label"] for b in result["blocks"]}
+    assert labels == {
+        201: "2026-10-11, 해변",
+        202: "1일차, 해변",
+        102: "2일차, 공원",
+        203: "3일차, 해변",
+        204: "4일차, 해변",
+    }
+
+
+def test_day_label_is_cut_at_40_characters():
+    request = request_two_places()
+    request["places"][0]["place_name"] = "가" * 50
+    message = validate_request(request)
+    selected = [(p.trip_place_id, p.attachments[0]) for p in message.places]
+    label = finalize(draft((101, 102)), message, selected)["blocks"][0]["day_label"]
+    assert label == ("1일차, " + "가" * 50)[:40]
+    assert len(label) == 40
 
 
 @pytest.mark.parametrize("count", [1, 2, 10])
