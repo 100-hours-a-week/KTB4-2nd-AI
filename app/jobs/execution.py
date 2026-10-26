@@ -1,11 +1,16 @@
-"""작업별 subprocess 진입점. 기능 담당자는 async handler(request, reporter)를 연결한다."""
+"""작업별 subprocess 진입점. 기능 담당자는 async handler(request, reporter)를 연결한다.
+
+정리는 대기 자식(--standby)으로 미리 띄워 두고 작업은 stdin으로 전달
+"""
 
 import asyncio
 import importlib
 import inspect
+import json
 import resource
 import sys
 import time
+from collections.abc import Callable
 
 from redis.asyncio import Redis
 
@@ -230,9 +235,20 @@ def log_summary(kind: str, status: str, trace) -> None:
     )
 
 
-async def main(identity: str, owner: str) -> None:
-    cfg = JobsSettings()
-    setup_logging(cfg.LOG_LEVEL, cfg.RELEASE)
+def handoff_line(identity: str, owner: str) -> bytes:
+    """대기 자식의 stdin에 쓰는 작업 1건. 보낸 시각은 자식의 준비 대기 시간 측정용"""
+    message = {"identity": identity, "owner": owner, "sent_at": time.time()}
+    return (json.dumps(message) + "\n").encode()
+
+
+async def run_job(
+    cfg: JobsSettings,
+    identity: str,
+    owner: str,
+    handler: Callable | None = None,
+    handoff_wait_ms: float | None = None,
+) -> None:
+    """작업 1건 실행. handler가 없으면 레코드의 작업 종류로 적재"""
     redis = Redis.from_url(
         cfg.REDIS_URL.get_secret_value(),
         decode_responses=True,
@@ -247,6 +263,16 @@ async def main(identity: str, owner: str) -> None:
 
     bind_trip(record.trip_id)
     bind_job(record.execution_id)
+    if handoff_wait_ms is not None:
+        # 0에 가까우면 인계 시점에 준비 완료, 크면 그만큼 남은 준비를 기다린 것
+        log.info(
+            "대기 자식에 작업 인계",
+            extra={
+                "event": "ai_job_handoff",
+                "operation": record.kind,
+                "handoff_wait_ms": round(handoff_wait_ms, 2),
+            },
+        )
 
     async def guard() -> None:
         while True:
@@ -267,7 +293,9 @@ async def main(identity: str, owner: str) -> None:
                 )
                 raise RuntimeError("실행 소유권 만료")
 
-    task = asyncio.create_task(execute(store, identity, owner, handler_for(cfg, record.kind)))
+    task = asyncio.create_task(
+        execute(store, identity, owner, handler or handler_for(cfg, record.kind))
+    )
     monitor = asyncio.create_task(guard())
     try:
         await asyncio.wait([task, monitor], return_when=asyncio.FIRST_COMPLETED)
@@ -278,6 +306,30 @@ async def main(identity: str, owner: str) -> None:
         await redis.aclose()
 
 
+async def main(identity: str, owner: str) -> None:
+    cfg = JobsSettings()
+    setup_logging(cfg.LOG_LEVEL, cfg.RELEASE)
+    await run_job(cfg, identity, owner)
+
+
+def standby() -> None:
+    """정리 대기 자식. import와 처리기 적재를 마친 뒤 stdin으로 작업 1건을 받아 실행"""
+    cfg = JobsSettings()
+    setup_logging(cfg.LOG_LEVEL, cfg.RELEASE)
+    handler = handler_for(cfg, "process")
+    line = sys.stdin.readline()
+    if not line:
+        # 실행기가 작업을 넘기지 않고 stdin을 닫은 경우
+        return
+    handoff = json.loads(line)
+    handoff_wait_ms = max(0.0, (time.time() - handoff["sent_at"]) * 1000)
+    asyncio.run(run_job(cfg, handoff["identity"], handoff["owner"], handler, handoff_wait_ms))
+
+
 if __name__ == "__main__":
-    with parent_guard(int(sys.argv[3])):
-        asyncio.run(main(sys.argv[1], sys.argv[2]))
+    if sys.argv[1] == "--standby":
+        with parent_guard(int(sys.argv[2])):
+            standby()
+    else:
+        with parent_guard(int(sys.argv[3])):
+            asyncio.run(main(sys.argv[1], sys.argv[2]))
