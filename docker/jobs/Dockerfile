@@ -4,11 +4,13 @@ FROM ghcr.io/astral-sh/uv:0.12.15 AS uv
 FROM python:3.12-slim
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 UV_LINK_MODE=copy PATH="/app/.venv/bin:${PATH}"
+# 공식 이미지의 표준 라이브러리 .pyc 삭제와 실행 중 기록 금지로 작업 subprocess마다 반복되는 소스 컴파일 방지, 빌드 때 컴파일
+RUN python -m compileall -q -j 0 /usr/local/lib/python3.12
 COPY --from=uv /uv /usr/local/bin/uv
 COPY pyproject.toml uv.lock ./
-RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev && python -c "from aiokafka.codec import has_lz4; assert has_lz4()"
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev --compile-bytecode && python -c "from aiokafka.codec import has_lz4; assert has_lz4()"
 COPY app ./app
-RUN groupadd --system ai && useradd --system --gid ai ai && chown -R ai:ai /app
+RUN python -m compileall -q -j 0 app && groupadd --system ai && useradd --system --gid ai ai && chown -R ai:ai /app
 # 모든 로그의 release 필드. 의존성 층의 캐시를 유지하도록 마지막 층에서 지정한다.
 ARG RELEASE=unknown
 ENV RELEASE=${RELEASE}
