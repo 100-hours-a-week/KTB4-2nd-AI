@@ -1,4 +1,6 @@
+import logging
 import threading
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import numpy as np
@@ -163,6 +165,58 @@ def test_batch_boundary_and_all_unlocated(setup):
     assert [done for step, done, _ in progress if step is ProcessStep.EMBEDDING] == [0, 16, 17]
     assert not result.places and len(result.unclassified) == 17
     assert len(ctx.qdrant.fetch([a.trip_attachment_id for a in request.attachments])) == 17
+
+
+@pytest.fixture
+def clock_inputs(monkeypatch):
+    """CLOCK이 받은 사진별 벡터. 재사용한 벡터가 다음 단계로 넘어가는지 확인"""
+    seen = {}
+    correct = pipeline_run.correct_clocks
+
+    def capture(photos, **kwargs):
+        seen.update({photo.source.trip_attachment_id: photo.embedding for photo in photos})
+        return correct(photos, **kwargs)
+
+    monkeypatch.setattr(pipeline_run, "correct_clocks", capture)
+    return seen
+
+
+def test_reuse_vectors_embeds_only_missing_photos(setup, tmp_path, clock_inputs, caplog):
+    request, ctx, engine = setup(18)
+    ctx = replace(ctx, reuse_vectors=True)
+    ctx.qdrant.upsert([105], np.array([[0, 1, 0]], dtype=np.float32))
+    progress = []
+    with caplog.at_level(logging.INFO, logger="app.pipeline"):
+        run(request, ctx, lambda *args: progress.append(args), lambda: False)
+    assert engine.batches == [16, 1]
+    assert engine.images == [(tmp_path / f"{i}.png").read_bytes() for i in range(18) if i != 5]
+    assert [done for step, done, _ in progress if step is ProcessStep.EMBEDDING] == [0, 1, 17, 18]
+    np.testing.assert_allclose(clock_inputs[105], [0, 1, 0])
+    np.testing.assert_allclose(clock_inputs[100], [1, 0, 0])
+    (record,) = [r for r in caplog.records if getattr(r, "event", None) == "ai_embedding_reuse"]
+    assert (record.reused_count, record.embedded_count) == (1, 17)
+
+
+def test_reuse_vectors_skips_engine_when_all_stored(setup):
+    request, ctx, engine = setup()
+    ctx = replace(ctx, reuse_vectors=True)
+    ctx.qdrant.upsert([100, 101, 102], engine.vectors.copy())
+    progress = []
+    result = run(request, ctx, lambda *args: progress.append(args), lambda: False)
+    assert engine.batches == []
+    assert [done for step, done, _ in progress if step is ProcessStep.EMBEDDING] == [0, 3]
+    assert result.failed == []
+
+
+def test_without_reuse_embeds_all_even_if_stored(setup, caplog):
+    request, ctx, engine = setup()
+    ctx.qdrant.upsert([100, 101, 102], np.tile([0, 1, 0], (3, 1)).astype(np.float32))
+    with caplog.at_level(logging.INFO, logger="app.pipeline"):
+        run(request, ctx, lambda *_: None, lambda: False)
+    assert engine.batches == [3]
+    for vector in ctx.qdrant.fetch([100, 101, 102]).values():
+        np.testing.assert_allclose(vector, [1, 0, 0])
+    assert not [r for r in caplog.records if getattr(r, "event", None) == "ai_embedding_reuse"]
 
 
 @pytest.mark.parametrize("step", list(ProcessStep))

@@ -109,7 +109,13 @@ def _run(request: ProcessMessage, cfg: JobsSettings, progress, cancelled, report
             check()
             vectors = QdrantStore(cfg.QDRANT_URL, engine.model_version, engine.dim)
             resources.callback(vectors.close)
-            ctx = build_context(cfg, engine, images=images, qdrant=vectors)
+            ctx = build_context(
+                cfg,
+                engine,
+                images=images,
+                qdrant=vectors,
+                reuse_vectors=cfg.EMBED_ON_PHOTOS_READY,
+            )
             result = run_pipeline(request, ctx, progress, cancelled).model_dump(mode="json")
             if hashes:
                 reports.extend(auto_evaluate(result, hashes, cfg))

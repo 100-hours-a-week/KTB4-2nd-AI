@@ -29,6 +29,8 @@ class PipelineContext:
     thresholds: Thresholds  # 현재 모델의 임계값, thresholds.yaml의 model_version 아래
     settings: Settings
     log: logging.Logger
+    # EMBEDDING에서 qdrant에 저장된 벡터를 먼저 쓰고 없는 사진만 임베딩. v2 EMBED_ON_PHOTOS_READY
+    reuse_vectors: bool = False
 
 
 def load_thresholds(path: Path, model_version: str) -> Thresholds:

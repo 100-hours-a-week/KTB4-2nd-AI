@@ -38,13 +38,15 @@ def run(
         request       이번 여행의 사진 목록, 기간, 지역.
                       사본 키는 request.attachments[].analyze_storage_key
         ctx           외부 자원. ctx.images.get_many(keys), ctx.engine.encode_images(사본 bytes),
-                      ctx.qdrant.upsert(ids, vectors), ctx.thresholds[키], ctx.settings, ctx.log
+                      ctx.qdrant.upsert(ids, vectors), ctx.qdrant.fetch(ids), ctx.thresholds[키],
+                      ctx.settings, ctx.log, ctx.reuse_vectors
         on_progress   진행률 보고 함수 on_progress(step, done, total). 워커가 api로 콜백
         is_cancelled  취소 확인 함수. True면 즉시 PipelineCancelled를 raise
 
     단계, 이 순서로 ProcessStep 값을 on_progress에 넘김
         DOWNLOADING  ctx.images로 사본 bytes 확보, PIL로 디코딩. 안 열리는 사진은 DecodeFailed(ids)
-        EMBEDDING    16장 배치의 사본 bytes로 ctx.engine.encode_images, 배치마다 ctx.qdrant.upsert
+        EMBEDDING    16장 배치의 사본 bytes로 ctx.engine.encode_images, 배치마다 ctx.qdrant.upsert.
+                     ctx.reuse_vectors면 ctx.qdrant.fetch로 저장 벡터를 먼저 쓰고 없는 사진만 임베딩
         CLOCK        device_model로 기기별 묶음, 유사도 쌍으로 기기별 단일 오프셋 산출과 적용
         LOCATING     기간 밖 분리, GPS 앵커, 유사도 상속
         CLUSTERING   haversine DBSCAN, 재방문은 한 폴더
@@ -129,9 +131,20 @@ def run(
 
             check_cancel()
             progress.report(ProcessStep.EMBEDDING, 0)
-            for start in range(0, total, 16):
+            pending = photos
+            if ctx.reuse_vectors:
+                # 업로드 묶음에서 저장한 벡터를 쓰고 저장되지 않은 사진만 임베딩한다.
+                stored = ctx.qdrant.fetch([photo.source.trip_attachment_id for photo in photos])
+                for photo in photos:
+                    photo.embedding = stored.get(photo.source.trip_attachment_id)
+                pending = [photo for photo in photos if photo.embedding is None]
                 check_cancel()
-                chunk = photos[start : start + 16]
+            reused = total - len(pending)
+            if reused:
+                progress.report(ProcessStep.EMBEDDING, reused)
+            for start in range(0, len(pending), 16):
+                check_cancel()
+                chunk = pending[start : start + 16]
                 ids = [photo.source.trip_attachment_id for photo in chunk]
                 vectors = ctx.engine.encode_images([raw_images[photo_id] for photo_id in ids])
                 check_cancel()
@@ -147,7 +160,16 @@ def run(
                 for photo, vector in zip(chunk, vectors, strict=True):
                     photo.embedding = vector
                 check_cancel()
-                progress.report(ProcessStep.EMBEDDING, min(start + 16, total))
+                progress.report(ProcessStep.EMBEDDING, reused + min(start + 16, len(pending)))
+            if ctx.reuse_vectors:
+                ctx.log.info(
+                    "저장된 임베딩 벡터 재사용",
+                    extra={
+                        "event": "ai_embedding_reuse",
+                        "reused_count": reused,
+                        "embedded_count": len(pending),
+                    },
+                )
             log_snapshot(ctx.log, ProcessStep.EMBEDDING, photos)
 
             def stage(step, operation):
