@@ -4,6 +4,7 @@ import asyncio
 import os
 import sys
 import uuid
+from asyncio.subprocess import Process
 
 from pydantic import SecretStr
 from redis.asyncio import Redis
@@ -12,7 +13,7 @@ from redis.exceptions import RedisError
 from app.core.errors import ErrorCode
 from app.core.logging import error_fields, get_logger, setup_logging
 from app.jobs.config import JobsSettings
-from app.jobs.execution import handler_for
+from app.jobs.execution import handler_for, handoff_line
 from app.jobs.models import JobKind, JobRecord
 from app.jobs.redis_store import RedisJobStore
 from app.schemas.task import TERMINAL_STATUSES, ErrorBody
@@ -38,24 +39,113 @@ async def stop_child(process) -> None:
             await process.wait()
 
 
-async def run_claimed(store: RedisJobStore, record: JobRecord) -> None:
-    child_env = os.environ.copy()
-    for name, value in store.cfg:
+def child_env(cfg: JobsSettings) -> dict[str, str]:
+    env = os.environ.copy()
+    for name, value in cfg:
         if value is None:
-            child_env.pop(name, None)
+            env.pop(name, None)
         else:
-            child_env[name] = (
-                value.get_secret_value() if isinstance(value, SecretStr) else str(value)
-            )
-    process = await asyncio.create_subprocess_exec(
+            env[name] = value.get_secret_value() if isinstance(value, SecretStr) else str(value)
+    return env
+
+
+async def spawn_child(store: RedisJobStore, record: JobRecord) -> Process:
+    """작업 정보를 실행 인자로 넘겨 자식을 새로 기동"""
+    return await asyncio.create_subprocess_exec(
         sys.executable,
         "-m",
         "app.jobs.execution",
         record.identity,
         record.owner,
         str(os.getpid()),
-        env=child_env,
+        env=child_env(store.cfg),
     )
+
+
+async def handoff(process: Process, record: JobRecord) -> bool:
+    """대기 자식의 stdin에 작업 1건 전달. 자식이 이미 종료됐으면 False"""
+    try:
+        process.stdin.write(handoff_line(record.identity, record.owner))
+        await process.stdin.drain()
+    except ConnectionError:
+        return False
+    process.stdin.close()
+    return True
+
+
+class StandbyChildren:
+    """정리 작업용 대기 자식. import와 처리기 적재를 마치고 stdin으로 작업 1건을 기다림"""
+
+    def __init__(self, store: RedisJobStore, size: int) -> None:
+        self.store, self.size = store, size
+        self.children: list[Process] = []
+
+    def alive(self, process: Process) -> bool:
+        if process.returncode is None:
+            return True
+        log.warning(
+            "대기 자식이 작업을 받기 전에 종료",
+            extra={"event": "ai_job_standby_exit", "exit_code": process.returncode},
+        )
+        return False
+
+    async def fill(self) -> None:
+        """종료된 대기 자식을 버리고 설정 수까지 기동. 실패하면 다음 작업 때 다시 시도"""
+        self.children = [process for process in self.children if self.alive(process)]
+        try:
+            while len(self.children) < self.size:
+                self.children.append(
+                    await asyncio.create_subprocess_exec(
+                        sys.executable,
+                        "-m",
+                        "app.jobs.execution",
+                        "--standby",
+                        str(os.getpid()),
+                        env=child_env(self.store.cfg),
+                        stdin=asyncio.subprocess.PIPE,
+                    )
+                )
+        except OSError as exc:
+            log.warning(
+                "대기 자식 기동 실패",
+                extra={"event": "ai_job_standby_spawn_failed", **error_fields(exc)},
+            )
+
+    def take(self) -> Process | None:
+        """먼저 기동한 자식부터 사용, 준비가 끝났을 가능성이 가장 높음"""
+        while self.children:
+            process = self.children.pop(0)
+            if self.alive(process):
+                return process
+        return None
+
+    async def run(self, record: JobRecord) -> None:
+        """대기 자식에 작업을 넘기고 바로 보충. 넘길 자식이 없으면 실행 인자 방식으로 새로 기동"""
+        process = self.take()
+        if process is not None and not await handoff(process, record):
+            await stop_child(process)
+            process = None
+        if process is None:
+            process = await spawn_child(self.store, record)
+        try:
+            await self.fill()
+        except asyncio.CancelledError:
+            # 보충 중 실행기가 종료되면 작업을 받은 자식도 함께 종료
+            await stop_child(process)
+            raise
+        await supervise(self.store, record, process)
+
+    async def close(self) -> None:
+        while self.children:
+            await stop_child(self.children.pop())
+
+
+async def run_claimed(store: RedisJobStore, record: JobRecord) -> None:
+    await supervise(store, record, await spawn_child(store, record))
+
+
+async def supervise(store: RedisJobStore, record: JobRecord, process: Process) -> None:
+    """자식이 끝날 때까지 heartbeat 갱신, 결과 저장 없이 종료되면 WORKER_DEAD로 회수"""
     try:
         while process.returncode is None:
             try:
@@ -108,42 +198,57 @@ async def runner_loop(
     handler_for(store.cfg, kind)  # 실제 구현이 미설정이면 기동을 거부한다.
     stop = stop or asyncio.Event()
     worker = uuid.uuid4().hex
-    while not stop.is_set():
-        record = None
-        try:
-            await store.recover()
-            if stop.is_set():
-                return
-            record = await store.claim(kind, worker, should_stop=stop.is_set)
-            if record:
-                await run_claimed(store, record)
-        except asyncio.CancelledError:
-            if record:
-                await store.finish(
-                    record.identity,
-                    record.owner,
-                    "FAILED",
-                    error=ErrorBody(code=ErrorCode.WORKER_DEAD, message="실행기가 종료되었습니다."),
-                )
+    standby = None
+    if kind == "process" and store.cfg.JOBS_PROCESS_STANDBY:
+        standby = StandbyChildren(store, store.cfg.JOBS_PROCESS_STANDBY)
+    try:
+        if standby:
+            await standby.fill()
+        while not stop.is_set():
+            record = None
+            try:
+                await store.recover()
+                if stop.is_set():
+                    return
+                record = await store.claim(kind, worker, should_stop=stop.is_set)
+                if record and standby:
+                    await standby.run(record)
+                elif record:
+                    await run_claimed(store, record)
+                if record and kind == "process":
+                    continue  # 작업 직후에는 다음 작업이 이미 대기열에 있을 수 있어 바로 확인
+            except asyncio.CancelledError:
+                if record:
+                    await store.finish(
+                        record.identity,
+                        record.owner,
+                        "FAILED",
+                        error=ErrorBody(
+                            code=ErrorCode.WORKER_DEAD, message="실행기가 종료되었습니다."
+                        ),
+                    )
+                    log.warning(
+                        "실행기 종료로 진행 중인 작업 실패 처리",
+                        extra={
+                            **job_fields(record),
+                            "event": "ai_job_runner_stopped",
+                            "result": "failed",
+                            "error_code": str(ErrorCode.WORKER_DEAD),
+                        },
+                    )
+                raise
+            except (RedisError, OSError) as exc:
                 log.warning(
-                    "실행기 종료로 진행 중인 작업 실패 처리",
-                    extra={
-                        **job_fields(record),
-                        "event": "ai_job_runner_stopped",
-                        "result": "failed",
-                        "error_code": str(ErrorCode.WORKER_DEAD),
-                    },
+                    "실행기 연결 실패, 소유권 만료 후 회수",
+                    extra={"event": "ai_job_runner_retry", **error_fields(exc)},
                 )
-            raise
-        except (RedisError, OSError) as exc:
-            log.warning(
-                "실행기 연결 실패, 소유권 만료 후 회수",
-                extra={"event": "ai_job_runner_retry", **error_fields(exc)},
-            )
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=store.cfg.JOBS_POLL_SEC)
-        except TimeoutError:
-            pass
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=store.cfg.JOBS_POLL_SEC)
+            except TimeoutError:
+                pass
+    finally:
+        if standby:
+            await standby.close()
 
 
 async def story_runners(store: RedisJobStore, stop: asyncio.Event) -> None:
