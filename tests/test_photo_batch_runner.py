@@ -111,7 +111,7 @@ async def test_process_runs_before_queued_batches(monkeypatch, size):
 
 @scenario
 async def test_batches_stay_queued_when_setting_disabled(monkeypatch):
-    async with environment() as (cfg, a, b, p):
+    async with environment(EMBED_ON_PHOTOS_READY=False) as (cfg, a, b, p):
         _, order = batch_children(monkeypatch, a)
         await accept(cfg, a, p, ready_request(trip=1))
         await accept(cfg, a, p, process_request(trip=2))

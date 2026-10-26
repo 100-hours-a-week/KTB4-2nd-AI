@@ -30,8 +30,9 @@ class JobsSettings(Settings):
     JOBS_POLL_SEC: float = Field(default=0.5, gt=0)
     # 정리 실행기가 import와 처리기 적재까지 마쳐 두는 대기 자식 수, 0이면 작업마다 새로 기동
     JOBS_PROCESS_STANDBY: int = Field(default=2, ge=0)
-    # true면 업로드 묶음을 미리 임베딩하고 정리에서 저장 벡터를 재사용, false면 정리 때 전부 임베딩
-    EMBED_ON_PHOTOS_READY: bool = False
+    # true면 업로드 묶음을 미리 임베딩하고 정리에서 저장 벡터를 재사용
+    # false면 정리 때 전부 임베딩하는 이전 동작, 되돌리기는 정리 실행기 환경 변수만 변경
+    EMBED_ON_PHOTOS_READY: bool = True
     # 묶음 자식은 lease가 없어 이 시간을 넘기면 실행기가 강제 종료, 빠진 사진은 정리가 임베딩
     JOBS_PHOTO_BATCH_TIMEOUT_SEC: float = Field(default=60, gt=0, allow_inf_nan=False)
     # 실행 전의 선택적 묶음 정보만 만료한다. 최종 process는 전체 목록을 제공한다.
