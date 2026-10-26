@@ -5,12 +5,14 @@
 
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Literal
 
 from redis.asyncio import Redis
 from redis.exceptions import WatchError
 
 from app.core.errors import AppError, ErrorCode
+from app.core.logging import get_logger
 from app.jobs.config import MAX_STORY_CONCURRENCY, JobsSettings
 from app.jobs.models import (
     PHOTOS_READY_MAX_BYTES,
@@ -19,10 +21,26 @@ from app.jobs.models import (
     JobResultEvent,
     PhotoBatchBuffer,
     PhotosReadyMessage,
+    ReadyAttachment,
     TerminalStatus,
 )
 from app.observability.metrics import log_terminal, observe_commands, terminal_commands
 from app.schemas.task import TERMINAL_STATUSES, ErrorBody, Progress, TaskStatus
+
+log = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class PhotoBatchClaim:
+    """실행기가 꺼낸 사진 묶음. enqueued_at은 적재 시각(Redis 시계), 묶음 대기 시간 관측용"""
+
+    identity: str
+    batch_no: int
+    enqueued_at: float
+
+
+def photo_batch_member(identity: str, batch_no: int | str) -> str:
+    return f"{identity}#{batch_no}"
 
 
 class RedisJobStore:
@@ -40,6 +58,9 @@ class RedisJobStore:
     def photo_batches_key(self, identity: str) -> str:
         return self.key("photo_batches:" + identity)
 
+    def photo_batch_queue_key(self) -> str:
+        return self.key("queue:photo_batch")
+
     def slot_keys(self, kind: JobKind) -> list[str]:
         # 첫 키는 기존 단일 실행기와 공유한다. 나머지는 스토리 전용이다.
         base = self.key(f"slot:{kind}")
@@ -52,8 +73,12 @@ class RedisJobStore:
     async def stage_photos(
         self, message: PhotosReadyMessage, request_topic: str
     ) -> Literal["staged", "duplicate", "closed"]:
-        """사본 경로만 공유 보관한다. process 전에는 실행 대기열과 상태를 만들지 않는다."""
+        """사본 경로를 공유 보관하고 묶음 대기열에 적재한다. 실행 대기열과 상태는 만들지 않는다.
+
+        묶음 대기열은 EMBED_ON_PHOTOS_READY와 무관하게 적재한다. 설정은 정리 실행기만 읽는다.
+        """
         key = self.photo_batches_key(message.identity)
+        batch_queue = self.photo_batch_queue_key()
         job = self.record_key(message.identity)
         ignored = self.key("ignored:" + message.identity)
         batch_no = str(message.batch_no)
@@ -94,8 +119,14 @@ class RedisJobStore:
                     payload = buffer.model_dump_json()
                     if len(payload.encode("utf-8")) > PHOTOS_READY_MAX_BYTES:
                         raise ValueError("실행당 사진 묶음 보관 크기 상한 2MiB 초과")
+                    now = await self.now()
                     pipe.multi()
                     pipe.set(key, payload, ex=self.cfg.JOBS_PHOTOS_READY_TTL_SEC)
+                    pipe.zadd(batch_queue, {photo_batch_member(message.identity, batch_no): now})
+                    # process가 오지 않은 실행의 항목은 버퍼와 같은 기한으로 정리한다.
+                    pipe.zremrangebyscore(
+                        batch_queue, "-inf", now - self.cfg.JOBS_PHOTOS_READY_TTL_SEC
+                    )
                     await pipe.execute()
                     return "staged"
                 except WatchError:
@@ -122,12 +153,21 @@ class RedisJobStore:
         latest = self.key(f"latest:{record.kind}:{record.trip_id}")
         sequence = self.key("enqueue_sequence")
         photo_batches = self.photo_batches_key(record.identity)
+        batch_queue = self.photo_batch_queue_key()
         while True:
             async with self.redis.pipeline(transaction=True) as pipe:
                 try:
-                    await pipe.watch(key, ignored, latest, sequence)
+                    await pipe.watch(key, ignored, latest, sequence, photo_batches)
                     if await pipe.exists(key, ignored):
                         return "duplicate"
+                    # 버퍼를 지우면서 아직 꺼내지 않은 묶음 대기열 항목도 함께 지운다.
+                    raw_batches = await pipe.get(photo_batches)
+                    staged = (
+                        list(PhotoBatchBuffer.model_validate_json(raw_batches).batches)
+                        if raw_batches
+                        else []
+                    )
+                    members = [photo_batch_member(record.identity, no) for no in staged]
                     previous_id = await pipe.get(latest)
                     previous = None
                     if previous_id:
@@ -138,14 +178,19 @@ class RedisJobStore:
                     if previous and previous.status not in TERMINAL_STATUSES:
                         # 무시한 실행도 기록한다. Kafka 재전달 때 뒤늦게 실행하지 않는다.
                         pipe.multi()
+                        if members:
+                            pipe.zrem(batch_queue, *members)
                         pipe.set(ignored, "1")
                         pipe.delete(photo_batches)
-                        await pipe.execute()
+                        results = await pipe.execute()
+                        self.log_unprocessed(record, "busy", len(staged), results)
                         return "busy"
                     record.created_at = await self.now()
                     # 같은 시각과 시계 보정에도 등록 순서를 유지한다.
                     order = int(await pipe.get(sequence) or 0) + 1
                     pipe.multi()
+                    if members:
+                        pipe.zrem(batch_queue, *members)
                     pipe.set(sequence, order)
                     pipe.set(key, record.model_dump_json())
                     pipe.set(latest, record.identity)
@@ -158,12 +203,54 @@ class RedisJobStore:
                         terminal_commands(
                             pipe, self.key("metrics:operations"), record, record.created_at
                         )
-                    await pipe.execute()
+                    results = await pipe.execute()
+                    self.log_unprocessed(record, "accepted", len(staged), results)
                     if record.event:
                         log_terminal(record, record.created_at, intake=True)
                     return "accepted"
                 except WatchError:
                     continue
+
+    def log_unprocessed(
+        self, record: JobRecord, outcome: str, staged_count: int, results: list
+    ) -> None:
+        """process 접수 시 실행기가 꺼내지 않은 묶음 수. zrem은 트랜잭션의 첫 명령"""
+        if not staged_count:
+            return
+        log.info(
+            "process 접수 시 미처리 사진 묶음",
+            extra={
+                "event": "ai_photo_batch_unprocessed",
+                "result": outcome,
+                "trip_id": record.trip_id,
+                "job_id": record.execution_id,
+                "execution_id": record.execution_id,
+                "staged_count": staged_count,
+                "unprocessed_count": int(results[0]),
+            },
+        )
+
+    async def claim_batch(self) -> PhotoBatchClaim | None:
+        """가장 먼저 적재한 사진 묶음을 꺼냄. 버퍼가 만료된 묶음은 버리고 다음 항목 확인
+
+        process 등록이 대기열 항목을 함께 지우므로 꺼낸 묶음은 아직 process가 없는 실행
+        """
+        queue = self.photo_batch_queue_key()
+        while True:
+            popped = await self.redis.zpopmin(queue)
+            if not popped:
+                return None
+            member, enqueued_at = popped[0]
+            identity, batch_no = member.rsplit("#", 1)
+            if await self.redis.exists(self.photo_batches_key(identity)):
+                return PhotoBatchClaim(identity, int(batch_no), enqueued_at)
+
+    async def photo_batch(self, identity: str, batch_no: int) -> list[ReadyAttachment] | None:
+        """버퍼에 보관한 묶음의 사진 목록. process 등록이나 만료로 버퍼가 없으면 None"""
+        raw = await self.redis.get(self.photo_batches_key(identity))
+        if raw is None:
+            return None
+        return PhotoBatchBuffer.model_validate_json(raw).batches.get(str(batch_no))
 
     async def claim(
         self, kind: JobKind, worker: str, *, should_stop: Callable[[], bool] | None = None
