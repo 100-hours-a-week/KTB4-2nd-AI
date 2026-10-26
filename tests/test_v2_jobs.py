@@ -687,6 +687,27 @@ async def test_runner_loop_uses_standby_children_only_when_configured(monkeypatc
 
 
 @scenario
+async def test_process_runner_takes_next_job_without_poll_wait(monkeypatch):
+    async with environment() as (cfg, a, b, p):
+        cfg.JOBS_POLL_SEC = 5
+        fake_children(monkeypatch, a)
+        for trip in (77, 78):
+            await RequestReceiver(a, p).accept(message(cfg, process_request(trip=trip)))
+        identities = [(await b.latest(trip, "process")).identity for trip in (77, 78)]
+        stop = asyncio.Event()
+        task = asyncio.create_task(runner_loop(a, "process", stop))
+
+        async def completed() -> None:
+            while [(await b.get(i)).status for i in identities] != ["COMPLETED"] * 2:
+                await asyncio.sleep(0.01)
+
+        # 두 작업 사이에 폴링 대기(5초)가 끼면 시간 초과
+        await asyncio.wait_for(completed(), timeout=2)
+        stop.set()
+        await asyncio.wait_for(task, timeout=3)
+
+
+@scenario
 async def test_handoff_reports_exited_child():
     """종료된 자식의 stdin 쓰기가 조용히 버려지지 않고 실패로 드러나는지"""
     record = SimpleNamespace(identity="process:77:x", owner="worker:1")

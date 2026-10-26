@@ -215,6 +215,8 @@ async def runner_loop(
                     await standby.run(record)
                 elif record:
                     await run_claimed(store, record)
+                if record and kind == "process":
+                    continue  # 작업 직후에는 다음 작업이 이미 대기열에 있을 수 있어 바로 확인
             except asyncio.CancelledError:
                 if record:
                     await store.finish(
