@@ -13,7 +13,14 @@ from app.jobs.models import StoryBlock, StoryMessage, StoryResult, Verification
 from app.jobs.sync_bridge import run_sync
 from app.search.context import ModelUnavailable
 from app.story.prompts import StoryDraft, messages, response_format
-from app.story.selection import failure, filter_candidates, select
+from app.story.selection import (
+    duplicate_threshold,
+    failure,
+    filter_candidates,
+    select,
+    similarities,
+    unit_vectors,
+)
 
 log = get_logger(__name__)
 
@@ -31,6 +38,7 @@ class StoryOptions:
     image_budget: int = 10
     blur_min: float = 80.0
     phash_max: int = 4
+    dedupe_z: float = 1.0
     max_tokens: int = 2048
 
 
@@ -154,8 +162,13 @@ async def run(request: dict, reporter, ctx: StoryContext, options: StoryOptions)
             vectors = await ctx.vectors.fetch(ids)
             fields["missing"] = len(set(ids) - set(vectors))
         with stage("select", parent="selecting", budget=options.image_budget) as fields:
-            selected = select(groups, vectors, budget=options.image_budget)
+            units = unit_vectors(groups, vectors)
+            sims = similarities(units)
+            threshold = duplicate_threshold(sims, options.dedupe_z)
+            selected = select(groups, units, sims, budget=options.image_budget, threshold=threshold)
             fields["selected"] = len(selected)
+            fields["unfilled"] = min(options.image_budget, len(ids)) - len(selected)
+            fields["duplicate_threshold"] = None if threshold is None else round(threshold, 4)
         await reporter.check_cancel()
         urls = []
         with stage("urls", parent="selecting", count=len(selected)):

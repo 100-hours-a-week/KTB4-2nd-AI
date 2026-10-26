@@ -2,6 +2,7 @@
 
 import io
 import json
+import logging
 from contextlib import nullcontext
 from datetime import datetime
 from unittest.mock import AsyncMock
@@ -11,10 +12,18 @@ import pytest
 from PIL import Image
 
 from app.core.errors import ErrorCode, PipelineCancelled, PipelineError
+from app.core.tracing import end_trace, start_trace
 from app.infra.vlm import VLMUnavailable
 from app.story.pipeline import StoryContext, StoryOptions, finalize, run, validate_request
 from app.story.prompts import StoryDraft, response_format
-from app.story.selection import allocate, select
+from app.story.selection import (
+    allocate,
+    duplicate_threshold,
+    select,
+    similarities,
+    unit_vectors,
+)
+from tests.observability_helpers import events
 from tests.test_v2_jobs import scenario, story_request
 
 
@@ -92,12 +101,120 @@ def test_allocation_invariants():
             assert all(1 <= v <= c for v, c in zip(result, counts, strict=True))
 
 
+def photos(*ids):
+    p = validate_request(story_request()).places[0].attachments[0]
+    return [p.model_copy(update={"trip_attachment_id": i}) for i in ids]
+
+
+def picks(groups, vectors, budget, threshold):
+    units = unit_vectors(groups, vectors)
+    sims = similarities(units)
+    return select(groups, units, sims, budget=budget, threshold=threshold)
+
+
+def picked(groups, vectors, budget, threshold):
+    return [p.trip_attachment_id for _, p in picks(groups, vectors, budget, threshold)]
+
+
+def threshold_of(groups, vectors, z):
+    return duplicate_threshold(similarities(unit_vectors(groups, vectors)), z)
+
+
 def test_mean_embedding_selection():
-    message = validate_request(story_request())
-    p = message.places[0].attachments[0]
-    groups = {5001: [p.model_copy(update={"trip_attachment_id": i}) for i in range(1, 4)]}
+    groups = {5001: photos(1, 2, 3)}
     vectors = {1: np.array([1.0, 0]), 2: np.array([0.9, 0.1]), 3: np.array([0, 1.0])}
-    assert select(groups, vectors, budget=1)[0][1].trip_attachment_id == 2
+    assert picked(groups, vectors, 1, None) == [2]
+
+
+def test_duplicate_threshold_uses_only_same_place_pairs():
+    groups = {5001: photos(1, 2, 3), 5002: photos(4, 5), 5003: photos(6)}
+    raw = {1: [1.0, 0], 2: [1.0, 0.1], 3: [0, 1.0], 4: [1.0, 0], 5: [1.0, 1.0], 6: [1.0, 0]}
+    vectors = {k: np.array(v) for k, v in raw.items()}
+    unit = {k: v / np.linalg.norm(v) for k, v in vectors.items()}
+    # 장소가 다른 쌍(예: 1과 4, 유사도 1.0)은 넣지 않는다.
+    pairs = np.array([unit[a] @ unit[b] for a, b in ((1, 2), (1, 3), (2, 3), (4, 5))])
+    assert threshold_of(groups, vectors, 1.0) == pytest.approx(pairs.mean() + pairs.std())
+    assert threshold_of(groups, vectors, 0.0) == pytest.approx(pairs.mean())
+
+
+def test_duplicate_threshold_without_same_place_pairs_is_none():
+    groups = {5001: photos(1), 5002: photos(2)}
+    vectors = {1: np.array([1.0, 0]), 2: np.array([1.0, 0])}
+    assert threshold_of(groups, vectors, 1.0) is None
+
+
+def test_selection_skips_photo_too_similar_to_chosen():
+    groups = {5001: photos(1, 2, 3)}
+    # 1과 2는 거의 같은 사진(유사도 약 0.99), 평균에 가까운 순서는 2, 1, 3
+    vectors = {1: np.array([1.0, 0]), 2: np.array([0.99, 0.14]), 3: np.array([0.6, 0.8])}
+    assert sorted(picked(groups, vectors, 2, None)) == [1, 2]
+    assert sorted(picked(groups, vectors, 2, 0.95)) == [2, 3]
+
+
+def test_selection_leaves_slot_empty_when_only_duplicates_remain():
+    groups = {5001: photos(1, 2)}
+    vectors = {1: np.array([1.0, 0]), 2: np.array([0.99, 0.14])}
+    # 후보가 2장이면 평균 근접도가 수학적으로 같아 어느 쪽이 먼저인지는 반올림으로 갈린다.
+    assert len(picked(groups, vectors, 2, 0.95)) == 1
+
+
+def test_similarity_equal_to_threshold_counts_as_duplicate():
+    groups = {5001: photos(1, 2)}
+    vectors = {1: np.array([1.0, 0]), 2: np.array([0, 1.0])}
+    assert len(picked(groups, vectors, 2, 0.0)) == 1
+    assert len(picked(groups, vectors, 2, 1e-9)) == 2
+
+
+def test_threshold_and_selection_compare_the_same_similarity_values():
+    # 쌍이 하나면 기준이 그 쌍의 유사도와 같다. 기준 계산과 선택이 다른 연산으로 유사도를 구하면
+    # 마지막 자리 반올림 때문에 판정이 뒤바뀌므로, 고차원 float32 벡터로 같은 값을 쓰는지 본다.
+    rng = np.random.default_rng(7)
+    groups = {5001: photos(1, 2)}
+    for _ in range(200):
+        a, b = rng.standard_normal((2, 2048)).astype(np.float32)
+        vectors = {1: a, 2: b}
+        assert len(picked(groups, vectors, 2, threshold_of(groups, vectors, 1.0))) == 1
+
+
+def test_selection_compares_with_every_chosen_photo():
+    # 평균에 가까운 순서는 3, 1, 2, 4다.
+    # 2는 처음 고른 3과 닮았고(0.986) 직전에 고른 1과는 다르다(0.684).
+    groups = {5001: photos(1, 2, 3, 4)}
+    raw = {1: [0.5, 1.0, 0.1], 2: [0.9, 0.3, 0.4], 3: [0.8, 0.4, 0.5], 4: [0.0, 0.8, 0.5]}
+    vectors = {k: np.array(v) for k, v in raw.items()}
+    assert sorted(picked(groups, vectors, 4, 0.9)) == [1, 3, 4]
+
+
+def test_selection_ignores_skipped_photos():
+    # 평균에 가까운 순서는 2, 1, 3, 4다. 1은 2와 닮아 건너뛴다(0.931). 3은 건너뛴 1과 닮았지만(0.95)
+    # 고른 2와는 다르므로(0.878) 고른다. 4는 2와 닮아 건너뛴다(0.971).
+    groups = {5001: photos(1, 2, 3, 4)}
+    raw = {1: [0.5, 0.6, 0.9], 2: [0.4, 0.9, 0.6], 3: [0.8, 0.5, 0.7], 4: [0.3, 0.5, 0.2]}
+    vectors = {k: np.array(v) for k, v in raw.items()}
+    assert sorted(picked(groups, vectors, 4, 0.9)) == [2, 3]
+
+
+def test_unfilled_slot_is_not_moved_to_another_place():
+    # 예산 4장은 2장, 2장으로 배분된다. 5001의 두 장은 거의 같아 한 장만 고르고,
+    # 남은 자리를 5002로 넘기지 않는다.
+    groups = {5001: photos(1, 2), 5002: photos(3, 4, 5)}
+    raw = {1: [1.0, 0, 0], 2: [0.99, 0.14, 0], 3: [0, 1.0, 0], 4: [0, 0, 1.0], 5: [0, 0.7, 0.7]}
+    vectors = {k: np.array(v) for k, v in raw.items()}
+    assert allocate([2, 3], 4) == [2, 2]
+    counts = {}
+    for place_id, _ in picks(groups, vectors, 4, 0.9):
+        counts[place_id] = counts.get(place_id, 0) + 1
+    assert counts == {5001: 1, 5002: 2}
+
+
+@pytest.mark.parametrize("value", [-1, float("nan"), float("inf")])
+def test_duplicate_setting_rejects_invalid_values(value):
+    from pydantic import ValidationError
+
+    from app.jobs.config import JobsSettings
+
+    with pytest.raises(ValidationError):
+        JobsSettings(_env_file=None, API_KEY="test", STORY_DEDUPE_Z=value)
 
 
 @scenario
@@ -113,6 +230,50 @@ async def test_one_vlm_call_and_code_derived_metadata():
     assert result["blocks"][1]["day_label"] == "2일차, 공원"
     assert result["verification"] == {"passed": True, "retry_count": 0}
     assert reporter.report.call_args.args == ("VERIFYING", 4, 4)
+
+
+def request_near_duplicates():
+    request = request_two_places()
+    request["places"][0]["attachments"] += [
+        {"trip_attachment_id": i, "analyze_storage_key": key, "taken_at": taken}
+        for i, key, taken in (
+            (103, "c.jpg", "2026-10-12T06:00:01+09:00"),
+            (104, "d.jpg", "2026-10-12T07:00:00+09:00"),
+        )
+    ]
+    return request
+
+
+@pytest.mark.parametrize(
+    "dedupe_z,expected", [(1.0, [103, 104, 102]), (100.0, [101, 103, 104, 102])]
+)
+@scenario
+async def test_story_skips_near_duplicate_photo_by_trip_threshold(dedupe_z, expected, caplog):
+    ctx = context()
+    # 101과 103은 거의 같은 사진이다. 같은 장소 쌍 유사도의 평균 + 1.0 × 표준편차는 약 0.92다.
+    ctx.vectors.fetch.return_value = {
+        101: np.array([1.0, 0]),
+        102: np.array([0, 1.0]),
+        103: np.array([0.999, 0.04]),
+        104: np.array([0.6, 0.8]),
+    }
+    ctx.vlm.chat.return_value = draft(expected)
+    caplog.set_level(logging.INFO)
+    _, token = start_trace("story", emit_stage_logs=True)
+    try:
+        options = StoryOptions(dedupe_z=dedupe_z)
+        result = await run(request_near_duplicates(), AsyncMock(), ctx, options)
+    finally:
+        end_trace(token)
+    schema = response_format(expected)["json_schema"]["schema"]
+    assert ctx.vlm.chat.call_args.kwargs["response_format"]["json_schema"]["schema"] == schema
+    assert [b["trip_attachment_id"] for b in result["blocks"]] == expected
+    selecting = next(r for r in events(caplog, "ai_stage") if r.stage == "selecting.select")
+    # 예산 10장 가운데 후보 4장이 배정되고, 건너뛴 한 장만큼 비운다.
+    assert selecting.selected == len(expected)
+    assert selecting.unfilled == 4 - len(expected)
+    if dedupe_z == 1.0:
+        assert selecting.duplicate_threshold == pytest.approx(0.9248, abs=1e-4)
 
 
 @scenario
@@ -301,6 +462,22 @@ async def test_handler_cleans_clients_after_initialization_failure(monkeypatch):
         await handler.run(story_request(), AsyncMock())
     vlm.__aexit__.assert_awaited_once()
     vectors.aclose.assert_awaited_once()
+
+
+@scenario
+async def test_handler_passes_duplicate_setting(monkeypatch):
+    from app.jobs.config import JobsSettings
+    from app.story import handler
+
+    cfg = JobsSettings(_env_file=None, API_KEY="test", IMAGE_SOURCE="local", STORY_DEDUPE_Z=1.5)
+    monkeypatch.setattr(handler, "JobsSettings", lambda: cfg)
+    monkeypatch.setattr(handler.VllmClient, "from_settings", lambda _: AsyncMock())
+    monkeypatch.setattr(handler, "AsyncQdrantVectors", lambda *args: AsyncMock())
+    monkeypatch.setattr(handler.S3ImageResolver, "create", AsyncMock(return_value=AsyncMock()))
+    pipeline = AsyncMock(return_value={})
+    monkeypatch.setattr(handler, "run_pipeline", pipeline)
+    await handler.run(story_request(), AsyncMock())
+    assert pipeline.call_args.args[3].dedupe_z == 1.5
 
 
 @scenario
