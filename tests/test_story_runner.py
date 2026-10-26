@@ -17,7 +17,7 @@ STORY_RESULT = {
             "order_number": 1,
             "trip_place_id": 5001,
             "trip_attachment_id": 101,
-            "day_label": "1째 날, 해변",
+            "day_label": "1일차, 해변",
             "detail_summary": "해변 사진",
             "memo": "해변의 풍경을 담았다.",
         }
