@@ -1,6 +1,7 @@
 """v2 정리 작업을 기존 Qwen 파이프라인에 연결한다."""
 
-from contextlib import ExitStack
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack, contextmanager
 
 import httpx
 from pydantic import ValidationError
@@ -9,13 +10,16 @@ from app.core.errors import ErrorCode, PipelineCancelled, PipelineError
 from app.core.logging import error_fields, get_logger
 from app.core.tracing import current_trace, stage
 from app.embedding.client import MODEL_VERSION, EmbeddingUnavailable
+from app.infra.images import ImageSource
 from app.infra.qdrant import QdrantStore
 from app.jobs.config import JobsSettings
 from app.jobs.execution import JobReporter
 from app.jobs.models import ProcessMessage
 from app.jobs.sync_bridge import run_sync
 from app.observability import datasets
+from app.pipeline.batch import embed_batch
 from app.pipeline.bootstrap import build_context, build_engine, build_images, wait_for_qdrant
+from app.pipeline.context import PipelineContext
 from app.pipeline.run import run as run_pipeline
 
 log = get_logger(__name__)
@@ -88,34 +92,50 @@ def evaluation_enabled(cfg: JobsSettings) -> bool:
         return False
 
 
+@contextmanager
+def open_context(
+    cfg: JobsSettings,
+    check: Callable[[], None] = lambda: None,
+    wrap_images: Callable[[ImageSource], ImageSource] | None = None,
+) -> Iterator[PipelineContext]:
+    """엔진, 이미지, Qdrant를 조립한 컨텍스트. 정리와 사진 묶음이 공유, 나가면 역순으로 해제"""
+    with ExitStack() as resources:
+        engine = build_engine(cfg)
+        resources.callback(engine.close)
+        check()
+        images = build_images(cfg)
+        if close := getattr(images, "close", None):
+            resources.callback(close)
+        if wrap_images:
+            images = wrap_images(images)
+        wait_for_qdrant(cfg.QDRANT_URL)
+        check()
+        vectors = QdrantStore(cfg.QDRANT_URL, engine.model_version, engine.dim)
+        resources.callback(vectors.close)
+        yield build_context(
+            cfg,
+            engine,
+            images=images,
+            qdrant=vectors,
+            reuse_vectors=cfg.EMBED_ON_PHOTOS_READY,
+        )
+
+
 def _run(request: ProcessMessage, cfg: JobsSettings, progress, cancelled, reports=None) -> dict:
     def check():
         if cancelled():
             raise PipelineCancelled()
 
+    hashes: dict = {}
+
+    def fingerprint(images: ImageSource) -> ImageSource:
+        if reports is not None and evaluation_enabled(cfg):
+            return FingerprintingImages(images, request, hashes)
+        return images
+
     try:
         check()
-        with ExitStack() as resources:
-            engine = build_engine(cfg)
-            resources.callback(engine.close)
-            check()
-            images = build_images(cfg)
-            if close := getattr(images, "close", None):
-                resources.callback(close)
-            hashes: dict = {}
-            if reports is not None and evaluation_enabled(cfg):
-                images = FingerprintingImages(images, request, hashes)
-            wait_for_qdrant(cfg.QDRANT_URL)
-            check()
-            vectors = QdrantStore(cfg.QDRANT_URL, engine.model_version, engine.dim)
-            resources.callback(vectors.close)
-            ctx = build_context(
-                cfg,
-                engine,
-                images=images,
-                qdrant=vectors,
-                reuse_vectors=cfg.EMBED_ON_PHOTOS_READY,
-            )
+        with open_context(cfg, check, fingerprint) as ctx:
             result = run_pipeline(request, ctx, progress, cancelled).model_dump(mode="json")
             if hashes:
                 reports.extend(auto_evaluate(result, hashes, cfg))
@@ -180,3 +200,17 @@ async def run(request: dict, reporter: JobReporter) -> dict:
         # 결과 저장이 늦어지지 않도록, 그리고 취소된 작업을 기록하지 않도록 저장 뒤로 미룬다.
         trace.evaluations.extend(reports)
     return result
+
+
+def embed_photos(photos: dict[int, str]) -> list[int]:
+    """업로드 사진 묶음 임베딩. 정리 실행기의 묶음 자식이 photos_ready 묶음마다 호출
+
+    {사진 ID: 사본 키}를 받아 Qdrant에 저장하고 저장한 사진 ID를 반환. 실패는 예외로 올림
+    """
+    cfg = JobsSettings()
+    if cfg.FAKE_PIPELINE or cfg.EMBED_MODEL != MODEL_VERSION:
+        raise _failure(
+            ErrorCode.MODEL_NOT_READY, "v2 정리 실행기는 Qwen HTTP 임베딩 설정이 필요합니다."
+        )
+    with open_context(cfg) as ctx:
+        return embed_batch(photos, ctx)

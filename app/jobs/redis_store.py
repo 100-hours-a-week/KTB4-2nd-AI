@@ -38,6 +38,11 @@ class PhotoBatchClaim:
     batch_no: int
     enqueued_at: float
 
+    @property
+    def trip_id(self) -> int:
+        # identity는 {kind}:{trip_id}:{execution_id 해시}
+        return int(self.identity.split(":")[1])
+
 
 def photo_batch_member(identity: str, batch_no: int | str) -> str:
     return f"{identity}#{batch_no}"

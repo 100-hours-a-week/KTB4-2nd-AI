@@ -32,6 +32,8 @@ class JobsSettings(Settings):
     JOBS_PROCESS_STANDBY: int = Field(default=2, ge=0)
     # true면 업로드 묶음을 미리 임베딩하고 정리에서 저장 벡터를 재사용, false면 정리 때 전부 임베딩
     EMBED_ON_PHOTOS_READY: bool = False
+    # 묶음 자식은 lease가 없어 이 시간을 넘기면 실행기가 강제 종료, 빠진 사진은 정리가 임베딩
+    JOBS_PHOTO_BATCH_TIMEOUT_SEC: float = Field(default=60, gt=0, allow_inf_nan=False)
     # 실행 전의 선택적 묶음 정보만 만료한다. 최종 process는 전체 목록을 제공한다.
     JOBS_PHOTOS_READY_TTL_SEC: int = Field(default=7 * 86400, gt=0)
     JOBS_FAKE_PIPELINE: bool = False

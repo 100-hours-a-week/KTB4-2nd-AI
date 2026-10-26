@@ -127,6 +127,16 @@ async def test_photos_ready_setting_controls_vector_reuse(configured, monkeypatc
     assert seen == [enabled]
 
 
+def test_embed_photos_stores_batch_and_closes_engine(configured):
+    cfg, engine = configured
+    assert process_handler.embed_photos({101: "trips/77/a.jpg"}) == [101]
+    assert engine.batches == [1] and engine.closed
+    cfg.FAKE_PIPELINE = True
+    with pytest.raises(PipelineError) as error:
+        process_handler.embed_photos({101: "trips/77/a.jpg"})
+    assert error.value.code == ErrorCode.MODEL_NOT_READY and engine.batches == [1]
+
+
 @pytest.mark.parametrize("mutation", ["duplicate", "period", "missing"])
 @scenario
 async def test_invalid_input_precedes_external_io(configured, mutation):

@@ -8,7 +8,6 @@ import signal
 import sys
 import uuid
 from contextlib import asynccontextmanager
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import fakeredis
@@ -27,7 +26,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 
 from app.core.errors import AppError, PipelineCancelled
 from app.jobs.config import JobsSettings
-from app.jobs.execution import JobReporter, execute, handler_for
+from app.jobs.execution import JobReporter, execute, handler_for, handoff_line
 from app.jobs.kafka import (
     Incoming,
     InvalidMessage,
@@ -710,12 +709,12 @@ async def test_process_runner_takes_next_job_without_poll_wait(monkeypatch):
 @scenario
 async def test_handoff_reports_exited_child():
     """종료된 자식의 stdin 쓰기가 조용히 버려지지 않고 실패로 드러나는지"""
-    record = SimpleNamespace(identity="process:77:x", owner="worker:1")
+    line = handoff_line("process", identity="process:77:x", owner="worker:1")
     exited = await asyncio.create_subprocess_exec(
         sys.executable, "-c", "pass", stdin=asyncio.subprocess.PIPE
     )
     await exited.wait()
-    assert await handoff(exited, record) is False
+    assert await handoff(exited, line) is False
 
 
 @pytest.mark.skipif(
