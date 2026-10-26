@@ -5,6 +5,7 @@ import json
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import replace
+from datetime import date
 
 import httpx
 import pytest
@@ -15,7 +16,7 @@ from app.core.config import Settings
 from app.infra.vlm import VLMUnavailable
 from app.main import create_app
 from app.schemas.query import ParseRequest, ParseResponse, SearchHit, SearchResponse
-from app.search import prompts, regions
+from app.search import dates, prompts, regions
 from app.search.context import InvalidModelOutput, ModelUnavailable, SearchOptions
 from app.search.mock import MockEmbedder, MockImages, MockVLM, create_mock_context
 
@@ -573,6 +574,10 @@ def test_response_extra_fields_remain_forbidden(model, payload):
     assert error.value.errors()[0]["type"] == "extra_forbidden"
 
 
+# 상대 날짜가 없을 때의 모델 출력, null 대신 unit none
+NO_RELATIVE = {"unit": "none", "offset": None, "weekday": None, "season": None}
+
+
 @pytest.mark.parametrize(
     "output",
     [
@@ -583,6 +588,7 @@ def test_response_extra_fields_remain_forbidden(model, payload):
                 "intent": "SEARCH",
                 "date_from": None,
                 "date_to": None,
+                "relative_date": NO_RELATIVE,
                 "region_names": None,
                 "visual_query": None,
                 "parsed": True,
@@ -593,6 +599,28 @@ def test_response_extra_fields_remain_forbidden(model, payload):
                 "intent": "SEARCH",
                 "date_from": "2026/09/01",
                 "date_to": None,
+                "relative_date": NO_RELATIVE,
+                "region_names": None,
+                "visual_query": None,
+            }
+        ),
+        # 실모델이 null만 고르던 형식, 스키마와 같이 null 불가
+        json.dumps(
+            {
+                "intent": "SEARCH",
+                "date_from": None,
+                "date_to": None,
+                "relative_date": None,
+                "region_names": None,
+                "visual_query": None,
+            }
+        ),
+        json.dumps(
+            {
+                "intent": "SEARCH",
+                "date_from": None,
+                "date_to": None,
+                "relative_date": {"unit": "decade", "offset": -1, "weekday": None, "season": None},
                 "region_names": None,
                 "visual_query": None,
             }
@@ -624,6 +652,7 @@ def model_output(**updates):
         "intent": "SEARCH",
         "date_from": None,
         "date_to": None,
+        "relative_date": NO_RELATIVE,
         "region_names": None,
         "visual_query": "바다",
     }
@@ -745,6 +774,117 @@ def test_parse_output_clears_only_invalid_dates(date_from, date_to, expected):
     result = prompts.parse_output(
         model_output(date_from=date_from, date_to=date_to, region_names=["속초"]),
         PARSE_REQUEST,
+    )
+    dumped = result.model_dump(mode="json")
+    assert (dumped["date_from"], dumped["date_to"]) == expected
+    assert dumped["region_names"] == ["강원특별자치도 속초시"] and dumped["visual_query"] == "바다"
+    assert dumped["parsed"] is True
+
+
+def test_relative_date_format_matches_model():
+    schema = prompts.PARSE_RESPONSE_FORMAT["json_schema"]["schema"]["properties"]["relative_date"]
+    fields = set(dates.RelativeDate.model_fields)
+    assert set(schema["required"]) == set(schema["properties"]) == fields
+    # null을 허용하면 실모델이 상대 날짜가 있어도 null만 골라(10/26) 항상 객체, 없음은 unit none
+    assert schema["type"] == "object"
+    assert "none" in schema["properties"]["unit"]["enum"]
+
+
+def test_relative_date_none_has_no_range():
+    assert dates.resolve_relative_date(relative("none"), MONDAY) is None
+
+
+def relative(unit, offset=None, weekday=None, season=None):
+    return dates.RelativeDate(unit=unit, offset=offset, weekday=weekday, season=season)
+
+
+# 검색 테스트셋 reference_date
+MONDAY = date(2026, 9, 14)
+SUNDAY = date(2026, 10, 11)
+
+
+@pytest.mark.parametrize(
+    "expr,today,expected",
+    [
+        (relative("day", 0), MONDAY, ("2026-09-14", "2026-09-14")),
+        (relative("day", -1), MONDAY, ("2026-09-13", "2026-09-13")),
+        (relative("day", -3), MONDAY, ("2026-09-11", "2026-09-11")),
+        # 지난주, M0에서 모델이 9/4, 9/2로 계산한 지난주 금요일과 목요일
+        (relative("week", -1), MONDAY, ("2026-09-07", "2026-09-13")),
+        (relative("week", -1, "FRI"), MONDAY, ("2026-09-11", "2026-09-11")),
+        (relative("week", -1, "THU"), MONDAY, ("2026-09-10", "2026-09-10")),
+        # 일요일 기준일의 이번 주와 지난주, 한 주는 월요일 시작
+        (relative("week", 0), SUNDAY, ("2026-10-05", "2026-10-11")),
+        (relative("week", -1), SUNDAY, ("2026-09-28", "2026-10-04")),
+        # 요일만 쓰면 오늘을 포함해 가장 최근의 그 요일
+        (relative("weekday", weekday="FRI"), MONDAY, ("2026-09-11", "2026-09-11")),
+        (relative("weekday", weekday="MON"), MONDAY, ("2026-09-14", "2026-09-14")),
+        # 1월의 지난달, 윤년 2월
+        (relative("month", -1), date(2026, 1, 15), ("2025-12-01", "2025-12-31")),
+        (relative("month", -1), date(2028, 3, 10), ("2028-02-01", "2028-02-29")),
+        (relative("year", -1), MONDAY, ("2025-01-01", "2025-12-31")),
+        # 연도 없는 계절은 오늘 이전에 시작한 가장 최근, 겨울은 다음 해 2월 말일까지
+        (relative("season", season="SUMMER"), MONDAY, ("2026-06-01", "2026-08-31")),
+        (relative("season", season="WINTER"), MONDAY, ("2025-12-01", "2026-02-28")),
+        (relative("season", season="WINTER"), date(2026, 1, 15), ("2025-12-01", "2026-02-28")),
+        (relative("season", -1, season="WINTER"), date(2028, 9, 1), ("2027-12-01", "2028-02-29")),
+    ],
+)
+def test_resolve_relative_date(expr, today, expected):
+    start, end = dates.resolve_relative_date(expr, today)
+    assert (start.isoformat(), end.isoformat()) == expected
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        relative("day"),
+        relative("week", weekday="FRI"),
+        relative("weekday", -1),
+        relative("month"),
+        relative("year"),
+        relative("season", -1),
+        # date 범위를 넘는 offset
+        relative("day", -(10**9)),
+        relative("year", -(10**9)),
+    ],
+)
+def test_resolve_relative_date_rejects_missing_fields_and_overflow(expr):
+    assert dates.resolve_relative_date(expr, MONDAY) is None
+
+
+SEPTEMBER_REQUEST = ParseRequest(query="지난주 금요일 속초 바다", reference_date="2026-09-14")
+
+
+def test_parse_output_prefers_relative_date_over_model_dates():
+    result = prompts.parse_output(
+        model_output(
+            date_from="2026-09-04",
+            date_to="2026-09-04",
+            relative_date={"unit": "week", "offset": -1, "weekday": "FRI", "season": None},
+        ),
+        SEPTEMBER_REQUEST,
+    )
+    assert (result.date_from, result.date_to) == (date(2026, 9, 11), date(2026, 9, 11))
+
+
+@pytest.mark.parametrize(
+    "relative_date,expected",
+    [
+        # 이번 주는 오늘까지
+        (
+            {"unit": "week", "offset": 0, "weekday": None, "season": None},
+            ("2026-09-14", "2026-09-14"),
+        ),
+        # 오늘 뒤에 시작하는 다음 주
+        ({"unit": "week", "offset": 1, "weekday": None, "season": None}, (None, None)),
+        # 단위에 필요한 offset 없음
+        ({"unit": "week", "offset": None, "weekday": "FRI", "season": None}, (None, None)),
+    ],
+)
+def test_parse_output_clears_only_invalid_relative_dates(relative_date, expected):
+    result = prompts.parse_output(
+        model_output(relative_date=relative_date, region_names=["속초"]), SEPTEMBER_REQUEST
     )
     dumped = result.model_dump(mode="json")
     assert (dumped["date_from"], dumped["date_to"]) == expected
