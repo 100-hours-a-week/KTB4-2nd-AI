@@ -8,6 +8,7 @@ import signal
 import sys
 import uuid
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import fakeredis
@@ -37,7 +38,7 @@ from app.jobs.kafka import (
 from app.jobs.mock import run as mock_run
 from app.jobs.models import MESSAGE, RESULT_MAX_BYTES, JobResultEvent
 from app.jobs.redis_store import RedisJobStore
-from app.jobs.runner import run_claimed
+from app.jobs.runner import StandbyChildren, handoff, run_claimed, runner_loop
 from app.schemas.task import ErrorBody
 from app.v2_main import create_app
 
@@ -569,6 +570,148 @@ def test_real_handler_not_silently_replaced_by_mock():
     cfg = JobsSettings(_env_file=None, API_KEY="test", IMAGE_SOURCE="local")
     with pytest.raises(ValueError):
         handler_for(cfg, "process")
+
+
+class FakeStdin:
+    def __init__(self) -> None:
+        self.data, self.closed, self.broken = b"", asyncio.Event(), False
+
+    def write(self, data: bytes) -> None:
+        self.data += data
+
+    async def drain(self) -> None:
+        if self.broken:
+            raise BrokenPipeError
+
+    def close(self) -> None:
+        self.closed.set()
+
+
+class FakeChild:
+    """작업을 받으면 mock 결과를 저장하고 종료. 대기 자식은 stdin, 나머지는 실행 인자로 받음"""
+
+    def __init__(self, store, args, piped: bool) -> None:
+        self.store, self.args, self.returncode = store, args, None
+        self.stdin = FakeStdin() if piped else None
+
+    async def wait(self) -> int:
+        if self.returncode is None and self.stdin:
+            await self.stdin.closed.wait()
+        if self.returncode is None:
+            if self.stdin:
+                job = json.loads(self.stdin.data)
+                identity, owner = job["identity"], job["owner"]
+            else:
+                identity, owner = self.args[3], self.args[4]
+            record = await self.store.get(identity)
+            result = await mock_run(record.request, AsyncMock())
+            await self.store.finish(identity, owner, "COMPLETED", result=result)
+            self.returncode = 0
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.returncode = -15
+        if self.stdin:
+            self.stdin.closed.set()
+
+    def kill(self) -> None:
+        self.returncode = -9
+
+
+def fake_children(monkeypatch, store) -> list[FakeChild]:
+    spawned = []
+
+    async def spawn(*args, **kwargs):
+        spawned.append(FakeChild(store, args, "stdin" in kwargs))
+        return spawned[-1]
+
+    monkeypatch.setattr("app.jobs.runner.asyncio.create_subprocess_exec", spawn)
+    return spawned
+
+
+@scenario
+async def test_standby_child_receives_job_and_is_replaced(monkeypatch):
+    async with environment() as (cfg, a, b, p):
+        spawned = fake_children(monkeypatch, a)
+        await RequestReceiver(a, p).accept(message(cfg, process_request()))
+        standby = StandbyChildren(a, 2)
+        await standby.fill()
+        job = await a.claim("process", "worker")
+        await standby.run(job)
+        assert all(child.args[3] == "--standby" for child in spawned)
+        handed = json.loads(spawned[0].stdin.data)
+        assert (handed["identity"], handed["owner"]) == (job.identity, job.owner)
+        # 먼저 기동한 자식을 쓰고 바로 하나를 보충
+        assert len(spawned) == 3 and standby.children == spawned[1:]
+        assert (await b.get(job.identity)).status == "COMPLETED"
+
+
+@pytest.mark.parametrize("failure", ["exited", "broken_pipe"])
+@scenario
+async def test_unusable_standby_child_falls_back_to_new_process(monkeypatch, failure):
+    async with environment() as (cfg, a, b, p):
+        spawned = fake_children(monkeypatch, a)
+        await RequestReceiver(a, p).accept(message(cfg, process_request()))
+        standby = StandbyChildren(a, 1)
+        await standby.fill()
+        if failure == "exited":
+            spawned[0].returncode = -9
+        else:
+            spawned[0].stdin.broken = True
+        job = await a.claim("process", "worker")
+        await standby.run(job)
+        assert spawned[1].args[3:5] == (job.identity, job.owner)
+        assert standby.children == [spawned[2]]
+        assert (await b.get(job.identity)).status == "COMPLETED"
+
+
+@pytest.mark.parametrize("size", [0, 2])
+@scenario
+async def test_runner_loop_uses_standby_children_only_when_configured(monkeypatch, size):
+    async with environment(JOBS_PROCESS_STANDBY=size) as (cfg, a, b, p):
+        spawned = fake_children(monkeypatch, a)
+        await RequestReceiver(a, p).accept(message(cfg, process_request()))
+        identity = (await b.latest(77, "process")).identity
+        stop = asyncio.Event()
+        task = asyncio.create_task(runner_loop(a, "process", stop))
+        while (await b.get(identity)).status != "COMPLETED":
+            await asyncio.sleep(0.01)
+        stop.set()
+        await asyncio.wait_for(task, timeout=3)
+        if size:
+            assert spawned[0].args[3] == "--standby" and len(spawned) == size + 1
+        else:
+            assert [child.args[3] for child in spawned] == [identity]
+        # 실행기가 끝나면 남은 대기 자식도 종료
+        assert all(child.returncode is not None for child in spawned)
+
+
+@scenario
+async def test_handoff_reports_exited_child():
+    """종료된 자식의 stdin 쓰기가 조용히 버려지지 않고 실패로 드러나는지"""
+    record = SimpleNamespace(identity="process:77:x", owner="worker:1")
+    exited = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", "pass", stdin=asyncio.subprocess.PIPE
+    )
+    await exited.wait()
+    assert await handoff(exited, record) is False
+
+
+@pytest.mark.skipif(
+    not os.environ.get("JOBS_TEST_REDIS_URL"), reason="실제 Redis의 subprocess 검증"
+)
+@scenario
+async def test_real_standby_child_execution():
+    async with environment(JOBS_HEARTBEAT_SEC=0.05) as (cfg, a, b, p):
+        await RequestReceiver(a, p).accept(message(cfg, process_request()))
+        standby = StandbyChildren(a, 1)
+        await standby.fill()
+        try:
+            job = await a.claim("process", "worker")
+            await asyncio.wait_for(standby.run(job), timeout=10)
+            assert (await b.get(job.identity)).status == "COMPLETED"
+        finally:
+            await standby.close()
 
 
 @pytest.mark.skipif(
