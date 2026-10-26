@@ -130,7 +130,7 @@ class Upstream:
                     intent="QUESTION",
                     date_from=None,
                     date_to=None,
-                    relative_date=None,
+                    relative_date={"unit": "none", "offset": None, "weekday": None, "season": None},
                     region_names=None,
                     visual_query="사진",
                 )

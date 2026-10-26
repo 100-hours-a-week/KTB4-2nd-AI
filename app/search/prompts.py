@@ -27,7 +27,7 @@ PARSE_SYSTEM_PROMPT = (
     "날짜, 지역, 사진 내용 조건은 intent와 관계없이 질문에서 찾은 만큼 채운다. "
     "reference_date는 오늘 날짜다. "
     "9월 10일, 9월 10일부터 12일까지처럼 질문에 날짜가 적혀 있으면 "
-    "date_from, date_to에 YYYY-MM-DD로 쓰고 relative_date는 null. "
+    "date_from, date_to에 YYYY-MM-DD로 쓰고 relative_date의 unit은 none. "
     "상대 날짜는 날짜를 계산하지 말고 relative_date에 분류만 하며 date_from, date_to는 null. "
     "unit은 오늘, 어제, 3일 전은 day, 이번 주, 지난주, 2주 전, 지난주 금요일은 week, "
     "주 없이 요일만 쓴 금요일은 weekday, 이번 달, 지난달은 month, 올해, 작년은 year, "
@@ -35,7 +35,8 @@ PARSE_SYSTEM_PROMPT = (
     "offset은 오늘, 이번 주, 이번 달, 올해가 0, 어제, 지난주, 지난달, 작년이 -1, "
     "3일 전이 -3, 2주 전이 -2. weekday 단위와 연도 없는 계절은 offset을 null. "
     "weekday는 요일이 있을 때만 MON부터 SUN, season은 계절일 때만 SPRING, SUMMER, FALL, WINTER. "
-    "'최근', '지난 주말'처럼 이 단위로 나타낼 수 없는 표현은 relative_date와 날짜 모두 null. "
+    "날짜 표현이 없거나 '최근', '지난 주말'처럼 이 단위로 나타낼 수 없으면 "
+    "relative_date의 unit은 none, 나머지 필드와 날짜는 null. "
     "region_names는 질문에 나온 지명만 넣는다. "
     "visual_query는 사진에 보이는 내용만 한국어로 짧게 쓰고 날짜와 지역 표현은 뺀다. "
     "없는 조건은 null."
@@ -44,8 +45,9 @@ PARSE_SYSTEM_PROMPT = (
 # 2026-10-12 실모델에서 확인한 형식. parsed는 모델이 아닌 코드가 결정
 _DATE_TEXT: dict[str, Any] = {"type": ["string", "null"], "pattern": r"^\d{4}-\d{2}-\d{2}$"}
 # RelativeDate와 같은 필드, 날짜 값 대신 단위만 받아 계산은 resolve_relative_date가 담당
+# null을 허용하면 제약 디코딩에서 실모델이 상대 날짜가 있어도 null만 골라 항상 객체(10/26 확인)
 _RELATIVE_DATE: dict[str, Any] = {
-    "type": ["object", "null"],
+    "type": "object",
     "additionalProperties": False,
     "required": ["unit", "offset", "weekday", "season"],
     "properties": {
@@ -93,7 +95,7 @@ class ParseOutput(BaseModel):
     intent: Intent
     date_from: DateText | None
     date_to: DateText | None
-    relative_date: RelativeDate | None
+    relative_date: RelativeDate
     region_names: list[str] | None
     visual_query: str | None
 
@@ -129,7 +131,7 @@ def _date_range(output: ParseOutput, today: date) -> tuple[date | None, date | N
 
     상대 날짜가 있으면 모델이 적은 date_from, date_to 대신 코드가 계산한 범위를 사용
     """
-    if output.relative_date is not None:
+    if output.relative_date.unit != "none":
         resolved = resolve_relative_date(output.relative_date, today)
         if resolved is None:
             return None, None

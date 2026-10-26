@@ -574,6 +574,10 @@ def test_response_extra_fields_remain_forbidden(model, payload):
     assert error.value.errors()[0]["type"] == "extra_forbidden"
 
 
+# 상대 날짜가 없을 때의 모델 출력, null 대신 unit none
+NO_RELATIVE = {"unit": "none", "offset": None, "weekday": None, "season": None}
+
+
 @pytest.mark.parametrize(
     "output",
     [
@@ -584,7 +588,7 @@ def test_response_extra_fields_remain_forbidden(model, payload):
                 "intent": "SEARCH",
                 "date_from": None,
                 "date_to": None,
-                "relative_date": None,
+                "relative_date": NO_RELATIVE,
                 "region_names": None,
                 "visual_query": None,
                 "parsed": True,
@@ -594,6 +598,17 @@ def test_response_extra_fields_remain_forbidden(model, payload):
             {
                 "intent": "SEARCH",
                 "date_from": "2026/09/01",
+                "date_to": None,
+                "relative_date": NO_RELATIVE,
+                "region_names": None,
+                "visual_query": None,
+            }
+        ),
+        # 실모델이 null만 고르던 형식, 스키마와 같이 null 불가
+        json.dumps(
+            {
+                "intent": "SEARCH",
+                "date_from": None,
                 "date_to": None,
                 "relative_date": None,
                 "region_names": None,
@@ -637,7 +652,7 @@ def model_output(**updates):
         "intent": "SEARCH",
         "date_from": None,
         "date_to": None,
-        "relative_date": None,
+        "relative_date": NO_RELATIVE,
         "region_names": None,
         "visual_query": "바다",
     }
@@ -770,6 +785,13 @@ def test_relative_date_format_matches_model():
     schema = prompts.PARSE_RESPONSE_FORMAT["json_schema"]["schema"]["properties"]["relative_date"]
     fields = set(dates.RelativeDate.model_fields)
     assert set(schema["required"]) == set(schema["properties"]) == fields
+    # null을 허용하면 실모델이 상대 날짜가 있어도 null만 골라(10/26) 항상 객체, 없음은 unit none
+    assert schema["type"] == "object"
+    assert "none" in schema["properties"]["unit"]["enum"]
+
+
+def test_relative_date_none_has_no_range():
+    assert dates.resolve_relative_date(relative("none"), MONDAY) is None
 
 
 def relative(unit, offset=None, weekday=None, season=None):

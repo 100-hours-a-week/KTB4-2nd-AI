@@ -2,6 +2,7 @@
 
 모델은 상대 날짜 표현을 단위로 분류만 하고 달력 계산은 코드가 담당
 10/22 검색 테스트셋 M0에서 모델이 "지난주 금요일"을 한 주 앞 날짜로 계산한 오류 대응
+상대 날짜가 없으면 null 대신 unit none, null을 허용하면 실모델이 매번 null을 고름(10/26 확인)
 """
 
 from calendar import monthrange
@@ -10,7 +11,7 @@ from typing import Literal, get_args
 
 from pydantic import BaseModel, ConfigDict
 
-Unit = Literal["day", "week", "weekday", "month", "year", "season"]
+Unit = Literal["none", "day", "week", "weekday", "month", "year", "season"]
 Weekday = Literal["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
 Season = Literal["SPRING", "SUMMER", "FALL", "WINTER"]
 
@@ -25,7 +26,8 @@ SEASON_START_MONTH: dict[str, int] = {"SPRING": 3, "SUMMER": 6, "FALL": 9, "WINT
 class RelativeDate(BaseModel):
     """모델이 분류한 상대 날짜 표현
 
-    offset은 이번 0, 지난 -1, 어제 -1, 3일 전 -3. 단위가 쓰지 않는 필드는 무시
+    unit none은 상대 날짜 없음. offset은 이번 0, 지난 -1, 어제 -1, 3일 전 -3
+    단위가 쓰지 않는 필드는 무시
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -50,6 +52,8 @@ def resolve_relative_date(expr: RelativeDate, today: date) -> tuple[date, date] 
 
 def _resolve(expr: RelativeDate, today: date) -> tuple[date, date] | None:
     match expr.unit:
+        case "none":
+            return None
         case "day":
             if expr.offset is None:
                 return None

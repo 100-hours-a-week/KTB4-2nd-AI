@@ -28,7 +28,7 @@ class MockVLM:
                 "intent": "QUESTION" if "?" in query else "SEARCH",
                 "date_from": None,
                 "date_to": None,
-                "relative_date": None,
+                "relative_date": {"unit": "none", "offset": None, "weekday": None, "season": None},
                 "region_names": None,
                 "visual_query": query,
             },
