@@ -6,8 +6,6 @@
 
 from collections.abc import Callable
 
-import numpy as np
-
 from app.core.errors import DecodeFailed, PipelineCancelled, PipelineError
 from app.pipeline.context import PipelineContext
 from app.pipeline.observability import log_snapshot
@@ -16,6 +14,7 @@ from app.pipeline.state import build_photo_states
 from app.pipeline.steps.clock import correct_clocks
 from app.pipeline.steps.clustering import cluster_photos
 from app.pipeline.steps.download import load_images
+from app.pipeline.steps.embed import encode_checked
 from app.pipeline.steps.filtering import filter_photos
 from app.pipeline.steps.finalizing import finalize_photos
 from app.pipeline.steps.locating import locate_photos
@@ -146,16 +145,8 @@ def run(
                 check_cancel()
                 chunk = pending[start : start + 16]
                 ids = [photo.source.trip_attachment_id for photo in chunk]
-                vectors = ctx.engine.encode_images([raw_images[photo_id] for photo_id in ids])
+                vectors = encode_checked(ctx.engine, [raw_images[photo_id] for photo_id in ids])
                 check_cancel()
-                if (
-                    not isinstance(vectors, np.ndarray)
-                    or vectors.shape != (len(chunk), ctx.engine.dim)
-                    or vectors.dtype != np.float32
-                    or not np.isfinite(vectors).all()
-                    or not np.allclose(np.linalg.norm(vectors, axis=1), 1, rtol=1e-5, atol=1e-6)
-                ):
-                    raise PipelineError("임베딩 엔진 출력이 float32 단위 벡터 계약과 다름")
                 ctx.qdrant.upsert(ids, vectors)
                 for photo, vector in zip(chunk, vectors, strict=True):
                     photo.embedding = vector
