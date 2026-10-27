@@ -1,10 +1,12 @@
 """Redis 실행 루프. 작업은 subprocess에서 실행해 heartbeat와 API를 막지 않는다."""
 
 import asyncio
+import json
 import os
 import sys
 import uuid
 from asyncio.subprocess import Process
+from collections.abc import Awaitable, Callable
 
 from pydantic import SecretStr
 from redis.asyncio import Redis
@@ -15,7 +17,7 @@ from app.core.logging import error_fields, get_logger, setup_logging
 from app.jobs.config import JobsSettings
 from app.jobs.execution import handler_for, handoff_line
 from app.jobs.models import JobKind, JobRecord
-from app.jobs.redis_store import RedisJobStore
+from app.jobs.redis_store import PhotoBatchClaim, RedisJobStore
 from app.schemas.task import TERMINAL_STATUSES, ErrorBody
 
 log = get_logger(__name__)
@@ -62,10 +64,23 @@ async def spawn_child(store: RedisJobStore, record: JobRecord) -> Process:
     )
 
 
-async def handoff(process: Process, record: JobRecord) -> bool:
+async def spawn_batch_child(store: RedisJobStore, payload: dict) -> Process:
+    """사진 묶음 정보를 실행 인자로 넘겨 자식을 새로 기동"""
+    return await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "app.jobs.execution",
+        "--photo-batch",
+        json.dumps(payload),
+        str(os.getpid()),
+        env=child_env(store.cfg),
+    )
+
+
+async def handoff(process: Process, line: bytes) -> bool:
     """대기 자식의 stdin에 작업 1건 전달. 자식이 이미 종료됐으면 False"""
     try:
-        process.stdin.write(handoff_line(record.identity, record.owner))
+        process.stdin.write(line)
         await process.stdin.drain()
     except ConnectionError:
         return False
@@ -119,20 +134,25 @@ class StandbyChildren:
                 return process
         return None
 
-    async def run(self, record: JobRecord) -> None:
-        """대기 자식에 작업을 넘기고 바로 보충. 넘길 자식이 없으면 실행 인자 방식으로 새로 기동"""
+    async def start(self, line: bytes, spawn: Callable[[], Awaitable[Process]]) -> Process:
+        """대기 자식에 작업을 넘기고 바로 보충. 넘길 자식이 없으면 spawn으로 새로 기동"""
         process = self.take()
-        if process is not None and not await handoff(process, record):
+        if process is not None and not await handoff(process, line):
             await stop_child(process)
             process = None
         if process is None:
-            process = await spawn_child(self.store, record)
+            process = await spawn()
         try:
             await self.fill()
         except asyncio.CancelledError:
             # 보충 중 실행기가 종료되면 작업을 받은 자식도 함께 종료
             await stop_child(process)
             raise
+        return process
+
+    async def run(self, record: JobRecord) -> None:
+        line = handoff_line("process", identity=record.identity, owner=record.owner)
+        process = await self.start(line, lambda: spawn_child(self.store, record))
         await supervise(self.store, record, process)
 
     async def close(self) -> None:
@@ -142,6 +162,51 @@ class StandbyChildren:
 
 async def run_claimed(store: RedisJobStore, record: JobRecord) -> None:
     await supervise(store, record, await spawn_child(store, record))
+
+
+async def run_photo_batch(
+    store: RedisJobStore, claim: PhotoBatchClaim, standby: StandbyChildren | None
+) -> None:
+    """사진 묶음 1건을 자식에서 실행. lease 없이 처리 시간 상한만 두고, 넘기면 강제 종료
+
+    묶음 결과는 Redis 상태가 아니라 Qdrant 벡터뿐이라 실패나 종료 시 회수할 것이 없음
+    """
+    payload = {
+        "identity": claim.identity,
+        "trip_id": claim.trip_id,
+        "batch_no": claim.batch_no,
+        "wait_ms": round((await store.now() - claim.enqueued_at) * 1000, 2),
+    }
+
+    def spawn() -> Awaitable[Process]:
+        return spawn_batch_child(store, payload)
+
+    if standby:
+        process = await standby.start(handoff_line("photo_batch", **payload), spawn)
+    else:
+        process = await spawn()
+    fields = {"operation": "photo_batch", "trip_id": claim.trip_id, "batch_no": claim.batch_no}
+    try:
+        exit_code = await asyncio.wait_for(
+            process.wait(), timeout=store.cfg.JOBS_PHOTO_BATCH_TIMEOUT_SEC
+        )
+    except TimeoutError:
+        log.warning(
+            "사진 묶음 처리 시간 초과로 실행 프로세스 종료",
+            extra={
+                **fields,
+                "event": "ai_photo_batch_timeout",
+                "timeout_sec": store.cfg.JOBS_PHOTO_BATCH_TIMEOUT_SEC,
+            },
+        )
+    else:
+        if exit_code != 0:
+            log.warning(
+                "사진 묶음 실행 프로세스 비정상 종료",
+                extra={**fields, "event": "ai_photo_batch_exit", "exit_code": exit_code},
+            )
+    finally:
+        await stop_child(process)
 
 
 async def supervise(store: RedisJobStore, record: JobRecord, process: Process) -> None:
@@ -215,6 +280,12 @@ async def runner_loop(
                     await standby.run(record)
                 elif record:
                     await run_claimed(store, record)
+                elif kind == "process" and store.cfg.EMBED_ON_PHOTOS_READY and not stop.is_set():
+                    # process가 없을 때만 묶음을 꺼낸다. 묶음 실행 중 도착한 process가 다음 순서
+                    batch = await store.claim_batch()
+                    if batch:
+                        await run_photo_batch(store, batch, standby)
+                        continue
                 if record and kind == "process":
                     continue  # 작업 직후에는 다음 작업이 이미 대기열에 있을 수 있어 바로 확인
             except asyncio.CancelledError:

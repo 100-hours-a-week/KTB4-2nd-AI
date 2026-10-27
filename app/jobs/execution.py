@@ -1,6 +1,7 @@
 """작업별 subprocess 진입점. 기능 담당자는 async handler(request, reporter)를 연결한다.
 
 정리는 대기 자식(--standby)으로 미리 띄워 두고 작업은 stdin으로 전달
+업로드 사진 묶음(photo_batch)도 같은 대기 자식이 받음, 대기 자식이 없으면 --photo-batch로 새로 기동
 """
 
 import asyncio
@@ -11,6 +12,7 @@ import resource
 import sys
 import time
 from collections.abc import Callable
+from typing import Literal
 
 from redis.asyncio import Redis
 
@@ -235,10 +237,95 @@ def log_summary(kind: str, status: str, trace) -> None:
     )
 
 
-def handoff_line(identity: str, owner: str) -> bytes:
-    """대기 자식의 stdin에 쓰는 작업 1건. 보낸 시각은 자식의 준비 대기 시간 측정용"""
-    message = {"identity": identity, "owner": owner, "sent_at": time.time()}
+def handoff_line(kind: Literal["process", "photo_batch"], **fields) -> bytes:
+    """대기 자식의 stdin에 쓰는 작업 1건. 보낸 시각은 자식의 준비 대기 시간 측정용
+
+    process는 identity와 owner, photo_batch는 identity, trip_id, batch_no, wait_ms
+    """
+    message = {"kind": kind, **fields, "sent_at": time.time()}
     return (json.dumps(message) + "\n").encode()
+
+
+def redis_client(cfg: JobsSettings) -> Redis:
+    return Redis.from_url(
+        cfg.REDIS_URL.get_secret_value(),
+        decode_responses=True,
+        socket_connect_timeout=5,
+        socket_timeout=5,
+    )
+
+
+def batch_handler_for(cfg: JobsSettings) -> Callable[[dict[int, str]], list[int]]:
+    """사진 묶음 처리 함수 embed_photos({사진 ID: 사본 키}) -> 저장한 사진 ID 목록"""
+    if cfg.JOBS_FAKE_PIPELINE:
+        from app.jobs.mock import embed_photos
+    else:
+        from app.jobs.process_handler import embed_photos
+    return embed_photos
+
+
+async def run_batch(
+    store: RedisJobStore,
+    payload: dict,
+    handler: Callable[[dict[int, str]], list[int]],
+    handoff_wait_ms: float | None = None,
+) -> None:
+    """사진 묶음 1건 임베딩. 실패해도 Redis 상태를 바꾸지 않고 로그만 남김
+
+    결과는 Qdrant 벡터뿐이라 빠진 사진은 process가 임베딩
+    """
+    bind_trip(payload["trip_id"])
+    batch_no = payload["batch_no"]
+    fields = {
+        "event": "ai_photo_batch",
+        "operation": "photo_batch",
+        "batch_no": batch_no,
+        "wait_ms": payload["wait_ms"],
+        "handoff_wait_ms": round(handoff_wait_ms, 2) if handoff_wait_ms is not None else None,
+    }
+    photos = await store.photo_batch(payload["identity"], batch_no)
+    if photos is None:
+        log.info("process 등록으로 지워진 사진 묶음 건너뜀", extra={**fields, "result": "skipped"})
+        return
+    fields["attachment_count"] = len(photos)
+    started = time.monotonic()
+    try:
+        embedded = await asyncio.to_thread(
+            handler, {photo.trip_attachment_id: photo.analyze_storage_key for photo in photos}
+        )
+    except Exception as exc:
+        log.warning(
+            "사진 묶음 임베딩 실패, process에서 다시 임베딩",
+            extra={
+                **fields,
+                "result": "failed",
+                "duration_ms": round((time.monotonic() - started) * 1000, 2),
+                **error_fields(exc),
+            },
+        )
+        return
+    log.info(
+        "사진 묶음 임베딩",
+        extra={
+            **fields,
+            "result": "completed",
+            "embedded_count": len(embedded),
+            "duration_ms": round((time.monotonic() - started) * 1000, 2),
+        },
+    )
+
+
+async def run_batch_job(
+    cfg: JobsSettings,
+    payload: dict,
+    handler: Callable[[dict[int, str]], list[int]],
+    handoff_wait_ms: float | None = None,
+) -> None:
+    redis = redis_client(cfg)
+    try:
+        await run_batch(RedisJobStore(redis, cfg), payload, handler, handoff_wait_ms)
+    finally:
+        await redis.aclose()
 
 
 async def run_job(
@@ -249,12 +336,7 @@ async def run_job(
     handoff_wait_ms: float | None = None,
 ) -> None:
     """작업 1건 실행. handler가 없으면 레코드의 작업 종류로 적재"""
-    redis = Redis.from_url(
-        cfg.REDIS_URL.get_secret_value(),
-        decode_responses=True,
-        socket_connect_timeout=5,
-        socket_timeout=5,
-    )
+    redis = redis_client(cfg)
     store = RedisJobStore(redis, cfg)
     record = await store.get(identity)
     if record is None:
@@ -313,23 +395,41 @@ async def main(identity: str, owner: str) -> None:
 
 
 def standby() -> None:
-    """정리 대기 자식. import와 처리기 적재를 마친 뒤 stdin으로 작업 1건을 받아 실행"""
+    """정리 대기 자식. import와 처리기 적재를 마친 뒤 stdin으로 작업 1건을 받아 실행
+
+    받는 작업은 process 또는 photo_batch. 묶음 처리기는 EMBED_ON_PHOTOS_READY일 때 미리 적재
+    """
     cfg = JobsSettings()
     setup_logging(cfg.LOG_LEVEL, cfg.RELEASE)
     handler = handler_for(cfg, "process")
+    batch_handler = batch_handler_for(cfg) if cfg.EMBED_ON_PHOTOS_READY else None
     line = sys.stdin.readline()
     if not line:
         # 실행기가 작업을 넘기지 않고 stdin을 닫은 경우
         return
     handoff = json.loads(line)
     handoff_wait_ms = max(0.0, (time.time() - handoff["sent_at"]) * 1000)
-    asyncio.run(run_job(cfg, handoff["identity"], handoff["owner"], handler, handoff_wait_ms))
+    if handoff["kind"] == "photo_batch":
+        batch_handler = batch_handler or batch_handler_for(cfg)
+        asyncio.run(run_batch_job(cfg, handoff, batch_handler, handoff_wait_ms))
+    else:
+        asyncio.run(run_job(cfg, handoff["identity"], handoff["owner"], handler, handoff_wait_ms))
+
+
+def photo_batch_main(payload: dict) -> None:
+    """대기 자식 없이 새로 기동한 사진 묶음 자식"""
+    cfg = JobsSettings()
+    setup_logging(cfg.LOG_LEVEL, cfg.RELEASE)
+    asyncio.run(run_batch_job(cfg, payload, batch_handler_for(cfg)))
 
 
 if __name__ == "__main__":
     if sys.argv[1] == "--standby":
         with parent_guard(int(sys.argv[2])):
             standby()
+    elif sys.argv[1] == "--photo-batch":
+        with parent_guard(int(sys.argv[3])):
+            photo_batch_main(json.loads(sys.argv[2]))
     else:
         with parent_guard(int(sys.argv[3])):
             asyncio.run(main(sys.argv[1], sys.argv[2]))

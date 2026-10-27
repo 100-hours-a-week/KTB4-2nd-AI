@@ -109,6 +109,34 @@ async def test_redis_job_completion_and_result_publication(configured):
             await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+@scenario
+async def test_photos_ready_setting_controls_vector_reuse(configured, monkeypatch, enabled):
+    cfg, _ = configured
+    cfg.EMBED_ON_PHOTOS_READY = enabled
+    seen = []
+    build = process_handler.build_context
+
+    def capture(*args, **kwargs):
+        ctx = build(*args, **kwargs)
+        seen.append(ctx.reuse_vectors)
+        return ctx
+
+    monkeypatch.setattr(process_handler, "build_context", capture)
+    await process_handler.run(process_request(), reporter())
+    assert seen == [enabled]
+
+
+def test_embed_photos_stores_batch_and_closes_engine(configured):
+    cfg, engine = configured
+    assert process_handler.embed_photos({101: "trips/77/a.jpg"}) == [101]
+    assert engine.batches == [1] and engine.closed
+    cfg.FAKE_PIPELINE = True
+    with pytest.raises(PipelineError) as error:
+        process_handler.embed_photos({101: "trips/77/a.jpg"})
+    assert error.value.code == ErrorCode.MODEL_NOT_READY and engine.batches == [1]
+
+
 @pytest.mark.parametrize("mutation", ["duplicate", "period", "missing"])
 @scenario
 async def test_invalid_input_precedes_external_io(configured, mutation):

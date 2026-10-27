@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 from unittest.mock import AsyncMock
 
 import httpx
@@ -14,6 +15,7 @@ from app.jobs.execution import execute
 from app.jobs.kafka import InvalidMessage, RequestReceiver, consume_requests
 from app.jobs.mock import run as mock_run
 from app.jobs.models import PHOTOS_READY_MAX_BYTES, PhotoBatchBuffer, PhotosReadyMessage
+from app.jobs.redis_store import photo_batch_member
 from app.v2_main import create_app
 from tests.test_v2_jobs import Consumer, environment, message, process_request, scenario
 
@@ -135,6 +137,7 @@ async def test_process_racing_with_batches_leaves_no_orphan_buffer():
             assert outcomes[0] in {"staged", "closed"} and outcomes[1] == "accepted"
             assert not await a.redis.exists(buffer_key(a, batch))
         assert await b.redis.zcard(b.key("queue:process")) == 20
+        assert await b.redis.zcard(b.photo_batch_queue_key()) == 0
 
 
 @scenario
@@ -312,3 +315,74 @@ async def test_200_unique_photos_fit_buffer_limit_with_maximum_escaped_keys():
         saved = await replica.redis.get(buffer_key(replica, body))
         assert 1024 * 1024 < len(saved.encode("utf-8")) < PHOTOS_READY_MAX_BYTES
         assert await replica.claim("process", "runner") is None
+
+
+def queue_members(store):
+    return store.redis.zrange(store.photo_batch_queue_key(), 0, -1)
+
+
+def identity_of(body):
+    return PhotosReadyMessage.model_validate(body).identity
+
+
+@pytest.mark.parametrize("repeat", ["duplicate", "closed"])
+@scenario
+async def test_only_staged_batches_enter_batch_queue(repeat):
+    async with environment() as (cfg, a, b, producer):
+        body = ready_request(batch_no=1, ids=(101, 102))
+        assert await RequestReceiver(a, producer).accept(message(cfg, body)) == "staged"
+        if repeat == "duplicate":
+            assert await RequestReceiver(b, producer).accept(message(cfg, body)) == "duplicate"
+            assert await queue_members(a) == [photo_batch_member(identity_of(body), 1)]
+        else:
+            await RequestReceiver(b, producer).accept(message(cfg, process_request()))
+            later = ready_request(batch_no=2, ids=(103,))
+            assert await RequestReceiver(a, producer).accept(message(cfg, later)) == "closed"
+            assert await queue_members(a) == []
+
+
+@scenario
+async def test_batches_are_claimed_in_arrival_order_and_expired_buffers_skipped():
+    async with environment() as (cfg, a, b, producer):
+        first = ready_request(batch_no=1, ids=(101,), trip=1)
+        expired = ready_request(batch_no=1, ids=(201,), trip=2)
+        second = ready_request(batch_no=2, ids=(102,), trip=1)
+        for body in (first, expired, second):
+            assert await RequestReceiver(a, producer).accept(message(cfg, body)) == "staged"
+        await a.redis.delete(buffer_key(a, expired))
+        claimed = [await b.claim_batch() for _ in range(3)]
+        identity = identity_of(first)
+        assert [(c.identity, c.batch_no) for c in claimed[:2]] == [(identity, 1), (identity, 2)]
+        assert claimed[0].enqueued_at <= claimed[1].enqueued_at
+        assert claimed[2] is None and await queue_members(a) == []
+        assert [p.trip_attachment_id for p in await b.photo_batch(identity, 2)] == [102]
+        assert await b.photo_batch(identity_of(expired), 1) is None
+
+
+@pytest.mark.parametrize("outcome", ["accepted", "busy"])
+@scenario
+async def test_process_intake_removes_unclaimed_batches_and_logs_count(outcome, caplog):
+    async with environment() as (cfg, a, b, producer):
+        for no in (1, 2, 3):
+            body = ready_request(batch_no=no, ids=(100 + no,))
+            await RequestReceiver(a, producer).accept(message(cfg, body))
+        assert (await b.claim_batch()).batch_no == 1
+        if outcome == "busy":
+            await RequestReceiver(a, producer).accept(message(cfg, process_request("other")))
+        with caplog.at_level(logging.INFO, logger="app.jobs.redis_store"):
+            final = message(cfg, process_request())
+            assert await RequestReceiver(b, producer).accept(final) == outcome
+        assert await queue_members(a) == []
+        (record,) = [
+            r for r in caplog.records if getattr(r, "event", None) == "ai_photo_batch_unprocessed"
+        ]
+        assert (record.result, record.staged_count, record.unprocessed_count) == (outcome, 3, 2)
+
+
+@scenario
+async def test_staging_trims_batch_queue_entries_older_than_buffer_ttl():
+    async with environment(JOBS_PHOTOS_READY_TTL_SEC=60) as (cfg, a, b, producer):
+        await a.redis.zadd(a.photo_batch_queue_key(), {"process:9:abandoned#1": await a.now() - 61})
+        body = ready_request()
+        assert await RequestReceiver(a, producer).accept(message(cfg, body)) == "staged"
+        assert await queue_members(a) == [photo_batch_member(identity_of(body), 1)]

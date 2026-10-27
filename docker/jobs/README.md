@@ -67,18 +67,25 @@ uvicorn app.v2_main:create_search_app --factory --host 0.0.0.0 --port 8000
 
 ## 업로드 묶음 수신
 
-초기 v2에서는 `photos_ready`를 받으면 사진 ID와 `analyze_storage_key`만 Redis에 보관합니다. 이미지를 다운로드하거나 임베딩하지 않으며 정리 실행 대기열에도 넣지 않습니다. 같은 여행과 실행의 묶음은 `batch_no`로 구분하고, 같은 메시지가 다시 와도 중복 저장하지 않습니다. 사진은 S3에 그대로 둡니다.
+`photos_ready`를 받으면 사진 ID와 `analyze_storage_key`를 Redis에 보관하고 묶음 대기열(`queue:photo_batch`)에 적재합니다. 정리 실행 대기열에는 넣지 않습니다. 같은 여행과 실행의 묶음은 `batch_no`로 구분하고, 같은 메시지가 다시 와도 중복 저장하지 않습니다. 사진은 S3에 그대로 둡니다. 적재한 묶음의 임베딩 여부는 아래 "업로드 묶음 임베딩"의 설정을 따릅니다.
 
-BE가 모든 사진의 업로드와 분석용 사본 생성을 마친 뒤 보내는 `process`가 정리 시작 기준입니다. 200장은 여행당 상한이며, 200장이 모이는 조건으로 시작하지 않습니다. `process.attachments`의 전체 목록으로 작업을 등록하면서 임시 묶음을 삭제합니다. 묶음 알림이 누락되거나 만료되어도 진행하며, 보관된 목록에만 있는 사진은 처리하지 않습니다. 정리 알고리즘과 모델의 실제 실행은 위의 핸들러 연결이 필요합니다.
+BE가 모든 사진의 업로드와 분석용 사본 생성을 마친 뒤 보내는 `process`가 정리 시작 기준입니다. 200장은 여행당 상한이며, 200장이 모이는 조건으로 시작하지 않습니다. `process.attachments`의 전체 목록으로 작업을 등록하면서 임시 묶음과 아직 실행하지 않은 묶음 대기열 항목을 삭제합니다. 묶음 알림이 누락되거나 만료되어도 진행하며, 보관된 목록에만 있는 사진은 처리하지 않습니다. 정리 알고리즘과 모델의 실제 실행은 위의 핸들러 연결이 필요합니다.
 
 - `photos_ready`는 여행 생성 또는 수정 요청 토픽에 같은 실행의 `process`와 동일한 `trip_id` key 및 `execution_id`로 보냅니다. 한 묶음은 1~16장입니다.
 - Redis 보관이 성공한 뒤 Kafka offset을 커밋합니다. `process`가 이미 등록되거나 진행 중 작업 때문에 무시된 실행의 늦은 묶음은 다시 보관하지 않습니다.
 - 같은 묶음 번호의 내용이나 같은 사진 ID의 사본 경로가 달라지면 원래 정보를 유지하고 잘못된 알림을 DLT로 격리합니다. 초기 보관은 실행당 고유 사진 200장과 묶음 200개까지 허용합니다. S3 키는 UTF-8 1024바이트까지, 실행별 임시 JSON 전체는 2MiB까지 허용합니다. 초과한 묶음도 기존 정보를 유지한 채 DLT로 격리합니다.
 - 잘못된 묶음은 검증 실패 3회 후 요청 DLT에 보냅니다. 보조 알림 자체로 `process_result`나 작업 FAILED를 만들지 않으므로 뒤에 오는 정상 `process`를 차단하지 않습니다.
 - `process` 전에는 새 정리 상태를 만들지 않습니다. 첫 실행의 GET은 404이며, 이전 실행이 있으면 기존 상태가 보입니다. BE는 `execution_id`를 비교하고 최종 요청 접수 후의 상태를 확인해야 합니다. 업로드 중 취소는 BE에서 업로드와 최종 `process` 발행을 중단하는 범위이며 AI DELETE는 등록된 정리 작업에 적용합니다.
-- 최종 요청이 오지 않은 임시 묶음은 기본 7일 후 만료합니다. `JOBS_PHOTOS_READY_TTL_SEC`로 조정하며 새 묶음을 저장할 때만 갱신합니다. 작업 상태와 미발행 결과의 보관 규칙은 바뀌지 않습니다.
+- 최종 요청이 오지 않은 임시 묶음은 기본 7일 후 만료합니다. `JOBS_PHOTOS_READY_TTL_SEC`로 조정하며 새 묶음을 저장할 때만 갱신합니다. 묶음 대기열 항목도 새 묶음을 적재할 때 같은 기한을 넘긴 것을 삭제합니다. 작업 상태와 미발행 결과의 보관 규칙은 바뀌지 않습니다.
 
-묶음을 받는 즉시 임베딩하고 최종 정리에서 벡터를 재사용하는 기능은 후속 개선입니다. 현재 구현은 초기 수신과 대기만 제공합니다.
+## 업로드 묶음 임베딩
+
+정리 실행기의 `EMBED_ON_PHOTOS_READY`(기본 true)가 true이면 업로드 중에 묶음마다 사본을 다운로드하고 임베딩해 Qdrant에 저장합니다. 정리의 EMBEDDING 단계는 Qdrant에 저장된 벡터를 먼저 쓰고 없는 사진만 임베딩합니다. false이면 묶음을 실행하지 않으며 정리 때 전체 사진을 임베딩하는 이전 동작과 같습니다. 이 설정은 정리 실행기만 읽으므로 되돌릴 때는 정리 실행기 환경 변수만 false로 바꾸고 재시작하며 API 설정은 바꾸지 않습니다.
+
+- 정리 실행기는 대기 중인 정리 작업이 없을 때만 묶음을 꺼냅니다. 묶음 실행 중 도착한 정리 작업은 그 묶음이 끝난 직후 실행하고, 그 실행의 남은 묶음은 등록 시 대기열에서 삭제해 정리가 직접 임베딩합니다.
+- 묶음도 대기 자식이 1건씩 처리합니다. 묶음에는 lease와 `WORKER_DEAD` 회수가 없으며, `JOBS_PHOTO_BATCH_TIMEOUT_SEC`(기본 60초)를 넘기면 실행기가 자식을 강제 종료합니다.
+- 다운로드, 디코딩, 임베딩 실패는 로그만 남기고 작업 상태를 바꾸지 않습니다. 빠진 사진은 정리가 임베딩하고, 디코딩 실패는 정리의 `DECODE_FAILED`로 판정합니다.
+- 관측 이벤트는 묶음마다 `ai_photo_batch`(`result`, `wait_ms`, `handoff_wait_ms`, `duration_ms`, `embedded_count`), 정리 접수 시 `ai_photo_batch_unprocessed`(`staged_count`, `unprocessed_count`), 정리 EMBEDDING의 `ai_embedding_reuse`(`reused_count`, `embedded_count`), 실행기의 `ai_photo_batch_timeout`과 `ai_photo_batch_exit`입니다.
 
 ## 통신과 실패 처리
 
@@ -118,8 +125,8 @@ python -c "from aiokafka.codec import has_lz4; assert has_lz4()"
 ## 검증
 
 ```sh
-uv run pytest tests/test_v2_jobs.py tests/test_photos_ready.py
-JOBS_TEST_REDIS_URL=redis://127.0.0.1:6379/0 uv run pytest tests/test_v2_jobs.py tests/test_photos_ready.py
+uv run pytest tests/test_v2_jobs.py tests/test_photos_ready.py tests/test_photo_batch_runner.py
+JOBS_TEST_REDIS_URL=redis://127.0.0.1:6379/0 uv run pytest tests/test_v2_jobs.py tests/test_photos_ready.py tests/test_photo_batch_runner.py
 JOBS_TEST_REDIS_URL=redis://127.0.0.1:6379/0 JOBS_TEST_KAFKA_URL=localhost:9092 uv run pytest tests/test_v2_jobs_integration.py
 ```
 

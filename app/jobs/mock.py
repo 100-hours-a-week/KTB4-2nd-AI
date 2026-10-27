@@ -51,3 +51,8 @@ async def run(request: dict, reporter: JobReporter) -> dict:
         "blocks": blocks,
         "verification": {"passed": False, "retry_count": 0},
     }
+
+
+def embed_photos(photos: dict[int, str]) -> list[int]:
+    """연동 확인용 사진 묶음 처리. 다운로드와 임베딩 없이 받은 사진 ID를 그대로 반환"""
+    return list(photos)
