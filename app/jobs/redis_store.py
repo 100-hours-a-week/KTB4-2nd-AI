@@ -4,10 +4,11 @@
 """
 
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
+from pydantic import ValidationError
 from redis.asyncio import Redis
 from redis.exceptions import WatchError
 
@@ -20,6 +21,7 @@ from app.jobs.models import (
     JobRecord,
     JobResultEvent,
     PhotoBatchBuffer,
+    PhotoMetricsRecord,
     PhotosReadyMessage,
     ReadyAttachment,
     TerminalStatus,
@@ -65,6 +67,9 @@ class RedisJobStore:
 
     def photo_batch_queue_key(self) -> str:
         return self.key("queue:photo_batch")
+
+    def photo_metrics_key(self, photo_id: int) -> str:
+        return self.key(f"photo:{photo_id}")
 
     def slot_keys(self, kind: JobKind) -> list[str]:
         # 첫 키는 기존 단일 실행기와 공유한다. 나머지는 스토리 전용이다.
@@ -256,6 +261,44 @@ class RedisJobStore:
         if raw is None:
             return None
         return PhotoBatchBuffer.model_validate_json(raw).batches.get(str(batch_no))
+
+    async def save_photo_metrics(self, records: Mapping[int, PhotoMetricsRecord]) -> None:
+        """사진별 지표 저장. 같은 사진은 덮어쓰고 만료 기한을 다시 시작"""
+        if not records:
+            return
+        async with self.redis.pipeline(transaction=False) as pipe:
+            for photo_id, record in records.items():
+                pipe.set(
+                    self.photo_metrics_key(photo_id),
+                    record.model_dump_json(),
+                    ex=self.cfg.JOBS_PHOTO_METRICS_TTL_SEC,
+                )
+            await pipe.execute()
+
+    async def photo_metrics(self, ids: Sequence[int]) -> dict[int, PhotoMetricsRecord]:
+        """저장된 사진별 지표. 없거나 형식이 틀린 레코드는 빼고 반환, 정리가 다시 계산"""
+        if not ids:
+            return {}
+        raws = await self.redis.mget([self.photo_metrics_key(photo_id) for photo_id in ids])
+        records: dict[int, PhotoMetricsRecord] = {}
+        invalid: list[int] = []
+        for photo_id, raw in zip(ids, raws, strict=True):
+            if raw is None:
+                continue
+            try:
+                records[photo_id] = PhotoMetricsRecord.model_validate_json(raw)
+            except ValidationError:
+                invalid.append(photo_id)
+        if invalid:
+            log.warning(
+                "형식이 틀린 사진 지표 레코드 무시",
+                extra={
+                    "event": "ai_photo_metrics_invalid",
+                    "invalid_count": len(invalid),
+                    "invalid_ids": invalid,
+                },
+            )
+        return records
 
     async def claim(
         self, kind: JobKind, worker: str, *, should_stop: Callable[[], bool] | None = None

@@ -14,7 +14,7 @@ from app.infra.images import ImageSource
 from app.infra.qdrant import QdrantStore
 from app.jobs.config import JobsSettings
 from app.jobs.execution import JobReporter
-from app.jobs.models import ProcessMessage
+from app.jobs.models import PhotoMetricsRecord, ProcessMessage
 from app.jobs.sync_bridge import run_sync
 from app.observability import datasets
 from app.pipeline.batch import embed_batch
@@ -34,11 +34,9 @@ def _failure(code: ErrorCode, message: str) -> PipelineError:
 class FingerprintingImages:
     """내려받은 사본의 지문을 함께 계산한다. 사진 bytes와 실패 처리는 그대로 전달한다."""
 
-    def __init__(self, images, request: ProcessMessage, hashes: dict) -> None:
-        self.images, self.hashes = images, hashes
-        self.ids = {
-            photo.analyze_storage_key: photo.trip_attachment_id for photo in request.attachments
-        }
+    def __init__(self, images, ids: dict[str, int], hashes: dict) -> None:
+        # ids는 {사본 키: 사진 ID}
+        self.images, self.ids, self.hashes = images, ids, hashes
 
     def get_many(self, keys: list[str]) -> dict[str, bytes]:
         blobs = self.images.get_many(keys)
@@ -130,7 +128,10 @@ def _run(request: ProcessMessage, cfg: JobsSettings, progress, cancelled, report
 
     def fingerprint(images: ImageSource) -> ImageSource:
         if reports is not None and evaluation_enabled(cfg):
-            return FingerprintingImages(images, request, hashes)
+            ids = {
+                photo.analyze_storage_key: photo.trip_attachment_id for photo in request.attachments
+            }
+            return FingerprintingImages(images, ids, hashes)
         return images
 
     try:
@@ -202,15 +203,30 @@ async def run(request: dict, reporter: JobReporter) -> dict:
     return result
 
 
-def embed_photos(photos: dict[int, str]) -> list[int]:
+def embed_photos(photos: dict[int, str]) -> dict[int, PhotoMetricsRecord]:
     """업로드 사진 묶음 임베딩. 정리 실행기의 묶음 자식이 photos_ready 묶음마다 호출
 
-    {사진 ID: 사본 키}를 받아 Qdrant에 저장하고 저장한 사진 ID를 반환. 실패는 예외로 올림
+    {사진 ID: 사본 키}를 받아 Qdrant에 저장하고 저장한 사진의 지표를 반환. 실패는 예외로 올림
+    자동 평가가 켜져 있으면 정리가 다운로드 없이 채점할 수 있게 지문도 함께 기록
     """
     cfg = JobsSettings()
     if cfg.FAKE_PIPELINE or cfg.EMBED_MODEL != MODEL_VERSION:
         raise _failure(
             ErrorCode.MODEL_NOT_READY, "v2 정리 실행기는 Qwen HTTP 임베딩 설정이 필요합니다."
         )
-    with open_context(cfg) as ctx:
-        return embed_batch(photos, ctx)
+    hashes: dict = {}
+
+    def fingerprint(images: ImageSource) -> ImageSource:
+        if evaluation_enabled(cfg):
+            ids = {key: photo_id for photo_id, key in photos.items()}
+            return FingerprintingImages(images, ids, hashes)
+        return images
+
+    with open_context(cfg, wrap_images=fingerprint) as ctx:
+        metrics = embed_batch(photos, ctx)
+    return {
+        photo_id: PhotoMetricsRecord(
+            variance=metric.variance, phash=metric.phash, fingerprint=hashes.get(photo_id)
+        )
+        for photo_id, metric in metrics.items()
+    }

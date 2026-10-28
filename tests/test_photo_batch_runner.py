@@ -10,6 +10,7 @@ import pytest
 from app.core.errors import DownloadFailed
 from app.jobs.execution import run_batch
 from app.jobs.kafka import RequestReceiver
+from app.jobs.models import PhotoMetricsRecord
 from app.jobs.runner import StandbyChildren, run_photo_batch, runner_loop
 from tests.test_photos_ready import ready_request
 from tests.test_v2_jobs import FakeChild, environment, message, process_request, scenario
@@ -162,11 +163,16 @@ async def test_batch_child_embeds_buffered_photos_and_logs(caplog, case):
         payload = {"identity": claim.identity, "trip_id": 77, "batch_no": 1, "wait_ms": 1.0}
         seen = []
 
+        records = {
+            photo: PhotoMetricsRecord(variance=float(photo), phash=f"{photo:016x}")
+            for photo in (101, 102)
+        }
+
         def handler(photos):
             seen.append(photos)
             if case == "failed":
                 raise DownloadFailed(["trips/77/101.jpg"])
-            return list(photos)
+            return records
 
         with caplog.at_level(logging.INFO, logger="app.jobs.execution"):
             await run_batch(b, payload, handler, handoff_wait_ms=0.5)
@@ -179,8 +185,32 @@ async def test_batch_child_embeds_buffered_photos_and_logs(caplog, case):
         assert record.attachment_count == 2 and record.duration_ms >= 0
         if case == "completed":
             assert record.embedded_count == 2
+            assert await a.photo_metrics([101, 102]) == records
         else:
             assert record.error_type == "DownloadFailed"
+            assert await a.photo_metrics([101, 102]) == {}
+
+
+@scenario
+async def test_photo_metrics_round_trip_with_ttl_and_skip_unusable_records(caplog):
+    async with environment() as (cfg, a, b, _):
+        records = {
+            101: PhotoMetricsRecord(variance=12.5, phash="0123456789abcdef", fingerprint=(1, 2)),
+            102: PhotoMetricsRecord(variance=0.0, phash="f" * 16),
+        }
+        await a.save_photo_metrics(records)
+        await a.save_photo_metrics({})
+        await a.redis.set(a.photo_metrics_key(103), "{broken")
+        await a.redis.set(a.photo_metrics_key(104), '{"variance": -1, "phash": "0"}')
+        assert a.photo_metrics_key(101) == cfg.redis_prefix + "photo:101"
+        assert 0 < await a.redis.ttl(a.photo_metrics_key(101)) <= cfg.JOBS_PHOTO_METRICS_TTL_SEC
+        with caplog.at_level(logging.WARNING, logger="app.jobs.redis_store"):
+            assert await b.photo_metrics([101, 102, 103, 104, 105]) == records
+        (record,) = [
+            r for r in caplog.records if getattr(r, "event", None) == "ai_photo_metrics_invalid"
+        ]
+        assert record.invalid_ids == [103, 104]
+        assert await b.photo_metrics([]) == {}
 
 
 @pytest.mark.skipif(
@@ -212,9 +242,10 @@ async def test_real_child_runs_photo_batch(capfd, size):
             except ValueError:
                 continue
         (record,) = [r for r in records if r.get("event") == "ai_photo_batch"]
+        # 연동 확인용 처리기는 임베딩하지 않으므로 저장한 사진이 없다.
         assert (record["result"], record["embedded_count"], record["trip_id"]) == (
             "completed",
-            2,
+            0,
             77,
         )
         assert (record["handoff_wait_ms"] is None) == (size == 0)

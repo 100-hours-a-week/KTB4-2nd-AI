@@ -15,7 +15,11 @@ from app.engines.fake import FakeEngine
 from app.jobs import process_handler
 from app.jobs.execution import execute
 from app.jobs.kafka import RequestReceiver, publish_results
+from app.jobs.models import PhotoMetricsRecord
 from app.jobs.sync_bridge import run_sync
+from app.observability import datasets
+from app.pipeline.steps.filtering import measure
+from tests.test_v2_auto_evaluation import reference
 from tests.test_v2_jobs import environment, message, process_request, scenario
 
 
@@ -129,12 +133,24 @@ async def test_photos_ready_setting_controls_vector_reuse(configured, monkeypatc
 
 def test_embed_photos_stores_batch_and_closes_engine(configured):
     cfg, engine = configured
-    assert process_handler.embed_photos({101: "trips/77/a.jpg"}) == [101]
+    cfg.EVAL_AUTO_DETECT = False
+    records = process_handler.embed_photos({101: "trips/77/a.jpg"})
+    with Image.open(cfg.IMAGE_DIR / "trips/77/a.jpg") as image, image.convert("RGB") as rgb:
+        expected = measure(rgb)
+    assert records == {101: PhotoMetricsRecord(variance=expected.variance, phash=expected.phash)}
     assert engine.batches == [1] and engine.closed
     cfg.FAKE_PIPELINE = True
     with pytest.raises(PipelineError) as error:
         process_handler.embed_photos({101: "trips/77/a.jpg"})
     assert error.value.code == ErrorCode.MODEL_NOT_READY and engine.batches == [1]
+
+
+def test_embed_photos_records_fingerprint_for_auto_evaluation(configured, monkeypatch):
+    cfg, _ = configured
+    monkeypatch.setattr(datasets, "reference_sets", lambda: (reference(["a"] * 12),))
+    records = process_handler.embed_photos({101: "trips/77/a.jpg"})
+    data = (cfg.IMAGE_DIR / "trips/77/a.jpg").read_bytes()
+    assert records[101].fingerprint == datasets.candidates(data)
 
 
 @pytest.mark.parametrize("mutation", ["duplicate", "period", "missing"])

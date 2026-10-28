@@ -104,6 +104,15 @@ class PhotoBatchBuffer(StrictModel):
     batches: dict[str, list[ReadyAttachment]] = Field(default_factory=dict)
 
 
+class PhotoMetricsRecord(StrictModel):
+    """업로드 묶음에서 계산한 사진 한 장의 지표. Redis 보관, 정리의 흐림과 중복 판정 입력"""
+
+    variance: float = Field(ge=0)
+    phash: str = Field(pattern=r"^[0-9a-f]{16}$")
+    # 자동 평가 지문 후보(observability.datasets.candidates), 평가를 끈 실행기는 None
+    fingerprint: tuple[int, ...] | None = None
+
+
 class StoryBlock(StrictModel):
     order_number: int = Field(ge=1)
     trip_place_id: int

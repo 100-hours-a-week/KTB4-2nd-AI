@@ -1,4 +1,4 @@
-"""업로드 묶음 임베딩(embed_batch). 저장 범위와 실패 처리"""
+"""업로드 묶음 임베딩(embed_batch). 저장 범위, 사진 지표, 실패 처리"""
 
 import logging
 
@@ -10,6 +10,9 @@ from app.core.config import Settings
 from app.core.errors import DownloadFailed, PipelineError
 from app.pipeline.batch import embed_batch
 from app.pipeline.bootstrap import build_context
+from app.pipeline.steps.download import load_images
+from app.pipeline.steps.filtering import measure_images
+from app.schemas.process import ProcessAttachment
 from tests.test_pipeline import FixedEngine
 
 
@@ -38,18 +41,33 @@ def batch(tmp_path):
 
 def test_embeds_and_stores_every_photo(batch, tmp_path):
     photos, ctx, engine = batch()
-    assert embed_batch(photos, ctx) == [100, 101, 102]
+    assert list(embed_batch(photos, ctx)) == [100, 101, 102]
     assert engine.batches == [3]
     # 엔진은 사본 bytes를 재인코딩 없이 받는다.
     assert engine.images == [(tmp_path / f"{i}.png").read_bytes() for i in range(3)]
     assert sorted(ctx.qdrant.fetch([100, 101, 102])) == [100, 101, 102]
 
 
+def test_metrics_match_process_download_path(batch):
+    photos, ctx, _ = batch()
+    metrics = embed_batch(photos, ctx)
+    attachments = [
+        ProcessAttachment(trip_attachment_id=photo_id, analyze_storage_key=key)
+        for photo_id, key in photos.items()
+    ]
+    _, decoded = load_images(attachments, ctx.images)
+    try:
+        assert metrics == measure_images(decoded)
+    finally:
+        for image in decoded.values():
+            image.close()
+
+
 def test_decode_failure_skips_only_that_photo(batch, tmp_path, caplog):
     photos, ctx, engine = batch()
     (tmp_path / "1.png").write_bytes(b"not an image")
     with caplog.at_level(logging.WARNING, logger="app.pipeline"):
-        assert embed_batch(photos, ctx) == [100, 102]
+        assert list(embed_batch(photos, ctx)) == [100, 102]
     assert engine.batches == [2]
     assert sorted(ctx.qdrant.fetch([100, 101, 102])) == [100, 102]
     (record,) = [
@@ -62,7 +80,7 @@ def test_all_decode_failures_skip_engine(batch, tmp_path):
     photos, ctx, engine = batch(2)
     for i in range(2):
         (tmp_path / f"{i}.png").write_bytes(b"broken")
-    assert embed_batch(photos, ctx) == []
+    assert embed_batch(photos, ctx) == {}
     assert engine.batches == []
     assert ctx.qdrant.fetch([100, 101]) == {}
 
