@@ -80,12 +80,13 @@ BE가 모든 사진의 업로드와 분석용 사본 생성을 마친 뒤 보내
 
 ## 업로드 묶음 임베딩
 
-정리 실행기의 `EMBED_ON_PHOTOS_READY`(기본 true)가 true이면 업로드 중에 묶음마다 사본을 다운로드하고 임베딩해 Qdrant에 저장합니다. 정리의 EMBEDDING 단계는 Qdrant에 저장된 벡터를 먼저 쓰고 없는 사진만 임베딩합니다. false이면 묶음을 실행하지 않으며 정리 때 전체 사진을 임베딩하는 이전 동작과 같습니다. 이 설정은 정리 실행기만 읽으므로 되돌릴 때는 정리 실행기 환경 변수만 false로 바꾸고 재시작하며 API 설정은 바꾸지 않습니다.
+정리 실행기의 `EMBED_ON_PHOTOS_READY`(기본 true)가 true이면 업로드 중에 묶음마다 사본을 다운로드하고 임베딩해 Qdrant에 저장합니다. 같은 이미지로 흐림과 중복 판정 지표(라플라시안 분산, pHash)도 계산해 Redis `photo:{trip_attachment_id}`에 보관합니다. 정리는 벡터와 지표가 모두 저장된 사진의 사본을 다운로드하지 않고, 하나라도 없는 사진만 다운로드해 임베딩과 지표 계산을 합니다. false이면 묶음을 실행하지 않으며 정리 때 전체 사진을 임베딩하는 이전 동작과 같습니다. 이 설정은 정리 실행기만 읽으므로 되돌릴 때는 정리 실행기 환경 변수만 false로 바꾸고 재시작하며 API 설정은 바꾸지 않습니다.
 
-- 정리 실행기는 대기 중인 정리 작업이 없을 때만 묶음을 꺼냅니다. 묶음 실행 중 도착한 정리 작업은 그 묶음이 끝난 직후 실행하고, 그 실행의 남은 묶음은 등록 시 대기열에서 삭제해 정리가 직접 임베딩합니다.
+- 정리 실행기는 대기 중인 정리 작업이 없을 때만 묶음을 꺼냅니다. 묶음 실행 중 도착한 정리 작업은 그 묶음이 끝난 직후 실행하고, 그 실행의 남은 묶음은 등록 시 대기열에서 삭제해 정리가 직접 다운로드하고 임베딩합니다.
 - 묶음도 대기 자식이 1건씩 처리합니다. 묶음에는 lease와 `WORKER_DEAD` 회수가 없으며, `JOBS_PHOTO_BATCH_TIMEOUT_SEC`(기본 60초)를 넘기면 실행기가 자식을 강제 종료합니다.
-- 다운로드, 디코딩, 임베딩 실패는 로그만 남기고 작업 상태를 바꾸지 않습니다. 빠진 사진은 정리가 임베딩하고, 디코딩 실패는 정리의 `DECODE_FAILED`로 판정합니다.
-- 관측 이벤트는 묶음마다 `ai_photo_batch`(`result`, `wait_ms`, `handoff_wait_ms`, `duration_ms`, `embedded_count`), 정리 접수 시 `ai_photo_batch_unprocessed`(`staged_count`, `unprocessed_count`), 정리 EMBEDDING의 `ai_embedding_reuse`(`reused_count`, `embedded_count`), 실행기의 `ai_photo_batch_timeout`과 `ai_photo_batch_exit`입니다.
+- 다운로드, 디코딩, 임베딩, 지표 저장 실패는 로그만 남기고 작업 상태를 바꾸지 않습니다. 빠진 사진은 정리가 다운로드해 임베딩과 지표 계산을 하고, 디코딩 실패는 정리의 `DECODE_FAILED`로 판정합니다.
+- 사진 지표는 `JOBS_PHOTO_METRICS_TTL_SEC`(기본 7일) 후 만료되므로 완료 기록과 달리 계속 쌓이지 않습니다. 레코드는 사진 한 장에 약 200바이트입니다. 만료, Redis 유실, 사진 추가 재처리로 지표가 없는 사진은 정리가 다시 계산하며, 형식이 틀린 레코드는 `ai_photo_metrics_invalid` 경고를 남기고 없는 것으로 처리합니다. 자동 평가가 켜져 있으면 평가 지문도 같은 레코드에 보관해 정리가 다운로드 없이 채점합니다.
+- 관측 이벤트는 묶음마다 `ai_photo_batch`(`result`, `wait_ms`, `handoff_wait_ms`, `duration_ms`, `embedded_count`), 정리 접수 시 `ai_photo_batch_unprocessed`(`staged_count`, `unprocessed_count`), 정리 DOWNLOADING의 `ai_photo_metrics_reuse`(`reused_count`, `downloaded_count`), 정리 EMBEDDING의 `ai_embedding_reuse`(`reused_count`, `embedded_count`), 실행기의 `ai_photo_batch_timeout`과 `ai_photo_batch_exit`입니다.
 
 ## 통신과 실패 처리
 
