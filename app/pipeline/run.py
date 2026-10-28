@@ -15,7 +15,7 @@ from app.pipeline.steps.clock import correct_clocks
 from app.pipeline.steps.clustering import cluster_photos
 from app.pipeline.steps.download import load_images
 from app.pipeline.steps.embed import encode_checked
-from app.pipeline.steps.filtering import filter_photos
+from app.pipeline.steps.filtering import filter_photos, measure_images
 from app.pipeline.steps.finalizing import finalize_photos
 from app.pipeline.steps.locating import locate_photos
 from app.schemas.process import ProcessRequest, ProcessResult
@@ -200,7 +200,7 @@ def run(
                 ProcessStep.FILTERING,
                 lambda: filter_photos(
                     photos,
-                    images,
+                    measure_images(images),
                     blur_var_min=thresholds["blur_var_min"],
                     phash_max_dist=thresholds["phash_max_dist"],
                 ),
