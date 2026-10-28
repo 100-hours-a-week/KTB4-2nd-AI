@@ -12,6 +12,7 @@ from PIL import Image
 from app.core.errors import ErrorCode, PipelineCancelled, PipelineError
 from app.embedding.client import MODEL_VERSION, EmbeddingUnavailable
 from app.engines.fake import FakeEngine
+from app.infra.qdrant import QdrantStore
 from app.jobs import process_handler
 from app.jobs.execution import execute
 from app.jobs.kafka import RequestReceiver, publish_results
@@ -62,7 +63,10 @@ def configured(tmp_path, monkeypatch):
 
 
 def reporter():
-    return AsyncMock()
+    r = AsyncMock()
+    # 업로드 묶음이 저장한 사진 지표가 없는 정리
+    r.store.photo_metrics.return_value = {}
+    return r
 
 
 @scenario
@@ -127,8 +131,34 @@ async def test_photos_ready_setting_controls_vector_reuse(configured, monkeypatc
         return ctx
 
     monkeypatch.setattr(process_handler, "build_context", capture)
-    await process_handler.run(process_request(), reporter())
+    r = reporter()
+    await process_handler.run(process_request(), r)
     assert seen == [enabled]
+    assert r.store.photo_metrics.await_count == int(enabled)
+
+
+@scenario
+async def test_stored_photo_metrics_replace_process_download(configured, monkeypatch):
+    cfg, engine = configured
+    # 실행마다 새로 여는 :memory: Qdrant 대신 묶음과 정리가 같은 저장소를 보게 한다.
+    shared = QdrantStore(":memory:", engine.model_version, engine.dim)
+    monkeypatch.setattr(shared, "close", lambda: None)
+    monkeypatch.setattr(process_handler, "QdrantStore", lambda *args: shared)
+    monkeypatch.setattr(datasets, "reference_sets", lambda: (reference(["a"] * 12),))
+    evaluated = []
+    monkeypatch.setattr(
+        process_handler, "auto_evaluate", lambda result, hashes, cfg: evaluated.append(hashes) or []
+    )
+    async with environment() as (_, store, _, _):
+        r = reporter()
+        r.store = store
+        baseline = await process_handler.run(process_request(), r)
+        records = process_handler.embed_photos({101: "trips/77/a.jpg"})
+        await store.save_photo_metrics(records)
+        (cfg.IMAGE_DIR / "trips/77/a.jpg").unlink()
+        assert await process_handler.run(process_request(), r) == baseline
+    assert engine.batches == [1, 1]
+    assert evaluated[-1] == {101: records[101].fingerprint} == {101: evaluated[0][101]}
 
 
 def test_embed_photos_stores_batch_and_closes_engine(configured):

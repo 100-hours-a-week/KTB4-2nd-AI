@@ -1,6 +1,6 @@
 """v2 정리 작업을 기존 Qwen 파이프라인에 연결한다."""
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 
 import httpx
@@ -21,6 +21,7 @@ from app.pipeline.batch import embed_batch
 from app.pipeline.bootstrap import build_context, build_engine, build_images, wait_for_qdrant
 from app.pipeline.context import PipelineContext
 from app.pipeline.run import run as run_pipeline
+from app.pipeline.steps.filtering import PhotoMetrics
 
 log = get_logger(__name__)
 
@@ -95,6 +96,7 @@ def open_context(
     cfg: JobsSettings,
     check: Callable[[], None] = lambda: None,
     wrap_images: Callable[[ImageSource], ImageSource] | None = None,
+    photo_metrics: Mapping[int, PhotoMetrics] | None = None,
 ) -> Iterator[PipelineContext]:
     """엔진, 이미지, Qdrant를 조립한 컨텍스트. 정리와 사진 묶음이 공유, 나가면 역순으로 해제"""
     with ExitStack() as resources:
@@ -116,27 +118,46 @@ def open_context(
             images=images,
             qdrant=vectors,
             reuse_vectors=cfg.EMBED_ON_PHOTOS_READY,
+            photo_metrics=photo_metrics,
         )
 
 
-def _run(request: ProcessMessage, cfg: JobsSettings, progress, cancelled, reports=None) -> dict:
+def _run(
+    request: ProcessMessage,
+    cfg: JobsSettings,
+    progress,
+    cancelled,
+    reports=None,
+    stored: Mapping[int, PhotoMetricsRecord] | None = None,
+) -> dict:
+    """stored는 업로드 묶음이 Redis에 저장한 사진 지표, 다운로드하지 않는 사진의 지표와 지문"""
+
     def check():
         if cancelled():
             raise PipelineCancelled()
 
-    hashes: dict = {}
+    stored = stored or {}
+    evaluating = reports is not None and evaluation_enabled(cfg)
+    hashes: dict = {
+        photo_id: record.fingerprint
+        for photo_id, record in stored.items()
+        if evaluating and record.fingerprint is not None
+    }
 
     def fingerprint(images: ImageSource) -> ImageSource:
-        if reports is not None and evaluation_enabled(cfg):
+        if evaluating:
             ids = {
                 photo.analyze_storage_key: photo.trip_attachment_id for photo in request.attachments
             }
             return FingerprintingImages(images, ids, hashes)
         return images
 
+    metrics = {
+        photo_id: PhotoMetrics(record.variance, record.phash) for photo_id, record in stored.items()
+    }
     try:
         check()
-        with open_context(cfg, check, fingerprint) as ctx:
+        with open_context(cfg, check, fingerprint, metrics) as ctx:
             result = run_pipeline(request, ctx, progress, cancelled).model_dump(mode="json")
             if hashes:
                 reports.extend(auto_evaluate(result, hashes, cfg))
@@ -193,9 +214,10 @@ async def run(request: dict, reporter: JobReporter) -> dict:
             ErrorCode.MODEL_NOT_READY, "v2 정리 실행기는 Qwen HTTP 임베딩 설정이 필요합니다."
         )
     await reporter.check_cancel()
+    stored = await reporter.store.photo_metrics(ids) if cfg.EMBED_ON_PHOTOS_READY else {}
     reports: list[dict] = []
     result = await run_sync(
-        lambda progress, cancel: _run(message, cfg, progress, cancel, reports), reporter
+        lambda progress, cancel: _run(message, cfg, progress, cancel, reports, stored), reporter
     )
     if trace := current_trace():
         # 결과 저장이 늦어지지 않도록, 그리고 취소된 작업을 기록하지 않도록 저장 뒤로 미룬다.
