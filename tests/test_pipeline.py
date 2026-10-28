@@ -10,8 +10,10 @@ from PIL import Image
 import app.pipeline.run as pipeline_run
 from app.core.config import Settings
 from app.core.errors import DecodeFailed, DownloadFailed, PipelineCancelled, PipelineError
+from app.infra.qdrant import QdrantStore
 from app.pipeline.bootstrap import build_context, select_run
 from app.pipeline.run import run
+from app.pipeline.steps.filtering import measure
 from app.schemas.process import Issue, ProcessRequest, RegionOrigin
 from app.schemas.task import ProcessStep
 
@@ -217,6 +219,90 @@ def test_without_reuse_embeds_all_even_if_stored(setup, caplog):
     for vector in ctx.qdrant.fetch([100, 101, 102]).values():
         np.testing.assert_allclose(vector, [1, 0, 0])
     assert not [r for r in caplog.records if getattr(r, "event", None) == "ai_embedding_reuse"]
+
+
+def stored_metrics(tmp_path, request):
+    """업로드 묶음이 저장했을 지표. 정리의 디코딩과 같은 방식으로 계산"""
+    metrics = {}
+    for attachment in request.attachments:
+        path = tmp_path / attachment.analyze_storage_key
+        with Image.open(path) as image, image.convert("RGB") as rgb:
+            metrics[attachment.trip_attachment_id] = measure(rgb)
+    return metrics
+
+
+def metrics_reuse(caplog):
+    (record,) = [r for r in caplog.records if getattr(r, "event", None) == "ai_photo_metrics_reuse"]
+    return record.reused_count, record.downloaded_count
+
+
+def test_stored_metrics_and_vectors_skip_download_with_same_result(
+    setup, tmp_path, decoded, caplog
+):
+    request, ctx, engine = setup(18)
+    (tmp_path / "1.png").write_bytes((tmp_path / "0.png").read_bytes())
+    Image.new("RGB", (32, 32), "gray").save(tmp_path / "2.png")
+    baseline = run(request, ctx, lambda *_: None, lambda: False)
+    issues = {photo.trip_attachment_id: photo.issue for photo in baseline.unclassified}
+    assert (issues[101], issues[102]) == (Issue.DUPLICATED, Issue.BLURRY)
+    ctx = replace(ctx, reuse_vectors=True, photo_metrics=stored_metrics(tmp_path, request))
+    # 사본이 없어도 끝나야 다운로드하지 않은 것이다.
+    for i in range(18):
+        (tmp_path / f"{i}.png").unlink()
+    decoded.clear()
+    progress = []
+    with caplog.at_level(logging.INFO, logger="app.pipeline"):
+        result = run(request, ctx, lambda *args: progress.append(args), lambda: False)
+    assert result == baseline
+    assert decoded == [] and engine.batches == [16, 2]
+    assert [done for step, done, _ in progress if step is ProcessStep.DOWNLOADING] == [0, 18]
+    assert metrics_reuse(caplog) == (18, 0)
+
+
+def test_only_photos_missing_metrics_or_vectors_are_downloaded(setup, tmp_path, decoded, caplog):
+    request, ctx, engine = setup(18)
+    ids = [attachment.trip_attachment_id for attachment in request.attachments]
+    baseline = run(request, ctx, lambda *_: None, lambda: False)
+    vectors = ctx.qdrant.fetch(ids)
+    qdrant = QdrantStore(":memory:", engine.model_version, engine.dim)
+    qdrant.upsert([i for i in ids if i != 105], np.array([vectors[i] for i in ids if i != 105]))
+    metrics = stored_metrics(tmp_path, request)
+    del metrics[103]
+    ctx = replace(ctx, qdrant=qdrant, reuse_vectors=True, photo_metrics=metrics)
+    for i in range(18):
+        if i not in (3, 5):
+            (tmp_path / f"{i}.png").unlink()
+    decoded.clear()
+    engine.position = 0
+    progress = []
+    with caplog.at_level(logging.INFO, logger="app.pipeline"):
+        result = run(request, ctx, lambda *args: progress.append(args), lambda: False)
+    assert result == baseline
+    assert len(decoded) == 2 and engine.batches == [16, 2, 1]
+    assert [done for step, done, _ in progress if step is ProcessStep.DOWNLOADING] == [0, 16, 18]
+    assert metrics_reuse(caplog) == (16, 2)
+
+
+def test_without_reuse_downloads_all_even_with_stored_metrics(setup, tmp_path, decoded, caplog):
+    request, ctx, engine = setup()
+    ctx = replace(ctx, photo_metrics=stored_metrics(tmp_path, request))
+    with caplog.at_level(logging.INFO, logger="app.pipeline"):
+        run(request, ctx, lambda *_: None, lambda: False)
+    assert len(decoded) == 3 and engine.batches == [3]
+    assert not [r for r in caplog.records if getattr(r, "event", None) == "ai_photo_metrics_reuse"]
+
+
+def test_decode_failure_is_judged_only_for_downloaded_photos(setup, tmp_path):
+    request, ctx, engine = setup()
+    ctx.qdrant.upsert([100, 101, 102], engine.vectors.copy())
+    metrics = stored_metrics(tmp_path, request)
+    del metrics[102]
+    ctx = replace(ctx, reuse_vectors=True, photo_metrics=metrics)
+    (tmp_path / "0.png").write_bytes(b"broken")
+    (tmp_path / "2.png").write_bytes(b"broken")
+    with pytest.raises(DecodeFailed) as error:
+        run(request, ctx, lambda *_: None, lambda: False)
+    assert error.value.ids == [102]
 
 
 @pytest.mark.parametrize("step", list(ProcessStep))

@@ -15,7 +15,7 @@ from app.pipeline.steps.clock import correct_clocks
 from app.pipeline.steps.clustering import cluster_photos
 from app.pipeline.steps.download import load_images
 from app.pipeline.steps.embed import encode_checked
-from app.pipeline.steps.filtering import filter_photos
+from app.pipeline.steps.filtering import filter_photos, measure_images
 from app.pipeline.steps.finalizing import finalize_photos
 from app.pipeline.steps.locating import locate_photos
 from app.schemas.process import ProcessRequest, ProcessResult
@@ -38,23 +38,27 @@ def run(
                       사본 키는 request.attachments[].analyze_storage_key
         ctx           외부 자원. ctx.images.get_many(keys), ctx.engine.encode_images(사본 bytes),
                       ctx.qdrant.upsert(ids, vectors), ctx.qdrant.fetch(ids), ctx.thresholds[키],
-                      ctx.settings, ctx.log, ctx.reuse_vectors
+                      ctx.settings, ctx.log, ctx.reuse_vectors, ctx.photo_metrics
         on_progress   진행률 보고 함수 on_progress(step, done, total). 워커가 api로 콜백
         is_cancelled  취소 확인 함수. True면 즉시 PipelineCancelled를 raise
 
     단계, 이 순서로 ProcessStep 값을 on_progress에 넘김
-        DOWNLOADING  ctx.images로 사본 bytes 확보, PIL로 디코딩. 안 열리는 사진은 DecodeFailed(ids)
+        DOWNLOADING  ctx.images로 사본 bytes 확보, PIL로 디코딩. 안 열리는 사진은 DecodeFailed(ids).
+                     ctx.reuse_vectors면 ctx.qdrant.fetch로 저장 벡터를 먼저 조회하고,
+                     벡터와 ctx.photo_metrics가 모두 있는 사진은 다운로드와 디코딩 생략
         EMBEDDING    16장 배치의 사본 bytes로 ctx.engine.encode_images, 배치마다 ctx.qdrant.upsert.
-                     ctx.reuse_vectors면 ctx.qdrant.fetch로 저장 벡터를 먼저 쓰고 없는 사진만 임베딩
+                     ctx.reuse_vectors면 조회한 저장 벡터를 먼저 쓰고 없는 사진만 임베딩
         CLOCK        device_model로 기기별 묶음, 유사도 쌍으로 기기별 단일 오프셋 산출과 적용
         LOCATING     기간 밖 분리, GPS 앵커, 유사도 상속
         CLUSTERING   haversine DBSCAN, 재방문은 한 폴더
-        FILTERING    라플라시안 BLURRY, pHash DUPLICATED, 원래 폴더 place_id 연결
+        FILTERING    라플라시안 BLURRY, pHash DUPLICATED, 원래 폴더 place_id 연결.
+                     다운로드한 사진만 측정하고 나머지는 ctx.photo_metrics 사용
         FINALIZING   대표컷은 폴더 평균 임베딩 최근접, first/last_taken_at, ProcessResult 조립
 
     진행률 규칙
         total은 항상 사진 수(len(request.attachments)), 단계가 바뀌어도 같음
-        DOWNLOADING과 EMBEDDING은 사진 묶음 또는 배치마다 done을 올림
+        DOWNLOADING과 EMBEDDING은 사진 묶음 또는 배치마다 done을 올림.
+        다운로드나 임베딩을 생략한 사진 수는 먼저 한 번에 올림
         나머지 다섯 단계는 시작에 (step, 0, total), 끝에 (step, total, total) 한 번씩
         어떤 단계도 120초 넘게 on_progress 없이 조용하면 안 됨. api가 WORKER_DEAD로 판정.
         넘길 수 있는 단계는 중간에 done을 갱신해 호출
@@ -112,10 +116,25 @@ def run(
         interval = min(30.0, ctx.settings.WORKER_DEAD_SEC / 3)
         with ProgressReporter(on_progress, total, interval) as progress:
             progress.report(ProcessStep.DOWNLOADING, 0)
-            failed_ids = []
-            for start in range(0, total, 16):
+            stored = {}
+            downloads = request.attachments
+            if ctx.reuse_vectors:
+                # 업로드 묶음에서 벡터와 지표를 모두 저장한 사진은 사본을 다시 받지 않는다.
+                stored = ctx.qdrant.fetch([photo.source.trip_attachment_id for photo in photos])
+                downloads = [
+                    attachment
+                    for attachment in request.attachments
+                    if attachment.trip_attachment_id not in stored
+                    or attachment.trip_attachment_id not in ctx.photo_metrics
+                ]
                 check_cancel()
-                chunk = request.attachments[start : start + 16]
+            skipped = total - len(downloads)
+            if skipped:
+                progress.report(ProcessStep.DOWNLOADING, skipped)
+            failed_ids = []
+            for start in range(0, len(downloads), 16):
+                check_cancel()
+                chunk = downloads[start : start + 16]
                 try:
                     raw, decoded = load_images(chunk, ctx.images)
                     raw_images.update(raw)
@@ -123,9 +142,18 @@ def run(
                 except DecodeFailed as exc:
                     failed_ids.extend(exc.ids)
                 check_cancel()
-                progress.report(ProcessStep.DOWNLOADING, min(start + 16, total))
+                progress.report(ProcessStep.DOWNLOADING, skipped + min(start + 16, len(downloads)))
             if failed_ids:
                 raise DecodeFailed(failed_ids)
+            if ctx.reuse_vectors:
+                ctx.log.info(
+                    "저장된 사진 지표 재사용",
+                    extra={
+                        "event": "ai_photo_metrics_reuse",
+                        "reused_count": skipped,
+                        "downloaded_count": len(downloads),
+                    },
+                )
             log_snapshot(ctx.log, ProcessStep.DOWNLOADING, photos)
 
             check_cancel()
@@ -133,11 +161,9 @@ def run(
             pending = photos
             if ctx.reuse_vectors:
                 # 업로드 묶음에서 저장한 벡터를 쓰고 저장되지 않은 사진만 임베딩한다.
-                stored = ctx.qdrant.fetch([photo.source.trip_attachment_id for photo in photos])
                 for photo in photos:
                     photo.embedding = stored.get(photo.source.trip_attachment_id)
                 pending = [photo for photo in photos if photo.embedding is None]
-                check_cancel()
             reused = total - len(pending)
             if reused:
                 progress.report(ProcessStep.EMBEDDING, reused)
@@ -200,7 +226,8 @@ def run(
                 ProcessStep.FILTERING,
                 lambda: filter_photos(
                     photos,
-                    images,
+                    # 다운로드한 사진만 측정하고 나머지는 업로드 묶음의 지표를 쓴다.
+                    {**ctx.photo_metrics, **measure_images(images)},
                     blur_var_min=thresholds["blur_var_min"],
                     phash_max_dist=thresholds["phash_max_dist"],
                 ),

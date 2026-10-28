@@ -1,7 +1,9 @@
 """FILTERING: 장소별, 위치 불명 사진끼리 흐림과 중복 판정. 원본과 장소 연결은 보존한다."""
 
+import re
 from collections import defaultdict
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import cv2
@@ -12,6 +14,16 @@ from PIL import Image
 from app.core.errors import PipelineError
 from app.pipeline.state import PhotoState, TimeStatus
 from app.schemas.process import Issue
+
+_PHASH_HEX = re.compile(r"[0-9a-f]{16}")
+
+
+@dataclass(frozen=True)
+class PhotoMetrics:
+    """흐림과 중복 판정 입력. 이미지 없이 판정할 수 있게 측정값만 보관"""
+
+    variance: float  # 긴 변 최대 1024px 라플라시안 분산
+    phash: str  # 64비트 pHash의 16자리 hex
 
 
 def _measure(image: Image.Image) -> tuple[float, imagehash.ImageHash]:
@@ -28,6 +40,25 @@ def _measure(image: Image.Image) -> tuple[float, imagehash.ImageHash]:
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     variance = float(cv2.Laplacian(gray, cv2.CV_64F, ksize=1).var())
     return variance, imagehash.phash(image, hash_size=8, highfreq_factor=4)
+
+
+def measure(image: Image.Image) -> PhotoMetrics:
+    """디코딩한 사진 한 장의 흐림과 중복 판정 지표"""
+    variance, phash = _measure(image)
+    return PhotoMetrics(variance, str(phash))
+
+
+def measure_images(images: Mapping[int, Image.Image]) -> dict[int, PhotoMetrics]:
+    """사진 ID별 지표. 이미지가 유효하지 않거나 측정에 실패하면 PipelineError"""
+    metrics: dict[int, PhotoMetrics] = {}
+    for photo_id, image in images.items():
+        if not isinstance(image, Image.Image) or min(image.size) < 1:
+            raise PipelineError(f"지표 측정 대상 이미지가 유효하지 않음: {photo_id}")
+        try:
+            metrics[photo_id] = measure(image)
+        except (OSError, ValueError, cv2.error) as exc:
+            raise PipelineError(f"사진 지표 측정 실패: {photo_id}") from exc
+    return metrics
 
 
 def _order(photo: PhotoState) -> tuple[bool, datetime, int]:
@@ -48,7 +79,7 @@ def _order(photo: PhotoState) -> tuple[bool, datetime, int]:
 
 def filter_photos(
     photos: list[PhotoState],
-    images: Mapping[int, Image.Image],
+    metrics: Mapping[int, PhotoMetrics],
     *,
     blur_var_min: float,
     phash_max_dist: int,
@@ -83,13 +114,17 @@ def filter_photos(
         if photo_id in measurements:
             raise PipelineError("FILTERING 대상 사진 ID가 중복됨")
         _order(photo)
-        image = images.get(photo_id)
-        if not isinstance(image, Image.Image) or min(image.size) < 1:
-            raise PipelineError(f"FILTERING 대상 이미지가 없거나 유효하지 않음: {photo_id}")
-        try:
-            measurements[photo_id] = _measure(image)
-        except (OSError, ValueError, cv2.error) as exc:
-            raise PipelineError(f"FILTERING 이미지 측정 실패: {photo_id}") from exc
+        metric = metrics.get(photo_id)
+        if (
+            not isinstance(metric, PhotoMetrics)
+            or not isinstance(metric.variance, int | float)
+            or not np.isfinite(metric.variance)
+            or metric.variance < 0
+            or not isinstance(metric.phash, str)
+            or not _PHASH_HEX.fullmatch(metric.phash)
+        ):
+            raise PipelineError(f"FILTERING 대상 사진의 지표가 없거나 유효하지 않음: {photo_id}")
+        measurements[photo_id] = float(metric.variance), imagehash.hex_to_hash(metric.phash)
         groups[photo.place_id].append(photo)
 
     # 모든 입력의 측정이 성공한 뒤 분류를 갱신한다.

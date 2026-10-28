@@ -3,6 +3,7 @@
 import asyncio
 
 from app.jobs.execution import JobReporter
+from app.jobs.models import PhotoMetricsRecord
 
 
 async def run(request: dict, reporter: JobReporter) -> dict:
@@ -53,6 +54,9 @@ async def run(request: dict, reporter: JobReporter) -> dict:
     }
 
 
-def embed_photos(photos: dict[int, str]) -> list[int]:
-    """연동 확인용 사진 묶음 처리. 다운로드와 임베딩 없이 받은 사진 ID를 그대로 반환"""
-    return list(photos)
+def embed_photos(photos: dict[int, str]) -> dict[int, PhotoMetricsRecord]:
+    """연동 확인용 사진 묶음 처리. 다운로드와 임베딩을 하지 않으므로 저장할 사진 지표도 없음
+
+    가짜 지표를 저장하면 같은 환경의 실제 정리가 그 값을 재사용하게 됨
+    """
+    return {}

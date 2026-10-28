@@ -28,7 +28,7 @@ from app.core.logging import (
 )
 from app.core.tracing import StageRecord, current_trace, end_trace, start_trace
 from app.jobs.config import JobsSettings
-from app.jobs.models import JobKind
+from app.jobs.models import JobKind, PhotoMetricsRecord
 from app.jobs.process_guard import parent_guard
 from app.jobs.redis_store import RedisJobStore
 from app.schemas.task import TERMINAL_STATUSES, ErrorBody
@@ -255,8 +255,11 @@ def redis_client(cfg: JobsSettings) -> Redis:
     )
 
 
-def batch_handler_for(cfg: JobsSettings) -> Callable[[dict[int, str]], list[int]]:
-    """사진 묶음 처리 함수 embed_photos({사진 ID: 사본 키}) -> 저장한 사진 ID 목록"""
+BatchHandler = Callable[[dict[int, str]], dict[int, PhotoMetricsRecord]]
+
+
+def batch_handler_for(cfg: JobsSettings) -> BatchHandler:
+    """사진 묶음 처리 함수 embed_photos({사진 ID: 사본 키}) -> {저장한 사진 ID: 사진 지표}"""
     if cfg.JOBS_FAKE_PIPELINE:
         from app.jobs.mock import embed_photos
     else:
@@ -267,12 +270,12 @@ def batch_handler_for(cfg: JobsSettings) -> Callable[[dict[int, str]], list[int]
 async def run_batch(
     store: RedisJobStore,
     payload: dict,
-    handler: Callable[[dict[int, str]], list[int]],
+    handler: BatchHandler,
     handoff_wait_ms: float | None = None,
 ) -> None:
-    """사진 묶음 1건 임베딩. 실패해도 Redis 상태를 바꾸지 않고 로그만 남김
+    """사진 묶음 1건 임베딩과 사진 지표 저장. 실패해도 작업 상태를 바꾸지 않고 로그만 남김
 
-    결과는 Qdrant 벡터뿐이라 빠진 사진은 process가 임베딩
+    결과는 Qdrant 벡터와 Redis 사진 지표뿐이라 빠진 사진은 process가 임베딩하고 지표를 계산
     """
     bind_trip(payload["trip_id"])
     batch_no = payload["batch_no"]
@@ -293,6 +296,7 @@ async def run_batch(
         embedded = await asyncio.to_thread(
             handler, {photo.trip_attachment_id: photo.analyze_storage_key for photo in photos}
         )
+        await store.save_photo_metrics(embedded)
     except Exception as exc:
         log.warning(
             "사진 묶음 임베딩 실패, process에서 다시 임베딩",
@@ -318,7 +322,7 @@ async def run_batch(
 async def run_batch_job(
     cfg: JobsSettings,
     payload: dict,
-    handler: Callable[[dict[int, str]], list[int]],
+    handler: BatchHandler,
     handoff_wait_ms: float | None = None,
 ) -> None:
     redis = redis_client(cfg)

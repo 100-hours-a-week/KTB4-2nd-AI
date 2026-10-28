@@ -6,7 +6,8 @@
 """
 
 import logging
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -15,6 +16,7 @@ from app.core.config import Settings
 from app.embedding.contracts import EmbeddingEngine
 from app.infra.images import ImageSource
 from app.infra.qdrant import QdrantStore
+from app.pipeline.steps.filtering import PhotoMetrics
 
 Thresholds = dict[str, float | int]
 
@@ -31,6 +33,8 @@ class PipelineContext:
     log: logging.Logger
     # EMBEDDING에서 qdrant에 저장된 벡터를 먼저 쓰고 없는 사진만 임베딩. v2 EMBED_ON_PHOTOS_READY
     reuse_vectors: bool = False
+    # 업로드 묶음에서 계산한 {사진 ID: 지표}. reuse_vectors이고 벡터도 저장된 사진은 다운로드 생략
+    photo_metrics: Mapping[int, PhotoMetrics] = field(default_factory=dict)
 
 
 def load_thresholds(path: Path, model_version: str) -> Thresholds:

@@ -12,10 +12,15 @@ from PIL import Image
 from app.core.errors import ErrorCode, PipelineCancelled, PipelineError
 from app.embedding.client import MODEL_VERSION, EmbeddingUnavailable
 from app.engines.fake import FakeEngine
+from app.infra.qdrant import QdrantStore
 from app.jobs import process_handler
 from app.jobs.execution import execute
 from app.jobs.kafka import RequestReceiver, publish_results
+from app.jobs.models import PhotoMetricsRecord
 from app.jobs.sync_bridge import run_sync
+from app.observability import datasets
+from app.pipeline.steps.filtering import measure
+from tests.test_v2_auto_evaluation import reference
 from tests.test_v2_jobs import environment, message, process_request, scenario
 
 
@@ -58,7 +63,10 @@ def configured(tmp_path, monkeypatch):
 
 
 def reporter():
-    return AsyncMock()
+    r = AsyncMock()
+    # 업로드 묶음이 저장한 사진 지표가 없는 정리
+    r.store.photo_metrics.return_value = {}
+    return r
 
 
 @scenario
@@ -123,18 +131,56 @@ async def test_photos_ready_setting_controls_vector_reuse(configured, monkeypatc
         return ctx
 
     monkeypatch.setattr(process_handler, "build_context", capture)
-    await process_handler.run(process_request(), reporter())
+    r = reporter()
+    await process_handler.run(process_request(), r)
     assert seen == [enabled]
+    assert r.store.photo_metrics.await_count == int(enabled)
+
+
+@scenario
+async def test_stored_photo_metrics_replace_process_download(configured, monkeypatch):
+    cfg, engine = configured
+    # 실행마다 새로 여는 :memory: Qdrant 대신 묶음과 정리가 같은 저장소를 보게 한다.
+    shared = QdrantStore(":memory:", engine.model_version, engine.dim)
+    monkeypatch.setattr(shared, "close", lambda: None)
+    monkeypatch.setattr(process_handler, "QdrantStore", lambda *args: shared)
+    monkeypatch.setattr(datasets, "reference_sets", lambda: (reference(["a"] * 12),))
+    evaluated = []
+    monkeypatch.setattr(
+        process_handler, "auto_evaluate", lambda result, hashes, cfg: evaluated.append(hashes) or []
+    )
+    async with environment() as (_, store, _, _):
+        r = reporter()
+        r.store = store
+        baseline = await process_handler.run(process_request(), r)
+        records = process_handler.embed_photos({101: "trips/77/a.jpg"})
+        await store.save_photo_metrics(records)
+        (cfg.IMAGE_DIR / "trips/77/a.jpg").unlink()
+        assert await process_handler.run(process_request(), r) == baseline
+    assert engine.batches == [1, 1]
+    assert evaluated[-1] == {101: records[101].fingerprint} == {101: evaluated[0][101]}
 
 
 def test_embed_photos_stores_batch_and_closes_engine(configured):
     cfg, engine = configured
-    assert process_handler.embed_photos({101: "trips/77/a.jpg"}) == [101]
+    cfg.EVAL_AUTO_DETECT = False
+    records = process_handler.embed_photos({101: "trips/77/a.jpg"})
+    with Image.open(cfg.IMAGE_DIR / "trips/77/a.jpg") as image, image.convert("RGB") as rgb:
+        expected = measure(rgb)
+    assert records == {101: PhotoMetricsRecord(variance=expected.variance, phash=expected.phash)}
     assert engine.batches == [1] and engine.closed
     cfg.FAKE_PIPELINE = True
     with pytest.raises(PipelineError) as error:
         process_handler.embed_photos({101: "trips/77/a.jpg"})
     assert error.value.code == ErrorCode.MODEL_NOT_READY and engine.batches == [1]
+
+
+def test_embed_photos_records_fingerprint_for_auto_evaluation(configured, monkeypatch):
+    cfg, _ = configured
+    monkeypatch.setattr(datasets, "reference_sets", lambda: (reference(["a"] * 12),))
+    records = process_handler.embed_photos({101: "trips/77/a.jpg"})
+    data = (cfg.IMAGE_DIR / "trips/77/a.jpg").read_bytes()
+    assert records[101].fingerprint == datasets.candidates(data)
 
 
 @pytest.mark.parametrize("mutation", ["duplicate", "period", "missing"])
