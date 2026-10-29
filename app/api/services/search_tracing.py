@@ -13,12 +13,28 @@ class TracedVlm:
         self.inner = inner
 
     async def chat(
-        self, messages, image_urls, max_tokens, response_format=None, *, temperature=None
+        self,
+        messages,
+        image_urls,
+        max_tokens,
+        response_format=None,
+        *,
+        tools=None,
+        tool_choice=None,
+        temperature=None,
     ):
         trace = current_trace()
         name = "interpret" if trace and trace.operation == "parse" else "answer"
-        # 값이 있을 때만 넘겨, temperature를 받지 않는 구현도 그대로 감쌀 수 있게 한다.
-        options = {} if temperature is None else {"temperature": temperature}
+        # 값이 있을 때만 넘겨, 도구나 temperature를 받지 않는 구현도 그대로 감쌀 수 있게 한다.
+        options = {
+            key: value
+            for key, value in {
+                "tools": tools,
+                "tool_choice": tool_choice,
+                "temperature": temperature,
+            }.items()
+            if value is not None
+        }
         with stage(name, images=len(image_urls)):
             return await self.inner.chat(
                 messages, image_urls, max_tokens, response_format, **options

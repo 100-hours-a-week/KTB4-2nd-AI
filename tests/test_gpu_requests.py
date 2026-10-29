@@ -58,6 +58,21 @@ async def test_generation_client_forwards_temperature_only_when_given():
 
 
 @scenario
+async def test_generation_client_forwards_tool_calls_through_the_same_gate():
+    async with environment() as (cfg, a, _, _):
+        model = AsyncMock()
+        model.chat.return_value = "turn"
+        client = generation_client(model, a.redis, cfg)
+        assert await client.chat([], [], 20, tools=["tool"], temperature=0) == "turn"
+        await client.chat([], [], 20, tools=["tool"], tool_choice="required")
+        first, second = model.chat.await_args_list
+        assert first.args == ([], [], 20, None)
+        assert first.kwargs == {"tools": ["tool"], "temperature": 0}
+        assert second.kwargs == {"tools": ["tool"], "tool_choice": "required"}
+        assert await a.redis.zcard(a.key("gpu:generation")) == 0
+
+
+@scenario
 async def test_busy_and_redis_failure_never_start_http_call():
     async with environment() as (cfg, a, _, _):
         cfg.GPU_GENERATION_INFLIGHT = 2
