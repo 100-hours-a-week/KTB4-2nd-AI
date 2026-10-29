@@ -16,18 +16,25 @@ services:
       - --port
       - "8000"
       - --max-model-len
-      - ${GENERATION_MAX_MODEL_LEN:-16384}
+      - ${GENERATION_MAX_MODEL_LEN:-32768}
       - --gpu-memory-utilization
       - ${GENERATION_GPU_MEMORY_UTILIZATION:-0.90}
       - --max-num-seqs
       - ${GENERATION_MAX_NUM_SEQS:-8}
       - --limit-mm-per-prompt
-      - '{"image": ${GENERATION_MAX_IMAGES:-10}, "audio": 0, "video": 0}'
+      - '{"image": ${GENERATION_MAX_IMAGES:-30}, "audio": 0, "video": 0}'
       - --scheduling-policy
       - priority
       # 볼륨에서 가중치를 읽을 때 미리 페이지 캐시에 올림, RunPod 재시작 약 11분에서 약 3분
       - --safetensors-load-strategy
       - prefetch
+      # 요청에 tools나 enable_thinking이 있을 때만 동작, 기존 검색과 스토리 응답 형식은 그대로
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - gemma4
+      - --reasoning-parser
+      - gemma4
+      - --trust-request-mm-kwargs
     environment:
       VLLM_API_KEY: ${GENERATION_API_KEY:?Set the generation API key}
       HF_TOKEN: ${HF_TOKEN:-}
