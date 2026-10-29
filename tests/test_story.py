@@ -13,7 +13,7 @@ from PIL import Image
 
 from app.core.errors import ErrorCode, PipelineCancelled, PipelineError
 from app.core.tracing import end_trace, start_trace
-from app.infra.vlm import VLMUnavailable
+from app.infra.vlm import ChatTurn, VLMUnavailable
 from app.story.pipeline import StoryContext, StoryOptions, finalize, run, validate_request
 from app.story.prompts import StoryDraft, response_format
 from app.story.selection import (
@@ -78,7 +78,7 @@ def context():
     vectors = AsyncMock()
     vectors.fetch.return_value = {101: np.array([1.0, 0]), 102: np.array([0.0, 1.0])}
     vlm = AsyncMock()
-    vlm.chat.return_value = draft()
+    vlm.chat.return_value = ChatTurn(draft())
     urls = AsyncMock()
     urls.resolve.side_effect = lambda key: "https://images.test/" + key
     return StoryContext(lambda: nullcontext(Images()), vectors, urls, vlm)
@@ -257,7 +257,7 @@ async def test_story_skips_near_duplicate_photo_by_trip_threshold(dedupe_z, expe
         103: np.array([0.999, 0.04]),
         104: np.array([0.6, 0.8]),
     }
-    ctx.vlm.chat.return_value = draft(expected)
+    ctx.vlm.chat.return_value = ChatTurn(draft(expected))
     caplog.set_level(logging.INFO)
     _, token = start_trace("story", emit_stage_logs=True)
     try:
@@ -425,7 +425,7 @@ async def test_cancel_after_generation_cannot_return_completed():
 
     async def generate(*args, **kwargs):
         reporter.check_cancel.side_effect = PipelineCancelled()
-        return draft()
+        return ChatTurn(draft())
 
     ctx.vlm.chat.side_effect = generate
     with pytest.raises(PipelineCancelled):

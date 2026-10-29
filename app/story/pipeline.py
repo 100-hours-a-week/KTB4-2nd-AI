@@ -189,7 +189,7 @@ async def run(request: dict, reporter, ctx: StoryContext, options: StoryOptions)
         await reporter.check_cancel()
         await reporter.report("VERIFYING", 3, 4)
         with stage("validate", parent="verifying"):
-            result = finalize(raw, message, selected)
+            result = finalize(raw.content, message, selected)
         await reporter.report("VERIFYING", 4, 4)
         await reporter.check_cancel()
         return result

@@ -13,7 +13,7 @@ from pydantic import ValidationError
 
 from app.api.services.query_service import QueryService
 from app.core.config import Settings
-from app.infra.vlm import VLMUnavailable
+from app.infra.vlm import ChatTurn, VLMUnavailable
 from app.main import create_app
 from app.schemas.query import ParseRequest, ParseResponse, SearchHit, SearchResponse
 from app.search import dates, prompts, regions
@@ -136,9 +136,11 @@ async def test_mock_chat_accepts_optional_response_format_without_changing_outpu
     assert original == without_format == with_format
     assert response_format == original_format
     if image_urls:
-        assert prompts.parse_answer(original).startswith("[MOCK]")
+        assert prompts.parse_answer(original.content).startswith("[MOCK]")
     else:
-        assert prompts.ParseOutput.model_validate_json(original).visual_query == "바다 사진?"
+        assert (
+            prompts.ParseOutput.model_validate_json(original.content).visual_query == "바다 사진?"
+        )
 
 
 async def test_unconfigured_server_does_not_use_mock():
@@ -483,7 +485,7 @@ class ScriptedVLM(MockVLM):
     ):
         self.calls.append({"response_format": response_format, "temperature": temperature})
         if image_urls:
-            return self.answer_output
+            return ChatTurn(self.answer_output)
         return await super().chat(messages, image_urls, max_tokens, response_format)
 
 
@@ -632,7 +634,7 @@ async def test_invalid_vlm_text_uses_parse_fallback(output):
         async def chat(
             self, messages, image_urls, max_tokens, response_format=None, *, temperature=None
         ):
-            return output
+            return ChatTurn(output)
 
     context = replace(create_mock_context(), vlm=VLM())
     async with client_for(context) as client:

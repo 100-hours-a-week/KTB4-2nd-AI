@@ -85,10 +85,18 @@ class GatedVlm:
         self.client, self.gate, self.timeout_sec = client, gate, timeout_sec
 
     async def chat(
-        self, messages, image_urls, max_tokens, response_format=None, *, temperature=None
+        self,
+        messages,
+        image_urls,
+        max_tokens,
+        response_format=None,
+        *,
+        tools=None,
+        tool_choice=None,
+        temperature=None,
     ):
-        # 값이 있을 때만 넘겨, temperature를 받지 않는 구현도 그대로 감쌀 수 있게 한다.
-        options = {} if temperature is None else {"temperature": temperature}
+        # 값이 있을 때만 넘겨, 도구나 temperature를 받지 않는 구현도 그대로 감쌀 수 있게 한다.
+        options = _given(tools=tools, tool_choice=tool_choice, temperature=temperature)
         try:
             return await self.gate.run(
                 lambda: self.client.chat(
@@ -98,6 +106,10 @@ class GatedVlm:
             )
         except GateUnavailable:
             raise VLMUnavailable("생성 서버의 호출 대기 한도를 초과했습니다.") from None
+
+
+def _given(**options):
+    return {name: value for name, value in options.items() if value is not None}
 
 
 class GatedEmbedder:
