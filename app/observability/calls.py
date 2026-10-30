@@ -26,7 +26,7 @@ def usage_fields(usage: Any) -> dict[str, int | None]:
 
 
 def log_model_call(target: str, started: float, result: str, **fields: Any) -> None:
-    """target은 vlm, embedding, s3. result는 success 또는 실패 분류값"""
+    """target은 vlm, embedding, s3, kakao. result는 success 또는 실패 분류값"""
     seconds = max(0.0, time.monotonic() - started)
     payload = {
         "event": "ai_model_call",
