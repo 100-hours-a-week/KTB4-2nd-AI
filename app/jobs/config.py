@@ -1,5 +1,6 @@
 """v2 전용 설정. v1의 기동 및 기본 제한을 변경하지 않는다."""
 
+import re
 from typing import Literal, Self
 
 from pydantic import Field, SecretStr, model_validator
@@ -63,6 +64,15 @@ class JobsSettings(Settings):
     RUNPOD_STATUS_CACHE_SEC: float = Field(default=10, ge=0, allow_inf_nan=False)
     RUNPOD_STATUS_TIMEOUT_SEC: float = Field(default=3, gt=0, allow_inf_nan=False)
 
+    # 정리 에이전트의 공공 장소 색인(#151). S3 URI가 있으면 실행기 시작 때 해시 확인 후 한 번 받음
+    PLACE_INDEX_PATH: str | None = None
+    PLACE_INDEX_S3_URI: str | None = None
+    PLACE_INDEX_SHA256: str | None = None
+    # 카카오 로컬 API. 하루 무료 한도를 모든 작업이 함께 쓰므로 작업마다 호출 수를 제한한다.
+    KAKAO_REST_API_KEY: SecretStr | None = None
+    KAKAO_CALLS_PER_JOB: int = Field(default=200, ge=0)
+    KAKAO_TIMEOUT_SEC: float = Field(default=10, gt=0, allow_inf_nan=False)
+
     @model_validator(mode="after")
     def check_jobs_settings(self) -> Self:
         if self.JOBS_HEARTBEAT_SEC * 3 >= self.JOBS_LEASE_SEC:
@@ -72,6 +82,14 @@ class JobsSettings(Settings):
         ]
         if len(set(topics)) != 6 or any(not topic.strip() for topic in topics):
             raise ValueError("요청과 결과 토픽 6개는 서로 다른 이름이어야 함")
+        # 환경 변수 예시처럼 빈 값으로 둔 항목은 쓰지 않는 것으로 본다.
+        if self.PLACE_INDEX_S3_URI or self.PLACE_INDEX_SHA256:
+            if not re.fullmatch(r"s3://[^/]+/.+", self.PLACE_INDEX_S3_URI or ""):
+                raise ValueError("PLACE_INDEX_S3_URI는 s3://버킷/키 형식이어야 함")
+            if not re.fullmatch(r"[0-9a-f]{64}", self.PLACE_INDEX_SHA256 or ""):
+                raise ValueError("PLACE_INDEX_SHA256은 소문자 16진수 64자여야 함")
+            if not self.PLACE_INDEX_PATH:
+                raise ValueError("PLACE_INDEX_S3_URI를 쓰려면 PLACE_INDEX_PATH가 필요함")
         return self
 
     @property
