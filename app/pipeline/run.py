@@ -11,6 +11,7 @@ from app.pipeline.context import PipelineContext
 from app.pipeline.observability import log_snapshot
 from app.pipeline.progress import ProgressReporter
 from app.pipeline.state import build_photo_states
+from app.pipeline.steps.assigning import assign_unlocated
 from app.pipeline.steps.clock import correct_clocks
 from app.pipeline.steps.clustering import cluster_photos
 from app.pipeline.steps.download import load_images
@@ -50,7 +51,8 @@ def run(
                      ctx.reuse_vectors면 조회한 저장 벡터를 먼저 쓰고 없는 사진만 임베딩
         CLOCK        device_model로 기기별 묶음, 유사도 쌍으로 기기별 단일 오프셋 산출과 적용
         LOCATING     기간 밖 분리, GPS 앵커, 유사도 상속
-        CLUSTERING   haversine DBSCAN, 재방문은 한 폴더
+        CLUSTERING   haversine DBSCAN, 재방문은 한 폴더. 이어서 위치를 못 찾은 GPS 없는 사진을
+                     촬영 시각 끼워 넣기와 닮은 사진 따라가기로 폴더에 넣음
         FILTERING    라플라시안 BLURRY, pHash DUPLICATED, 원래 폴더 place_id 연결.
                      다운로드한 사진만 측정하고 나머지는 ctx.photo_metrics 사용
         FINALIZING   대표컷은 폴더 평균 임베딩 최근접, first/last_taken_at, ProcessResult 조립
@@ -109,6 +111,7 @@ def run(
             "clock_pair_min_sim",
             "clock_min_pairs",
             "clock_offset_tolerance_sec",
+            "interpolate_max_gap_min",
         }
         if missing := required - thresholds.keys():
             raise PipelineError(f"파이프라인 임계값이 누락됨: {sorted(missing)}")
@@ -214,14 +217,21 @@ def run(
                     photos, request.period, inherit_min_sim=thresholds["inherit_min_sim"]
                 ),
             )
-            stage(
-                ProcessStep.CLUSTERING,
-                lambda: cluster_photos(
+
+            def clustering():
+                cluster_photos(
                     photos,
                     dbscan_eps_m=thresholds["dbscan_eps_m"],
                     min_samples=thresholds["min_samples"],
-                ),
-            )
+                )
+                assign_unlocated(
+                    photos,
+                    request.period,
+                    inherit_min_sim=thresholds["inherit_min_sim"],
+                    interpolate_max_gap_min=thresholds["interpolate_max_gap_min"],
+                )
+
+            stage(ProcessStep.CLUSTERING, clustering)
             variances = stage(
                 ProcessStep.FILTERING,
                 lambda: filter_photos(
