@@ -88,6 +88,18 @@ BE가 모든 사진의 업로드와 분석용 사본 생성을 마친 뒤 보내
 - 사진 지표는 `JOBS_PHOTO_METRICS_TTL_SEC`(기본 7일) 후 만료되므로 완료 기록과 달리 계속 쌓이지 않습니다. 레코드는 사진 한 장에 약 200바이트입니다. 만료, Redis 유실, 사진 추가 재처리로 지표가 없는 사진은 정리가 다시 계산하며, 형식이 틀린 레코드는 `ai_photo_metrics_invalid` 경고를 남기고 없는 것으로 처리합니다. 자동 평가가 켜져 있으면 평가 지문도 같은 레코드에 보관해 정리가 다운로드 없이 채점합니다.
 - 관측 이벤트는 묶음마다 `ai_photo_batch`(`result`, `wait_ms`, `handoff_wait_ms`, `duration_ms`, `embedded_count`), 정리 접수 시 `ai_photo_batch_unprocessed`(`staged_count`, `unprocessed_count`), 정리 DOWNLOADING의 `ai_photo_metrics_reuse`(`reused_count`, `downloaded_count`), 정리 EMBEDDING의 `ai_embedding_reuse`(`reused_count`, `embedded_count`), 실행기의 `ai_photo_batch_timeout`과 `ai_photo_batch_exit`입니다.
 
+## 공공 장소 색인과 카카오 로컬 API
+
+정리 에이전트(#153)가 사진 속 장소 후보를 찾을 때 쓰는 자료입니다. 정리 실행기만 사용하며, 아래 값이 비어 있으면 아무것도 받지 않습니다.
+
+- 색인은 `scripts/build_place_index.py`로 만든 읽기 전용 SQLite 파일입니다. 출처는 TourAPI, 전국관광지정보표준데이터, 소상공인시장진흥공단 상가(상권)정보, Wikidata, Overture Places, OpenStreetMap이고, 출처별로 원본 ID와 대표 이름, 분류, 좌표를 담습니다.
+- `PLACE_INDEX_S3_URI`가 있으면 정리 실행기가 시작할 때 `PLACE_INDEX_PATH`에 파일이 없거나 `PLACE_INDEX_SHA256`과 다를 때만 받습니다. 여러 프로세스가 동시에 시작해도 파일 잠금으로 한 번만 받고, 해시가 다르면 실행기 시작이 실패합니다. 자격 증명은 인스턴스 역할을 씁니다.
+- 대기 자식과 정리 작업 자식은 같은 파일을 열기만 하고 메모리에 올리지 않습니다. 운영체제의 페이지 캐시를 함께 씁니다.
+- 색인을 바꿀 때는 새 파일을 S3에 올리고 `PLACE_INDEX_SHA256`을 새 해시로 바꾼 뒤 정리 실행기를 재시작합니다. 같은 키에 덮어쓰면 해시가 맞지 않는 동안 실행기가 시작하지 못하므로 키에 날짜를 넣습니다.
+- 검색 반경은 최대 30 km이고, 두 글자 질의는 trigram 색인을 쓰지 못해 반경 안의 이름을 훑으므로 5 km까지만 찾습니다.
+- OpenStreetMap(ODbL)과 Overture에서 온 이름을 사용자에게 보여 줄 때는 출처 표시가 필요합니다.
+- `KAKAO_REST_API_KEY`는 비밀값으로 넣습니다. 카카오 키워드 검색과 좌표의 행정구역 변환은 작업마다 `KAKAO_CALLS_PER_JOB`(기본 200)건까지만 호출하고, 넘으면 호출 없이 결과 없음으로 처리합니다. 하루 무료 한도(키워드 검색 100,000건)는 모든 작업이 함께 씁니다. 호출 결과는 `ai_model_call`의 `target=kakao`로 남습니다.
+
 ## 통신과 실패 처리
 
 - 요청과 결과 토픽은 클라우드가 전달하는 환경변수 6개를 그대로 사용합니다. `JOBS_ENV`는 Redis 키 공간만 구분합니다. `.env.example`의 `local` 값은 로컬 검증용이며 스테이징과 운영에서는 환경별 값을 주입합니다.

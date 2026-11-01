@@ -14,6 +14,7 @@ from redis.exceptions import RedisError
 
 from app.core.errors import ErrorCode
 from app.core.logging import error_fields, get_logger, setup_logging
+from app.infra.place_index import prepare_place_index
 from app.jobs.config import JobsSettings
 from app.jobs.execution import handler_for, handoff_line
 from app.jobs.models import JobKind, JobRecord
@@ -348,6 +349,9 @@ async def main(kind: JobKind = "process") -> None:
         socket_timeout=5,
     )
     try:
+        if kind == "process":
+            # 대기 자식을 띄우기 전에 받아 둬서, 자식들은 같은 파일을 열기만 한다.
+            await asyncio.to_thread(prepare_place_index, cfg)
         await runner_loop(RedisJobStore(redis, cfg), kind)
     finally:
         await redis.aclose()
