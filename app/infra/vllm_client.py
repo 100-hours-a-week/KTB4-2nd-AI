@@ -8,7 +8,7 @@ from typing import Any, Self
 import httpx
 
 from app.core.config import Settings
-from app.infra.vlm import ChatMessage, ChatTurn, ToolCall, VLMUnavailable
+from app.infra.vlm import ChatMessage, ChatTurn, ToolCall, VLMTransientError, VLMUnavailable
 from app.observability.calls import log_model_call, usage_fields
 
 
@@ -17,6 +17,7 @@ class VllmClient:
 
     생성 요청은 자동 재시도하지 않는다. 응답을 못 받은 경우에도 서버에서는
     생성 중일 수 있으므로 재시도 여부와 전체 처리 예산은 호출자가 결정한다.
+    전송 오류와 HTTP 408, 429, 5xx는 VLMTransientError로 구분해 호출자가 고를 수 있게 한다.
     """
 
     def __init__(
@@ -200,14 +201,15 @@ class VllmClient:
             log_model_call("vlm", started, "cancelled", **call)
             raise
         except httpx.HTTPStatusError as exc:
-            log_model_call(
-                "vlm", started, "http_error", status_code=exc.response.status_code, **call
-            )
-            raise VLMUnavailable("VLM 요청에 실패했습니다.") from None
+            status = exc.response.status_code
+            log_model_call("vlm", started, "http_error", status_code=status, **call)
+            error = VLMTransientError if status in (408, 429) or status >= 500 else VLMUnavailable
+            raise error("VLM 요청에 실패했습니다.") from None
         except httpx.HTTPError as exc:
             # 인증키, presigned URL과 모델 응답 본문을 오류 메시지에 포함하지 않는다.
             log_model_call("vlm", started, "connect_error", error_type=type(exc).__name__, **call)
-            raise VLMUnavailable("VLM 요청에 실패했습니다.") from None
+            error = VLMTransientError if isinstance(exc, httpx.TransportError) else VLMUnavailable
+            raise error("VLM 요청에 실패했습니다.") from None
         return response
 
     async def aclose(self) -> None:

@@ -152,6 +152,7 @@ def handler_settings(monkeypatch, tmp_path, base_cfg):
             "EMBED_MODEL": MODEL_VERSION,
             "RELEASE": "test-release",
             "JOBS_FAKE_PIPELINE": False,
+            "PROCESS_AGENT_ENABLED": False,
         }
     )
     monkeypatch.setattr(process_handler, "JobsSettings", lambda: cfg)

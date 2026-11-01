@@ -14,7 +14,7 @@ from pydantic import ValidationError
 from app.api.services.query_service import QueryService
 from app.core.config import Settings
 from app.infra.vllm_client import VllmClient
-from app.infra.vlm import ChatTurn, VLMUnavailable
+from app.infra.vlm import ChatTurn, VLMTransientError, VLMUnavailable
 from app.schemas.query import ParseRequest, SearchRequest
 from app.search.mock import create_mock_context
 
@@ -226,8 +226,21 @@ async def test_mismatched_image_slots_are_rejected_before_network(messages, urls
             await client.chat(messages, urls, 128)
 
 
-@pytest.mark.parametrize("status", [302, 400, 401, 429, 500, 503])
-async def test_http_errors_are_not_retried_or_exposed(status):
+@pytest.mark.parametrize(
+    "status, transient",
+    [
+        (302, False),
+        (400, False),
+        (401, False),
+        (408, True),
+        (429, True),
+        (500, True),
+        (501, True),
+        (503, True),
+        (504, True),
+    ],
+)
+async def test_http_errors_are_not_retried_or_exposed(status, transient):
     calls = []
 
     def handler(request):
@@ -242,13 +255,18 @@ async def test_http_errors_are_not_retried_or_exposed(status):
     assert len(calls) == 1
     assert "private" not in str(error.value)
     assert error.value.__suppress_context__
+    # 재시도는 호출자(정리 에이전트)가 정한다. 클라이언트는 다시 보낼 만한 실패인지만 구분한다.
+    assert isinstance(error.value, VLMTransientError) is transient
 
 
 @pytest.mark.parametrize(
     "failure, expected",
     [
-        (httpx.ConnectError, VLMUnavailable),
-        (httpx.ReadError, VLMUnavailable),
+        (httpx.ConnectError, VLMTransientError),
+        (httpx.ReadError, VLMTransientError),
+        (httpx.WriteError, VLMTransientError),
+        (httpx.RemoteProtocolError, VLMTransientError),
+        (httpx.LocalProtocolError, VLMTransientError),
         (httpx.ConnectTimeout, TimeoutError),
         (httpx.ReadTimeout, TimeoutError),
         (httpx.WriteTimeout, TimeoutError),
@@ -268,6 +286,7 @@ async def test_transport_errors_map_to_common_contract(failure, expected):
             await client.chat(MESSAGES, [], 256)
     assert calls == 1
     assert "private" not in str(error.value)
+    assert type(error.value) is expected
 
 
 @pytest.mark.parametrize(
@@ -287,8 +306,9 @@ async def test_transport_errors_map_to_common_contract(failure, expected):
 )
 async def test_malformed_or_incomplete_completion_is_unavailable(payload):
     async with client_for(lambda _: httpx.Response(200, json=payload)) as client:
-        with pytest.raises(VLMUnavailable):
+        with pytest.raises(VLMUnavailable) as error:
             await client.chat(MESSAGES, [], 256)
+    assert not isinstance(error.value, VLMTransientError)
 
 
 async def test_non_json_http_response_is_unavailable():

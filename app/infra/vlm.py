@@ -45,6 +45,13 @@ class VLMUnavailable(Exception):
     """VLM 또는 답변용 이미지 접근 실패. 연결 코드에서 외부 예외를 변환한다."""
 
 
+class VLMTransientError(VLMUnavailable):
+    """다시 보내면 성공할 수 있는 실패(전송 오류, HTTP 408, 429, 5xx). 재시도는 호출자가 정한다.
+
+    시간 초과는 이 예외가 아니라 TimeoutError로 전달한다.
+    """
+
+
 class VlmClient(Protocol):
     async def chat(
         self,
@@ -73,5 +80,6 @@ class VlmClient(Protocol):
         temperature는 0 이상 2 이하의 샘플링 온도다. None이면 요청에서 생략해 생성 서버의
         모델 권장값을 쓴다. 0이어도 vLLM은 배치 구성에 따라 결과가 달라질 수 있다.
         연결 실패는 VLMUnavailable, 시간 초과는 TimeoutError로 전달하고 취소는 전파한다.
+        VLMUnavailable 가운데 다시 보낼 만한 실패는 VLMTransientError로 구분한다.
         """
         ...

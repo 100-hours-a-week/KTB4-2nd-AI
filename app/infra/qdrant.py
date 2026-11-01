@@ -71,6 +71,24 @@ class QdrantStore:
         records = self._client.retrieve(collection_name=self.collection, ids=ids, with_vectors=True)
         return {int(record.id): np.asarray(record.vector, dtype=np.float32) for record in records}
 
+    def search(
+        self, vector: np.ndarray, candidate_ids: list[int], limit: int
+    ) -> list[tuple[int, float]]:
+        """후보 ID 안에서 코사인 유사도가 높은 순 (id, 점수). 정리 에이전트의 닮은 사진 찾기(#153)
+
+        컬렉션은 여행 사이에 공유되므로 후보 ID 필터로 이 여행 사진만 찾는다.
+        """
+        if not candidate_ids or limit < 1:
+            return []
+        response = self._client.query_points(
+            collection_name=self.collection,
+            query=np.asarray(vector, dtype=np.float32).tolist(),
+            query_filter=Filter(must=[HasIdCondition(has_id=candidate_ids)]),
+            limit=limit,
+            with_payload=False,
+        )
+        return [(int(point.id), float(point.score)) for point in response.points]
+
 
 class AsyncQdrantVectors:
     """ai-api의 검색과 스토리용 비동기 읽기. 저장과 컬렉션 생성은 정리 실행기의 QdrantStore만 담당

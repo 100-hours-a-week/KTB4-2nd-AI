@@ -240,18 +240,39 @@ async def test_expired_worker_cannot_renew_or_finish_and_new_execution_is_isolat
         assert (await b.latest(77, "process")).owner == new.owner
 
 
+@pytest.mark.parametrize("kind", ["process", "story"])
 @scenario
-async def test_timeout_even_if_heartbeat_keeps_running():
-    async with environment(JOBS_TIMEOUT_SEC=10) as (cfg, a, b, p):
+async def test_timeout_even_if_heartbeat_keeps_running(kind):
+    # 정리만 따로 둔 제한 시간이 그 종류의 작업에만 적용된다.
+    limits = (
+        {"JOBS_PROCESS_TIMEOUT_SEC": 10, "PROCESS_AGENT_BUDGET_SEC": 5}
+        if kind == "process"
+        else {"JOBS_TIMEOUT_SEC": 10}
+    )
+    async with environment(**limits) as (cfg, a, b, p):
         clock = [100.0]
         a.now = b.now = AsyncMock(side_effect=lambda: clock[0])
-        await RequestReceiver(a, p).accept(message(cfg, process_request()))
-        job = await a.claim("process", "worker")
+        body = process_request() if kind == "process" else story_request()
+        await RequestReceiver(a, p).accept(message(cfg, body))
+        job = await a.claim(kind, "worker")
         clock[0] = 105.0
         assert await b.heartbeat(job.identity, job.owner)
         clock[0] = 111.0
         await b.recover()
         assert (await a.get(job.identity)).event.error.code == "TIMEOUT"
+
+
+@scenario
+async def test_process_timeout_is_separate_from_story_timeout():
+    async with environment(JOBS_TIMEOUT_SEC=10) as (cfg, a, b, p):
+        clock = [100.0]
+        a.now = b.now = AsyncMock(side_effect=lambda: clock[0])
+        await RequestReceiver(a, p).accept(message(cfg, process_request()))
+        job = await a.claim("process", "worker")
+        clock[0] = 111.0
+        assert await b.heartbeat(job.identity, job.owner)
+        await b.recover()
+        assert (await a.get(job.identity)).status == "PROCESSING"
 
 
 @pytest.mark.parametrize("kind", ["process", "story"])

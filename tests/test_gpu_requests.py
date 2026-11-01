@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
 
-from app.infra.vlm import VLMUnavailable
+from app.infra.vlm import VLMTransientError, VLMUnavailable
 from app.jobs.gpu_requests import GateUnavailable, RequestGate, embedding_client, generation_client
 from app.search.context import ModelUnavailable
 from tests.test_v2_jobs import environment, scenario
@@ -80,9 +80,11 @@ async def test_busy_and_redis_failure_never_start_http_call():
         client = AsyncMock()
         gate = generation_client(client, a.redis, cfg)
         await a.redis.zadd(gate.gate.key, {"a": await a.now() + 60, "b": await a.now() + 60})
-        with pytest.raises(VLMUnavailable):
+        with pytest.raises(VLMUnavailable) as error:
             await gate.chat([], [], 20)
         client.chat.assert_not_called()
+        # 정리 에이전트는 슬롯 대기 초과를 다시 보내지 않는다(결정 159).
+        assert not isinstance(error.value, VLMTransientError)
         broken = AsyncMock()
         broken.pipeline = Mock(side_effect=RedisConnectionError())
         gate = embedding_client(client, broken, cfg)

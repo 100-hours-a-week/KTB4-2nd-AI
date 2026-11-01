@@ -83,12 +83,14 @@ def build_context(
     qdrant: QdrantStore | None = None,
     reuse_vectors: bool = False,
     photo_metrics: Mapping[int, PhotoMetrics] | None = None,
+    agent=None,
 ) -> PipelineContext:
     """images와 qdrant는 테스트가 LocalDirImageSource와 :memory:를 넣기 위한 자리
 
     FAKE_PIPELINE이면 thresholds를 읽지 않음. 파일이 없거나 값이 틀려도 가짜 모드는 영향 없음
     reuse_vectors는 v2 정리 실행기가 EMBED_ON_PHOTOS_READY 값으로 넘김
     photo_metrics는 v2 정리 실행기가 Redis에서 읽은 업로드 묶음의 사진 지표
+    agent는 v2 정리 실행기가 에이전트를 켰을 때 넘기는 AgentResources
     """
     if images is None:
         images = build_images(settings)
@@ -109,6 +111,7 @@ def build_context(
         log=get_logger("app.pipeline"),
         reuse_vectors=reuse_vectors,
         photo_metrics=photo_metrics or {},
+        agent=agent,
     )
 
 

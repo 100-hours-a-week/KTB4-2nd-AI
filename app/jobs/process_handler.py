@@ -1,7 +1,11 @@
 """v2 정리 작업을 기존 Qwen 파이프라인에 연결한다."""
 
-from collections.abc import Callable, Iterator, Mapping
-from contextlib import ExitStack, contextmanager
+import asyncio
+import base64
+import sqlite3
+import time
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from contextlib import AsyncExitStack, ExitStack, asynccontextmanager, contextmanager
 
 import httpx
 from pydantic import ValidationError
@@ -10,13 +14,19 @@ from app.core.errors import ErrorCode, PipelineCancelled, PipelineError
 from app.core.logging import error_fields, get_logger
 from app.core.tracing import current_trace, stage
 from app.embedding.client import MODEL_VERSION, EmbeddingUnavailable
+from app.infra.image_resolver import S3ImageResolver
 from app.infra.images import ImageSource
+from app.infra.kakao_local import KakaoLocalClient
+from app.infra.place_index import PlaceIndex
 from app.infra.qdrant import QdrantStore
+from app.infra.vllm_client import VllmClient
 from app.jobs.config import JobsSettings
 from app.jobs.execution import JobReporter
+from app.jobs.gpu_requests import GatedVlm, RequestGate
 from app.jobs.models import PhotoMetricsRecord, ProcessMessage
 from app.jobs.sync_bridge import run_sync
 from app.observability import datasets
+from app.pipeline.agent import AgentResources, AgentTimeout, AgentUnavailable
 from app.pipeline.batch import embed_batch
 from app.pipeline.bootstrap import build_context, build_engine, build_images, wait_for_qdrant
 from app.pipeline.context import PipelineContext
@@ -91,12 +101,100 @@ def evaluation_enabled(cfg: JobsSettings) -> bool:
         return False
 
 
+class DataUrlImages:
+    """로컬 사진 폴더의 사본을 data URL로 넘긴다. IMAGE_SOURCE=local 개발과 시험용"""
+
+    def __init__(self, images: ImageSource) -> None:
+        self.images = images
+
+    async def resolve(self, storage_key: str) -> str:
+        data = (await asyncio.to_thread(self.images.get_many, [storage_key]))[storage_key]
+        return "data:image/jpeg;base64," + base64.b64encode(data).decode()
+
+
+@asynccontextmanager
+async def agent_resources(cfg: JobsSettings, reporter: JobReporter) -> AsyncIterator:
+    """에이전트를 켰으면 이 작업에 쓸 VLM, 사진 URL, 공공 장소 색인, 카카오 클라이언트를 만든다.
+
+    끄면 None을 넘겨 규칙 단계 결과로 완료한다(결정 150). 켰는데 설정이 없으면 규칙 결과로
+    대신하지 않고 작업을 실패시킨다(결정 147). 생성 호출은 검색, 스토리와 같은 GPU 슬롯을 쓰되
+    정리 작업만의 제한 시간과 슬롯 대기 시간을 둔다.
+    """
+    if not cfg.PROCESS_AGENT_ENABLED:
+        yield None
+        return
+    missing = [
+        name
+        for name in ("VLM_BASE_URL", "VLM_MODEL", "PLACE_INDEX_PATH", "KAKAO_REST_API_KEY")
+        if not getattr(cfg, name)
+    ]
+    if missing:
+        log.error(
+            "정리 에이전트 설정 누락",
+            extra={"event": "ai_agent_config_missing", "missing": missing},
+        )
+        raise _failure(ErrorCode.MODEL_NOT_READY, "정리 에이전트 설정이 없습니다.")
+    async with AsyncExitStack() as resources:
+        try:
+            places = PlaceIndex(cfg.PLACE_INDEX_PATH)
+        except (OSError, ValueError, sqlite3.Error):
+            raise _failure(ErrorCode.MODEL_NOT_READY, "공공 장소 색인을 열 수 없습니다.") from None
+        resources.callback(places.close)
+        try:
+            client = await resources.enter_async_context(
+                VllmClient(
+                    cfg.VLM_BASE_URL,
+                    cfg.VLM_MODEL,
+                    api_key=cfg.VLM_API_KEY.get_secret_value() if cfg.VLM_API_KEY else None,
+                    timeout_sec=cfg.PROCESS_VLM_TIMEOUT_SEC,
+                    connect_timeout_sec=cfg.VLM_CONNECT_TIMEOUT_SEC,
+                )
+            )
+            kakao = await resources.enter_async_context(
+                KakaoLocalClient(
+                    cfg.KAKAO_REST_API_KEY.get_secret_value(), timeout_sec=cfg.KAKAO_TIMEOUT_SEC
+                )
+            )
+            if cfg.IMAGE_SOURCE == "s3":
+                urls = await S3ImageResolver.create(cfg)
+                resources.push_async_callback(urls.aclose)
+            else:
+                images = build_images(cfg)
+                if close := getattr(images, "close", None):
+                    resources.callback(close)
+                urls = DataUrlImages(images)
+        except (ValueError, httpx.InvalidURL):
+            # 값은 있지만 형식이 잘못된 설정(VLM 주소, 카카오 키, S3 버킷과 URL 유효기간)
+            raise _failure(
+                ErrorCode.MODEL_NOT_READY, "정리 에이전트 설정이 올바르지 않습니다."
+            ) from None
+        gate = RequestGate(
+            reporter.store.redis,
+            cfg.redis_prefix + "gpu:generation",
+            cfg.GPU_GENERATION_INFLIGHT,
+            cfg.PROCESS_VLM_WAIT_SEC,
+        )
+        loop = asyncio.get_running_loop()
+        yield AgentResources(
+            vlm=GatedVlm(client, gate, cfg.PROCESS_VLM_TIMEOUT_SEC),
+            urls=urls,
+            places=places,
+            kakao=kakao,
+            submit=lambda coroutine: asyncio.run_coroutine_threadsafe(coroutine, loop),
+            deadline=time.monotonic() + cfg.PROCESS_AGENT_BUDGET_SEC,
+            concurrency=cfg.PROCESS_AGENT_CONCURRENCY,
+            kakao_calls=cfg.KAKAO_CALLS_PER_JOB,
+            vlm_retries=cfg.PROCESS_VLM_RETRIES,
+        )
+
+
 @contextmanager
 def open_context(
     cfg: JobsSettings,
     check: Callable[[], None] = lambda: None,
     wrap_images: Callable[[ImageSource], ImageSource] | None = None,
     photo_metrics: Mapping[int, PhotoMetrics] | None = None,
+    agent=None,
 ) -> Iterator[PipelineContext]:
     """엔진, 이미지, Qdrant를 조립한 컨텍스트. 정리와 사진 묶음이 공유, 나가면 역순으로 해제"""
     with ExitStack() as resources:
@@ -119,6 +217,7 @@ def open_context(
             qdrant=vectors,
             reuse_vectors=cfg.EMBED_ON_PHOTOS_READY,
             photo_metrics=photo_metrics,
+            agent=agent,
         )
 
 
@@ -129,8 +228,12 @@ def _run(
     cancelled,
     reports=None,
     stored: Mapping[int, PhotoMetricsRecord] | None = None,
+    agent=None,
 ) -> dict:
-    """stored는 업로드 묶음이 Redis에 저장한 사진 지표, 다운로드하지 않는 사진의 지표와 지문"""
+    """stored는 업로드 묶음이 Redis에 저장한 사진 지표, 다운로드하지 않는 사진의 지표와 지문
+
+    agent는 정리 에이전트 자원(AgentResources), None이면 규칙 단계 결과로 완료
+    """
 
     def check():
         if cancelled():
@@ -157,7 +260,7 @@ def _run(
     }
     try:
         check()
-        with open_context(cfg, check, fingerprint, metrics) as ctx:
+        with open_context(cfg, check, fingerprint, metrics, agent) as ctx:
             result = run_pipeline(request, ctx, progress, cancelled).model_dump(mode="json")
             if hashes:
                 reports.extend(auto_evaluate(result, hashes, cfg))
@@ -179,16 +282,20 @@ def _run(
             (c.response.status_code for c in causes if isinstance(c, httpx.HTTPStatusError)), None
         )
         embedding = any(isinstance(c, EmbeddingUnavailable) for c in causes)
+        agent_failed = isinstance(exc, (AgentUnavailable, AgentTimeout))
         if status is not None or embedding:
             log.warning(
                 "정리 작업의 외부 호출 실패",
                 extra={
                     "event": "ai_process_dependency_failed",
-                    "target": "embedding" if embedding else "unknown",
+                    "target": "embedding" if embedding else "vlm" if agent_failed else "unknown",
                     "status_code": status,
                     **error_fields(exc),
                 },
             )
+        # 에이전트가 정한 오류 코드는 원인 사슬에 남은 슬롯 대기 시간 초과로 바꾸지 않는다.
+        if agent_failed:
+            raise
         if any(isinstance(cause, (httpx.TimeoutException, TimeoutError)) for cause in causes):
             raise _failure(
                 ErrorCode.TIMEOUT, "정리 작업의 외부 호출 시간이 초과되었습니다."
@@ -216,9 +323,11 @@ async def run(request: dict, reporter: JobReporter) -> dict:
     await reporter.check_cancel()
     stored = await reporter.store.photo_metrics(ids) if cfg.EMBED_ON_PHOTOS_READY else {}
     reports: list[dict] = []
-    result = await run_sync(
-        lambda progress, cancel: _run(message, cfg, progress, cancel, reports, stored), reporter
-    )
+    async with agent_resources(cfg, reporter) as agent:
+        result = await run_sync(
+            lambda progress, cancel: _run(message, cfg, progress, cancel, reports, stored, agent),
+            reporter,
+        )
     if trace := current_trace():
         # 결과 저장이 늦어지지 않도록, 그리고 취소된 작업을 기록하지 않도록 저장 뒤로 미룬다.
         trace.evaluations.extend(reports)

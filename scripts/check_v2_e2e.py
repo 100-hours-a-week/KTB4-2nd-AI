@@ -124,7 +124,7 @@ async def run(
                 states = set()
                 expected_topic = cfg.topics[topic][1]
                 event = None
-                async with asyncio.timeout(cfg.JOBS_TIMEOUT_SEC + 60):
+                async with asyncio.timeout(cfg.job_timeout(kind) + 60):
                     while event is None:
                         for url in api_urls:
                             response = await http.get(

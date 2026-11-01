@@ -27,6 +27,10 @@ class JobsSettings(Settings):
     JOBS_HEARTBEAT_SEC: float = Field(default=5, gt=0)
     JOBS_LEASE_SEC: float = Field(default=120, gt=0)
     JOBS_TIMEOUT_SEC: float = Field(default=300, gt=0)
+    # 정리 작업만의 제한 시간. 에이전트 결과를 보려고 지연 목표 10분보다 넉넉하게,
+    # BE의 결과 대기 한도 1시간보다 짧게 둔다(결정 142, 148).
+    # 작업을 회수하는 API와 실행기가 같은 값을 써야 함
+    JOBS_PROCESS_TIMEOUT_SEC: float = Field(default=3000, gt=0, allow_inf_nan=False)
     JOBS_PUBLISH_LEASE_SEC: float = Field(default=60, gt=0)
     JOBS_POLL_SEC: float = Field(default=0.5, gt=0)
     # 정리 실행기가 import와 처리기 적재까지 마쳐 두는 대기 자식 수, 0이면 작업마다 새로 기동
@@ -72,6 +76,20 @@ class JobsSettings(Settings):
     KAKAO_REST_API_KEY: SecretStr | None = None
     KAKAO_CALLS_PER_JOB: int = Field(default=200, ge=0)
     KAKAO_TIMEOUT_SEC: float = Field(default=10, gt=0, allow_inf_nan=False)
+    # 정리 에이전트(#153). 끄면 규칙 단계 결과로 완료(결정 150). 켜면 VLM, 색인, 카카오 설정이 필요
+    PROCESS_AGENT_ENABLED: bool = True
+    # 에이전트 단계의 시간 예산. 작업 자원을 만든 때(다운로드 전)부터 재고, 넘기면 작업 실패.
+    # FILTERING과 결과 저장을 위해 작업 제한보다 짧게
+    PROCESS_AGENT_BUDGET_SEC: float = Field(default=2700, gt=0, allow_inf_nan=False)
+    # 정리 작업이 동시에 보내는 생성 호출 수. GPU_GENERATION_INFLIGHT 슬롯을 검색, 스토리와 나눠 씀
+    PROCESS_AGENT_CONCURRENCY: int = Field(default=4, ge=1)
+    # 정리 작업의 생성 호출 제한 시간과 슬롯 대기
+    # 검색과 스토리의 VLM_TIMEOUT_SEC, GPU_WAIT_SEC와 별개
+    PROCESS_VLM_TIMEOUT_SEC: float = Field(default=180, gt=0, allow_inf_nan=False)
+    PROCESS_VLM_WAIT_SEC: float = Field(default=60, gt=0, allow_inf_nan=False)
+    # 전송 오류, HTTP 408, 429, 5xx, 호출 시간 초과를 다시 보내는 횟수(n번째는 5×n초 뒤).
+    # 넘으면 작업 실패. 불완전 응답과 슬롯 대기 초과는 다시 보내지 않음(결정 159)
+    PROCESS_VLM_RETRIES: int = Field(default=3, ge=0, le=5)
 
     @model_validator(mode="after")
     def check_jobs_settings(self) -> Self:
@@ -90,7 +108,19 @@ class JobsSettings(Settings):
                 raise ValueError("PLACE_INDEX_SHA256은 소문자 16진수 64자여야 함")
             if not self.PLACE_INDEX_PATH:
                 raise ValueError("PLACE_INDEX_S3_URI를 쓰려면 PLACE_INDEX_PATH가 필요함")
+        # 에이전트를 끈 배포는 예전 제한 시간과 슬롯 수로도 시작할 수 있게 한다.
+        if self.PROCESS_AGENT_ENABLED:
+            if self.PROCESS_AGENT_BUDGET_SEC >= self.JOBS_PROCESS_TIMEOUT_SEC:
+                raise ValueError(
+                    "PROCESS_AGENT_BUDGET_SEC는 JOBS_PROCESS_TIMEOUT_SEC보다 짧아야 함"
+                )
+            if self.PROCESS_AGENT_CONCURRENCY > self.GPU_GENERATION_INFLIGHT:
+                raise ValueError("PROCESS_AGENT_CONCURRENCY는 GPU_GENERATION_INFLIGHT 이하여야 함")
         return self
+
+    def job_timeout(self, kind: str) -> float:
+        """작업 시작부터 강제 실패까지의 시간. 정리만 따로 둔다."""
+        return self.JOBS_PROCESS_TIMEOUT_SEC if kind == "process" else self.JOBS_TIMEOUT_SEC
 
     @property
     def redis_prefix(self) -> str:
