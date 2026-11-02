@@ -56,7 +56,9 @@ def run(
                      ctx.agent가 있으면 남은 사진을 정리 에이전트로 추정하고 폴더를 묶음,
                      에이전트 호출이 끝날 때마다 done을 올리고 total 직전에서 멈춤
         FILTERING    라플라시안 BLURRY, pHash DUPLICATED, 원래 폴더 place_id 연결.
-                     다운로드한 사진만 측정하고 나머지는 ctx.photo_metrics 사용
+                     다운로드한 사진만 측정하고 나머지는 ctx.photo_metrics 사용.
+                     ctx.agent가 있으면 GPS 사진이 없고 보일 사진도 없는 폴더(흐린 사진만 든
+                     에이전트의 새 장소)를 풀어 그 사진을 위치 불명으로 되돌림(결정 166)
         FINALIZING   대표컷은 폴더 평균 임베딩 최근접, first/last_taken_at, ProcessResult 조립
 
     진행률 규칙
@@ -81,7 +83,8 @@ def run(
 
     결과 규칙
         ProcessResult의 검증기가 명세 규칙을 확인함. 시각은 오프셋 있는 datetime만,
-        BLURRY와 DUPLICATED는 place_id 필수, DUPLICATED는 duplicate_of_attachment_id 필수,
+        폴더에 든 BLURRY와 DUPLICATED는 place_id를 달고, 위치를 모르는 것은 place_id 없이 나감.
+        DUPLICATED는 duplicate_of_attachment_id 필수,
         대표컷은 폴더 안 사진. 검증 실패는 INTERNAL_ERROR
 
     금지
@@ -259,6 +262,22 @@ def run(
                     phash_max_dist=thresholds["phash_max_dist"],
                 ),
             )
+            if ctx.agent is not None:
+                from app.pipeline.agent.trip import release_unshowable_new_places
+
+                places_before = {p.place_id for p in photos if p.place_id}
+                released = release_unshowable_new_places(photos)
+                if released:
+                    # ai_agent_summary의 새 장소 수는 이 단계 전에 남으므로 풀린 수를 따로 남긴다.
+                    places_after = {p.place_id for p in photos if p.place_id}
+                    ctx.log.info(
+                        "흐린 사진만 남은 새 장소를 풂",
+                        extra={
+                            "event": "ai_agent_released_places",
+                            "place_count": len(places_before - places_after),
+                            "photo_count": len(released),
+                        },
+                    )
             result = stage(
                 ProcessStep.FINALIZING, lambda: finalize_photos(photos, variances, offsets)
             )

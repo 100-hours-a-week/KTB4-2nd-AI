@@ -29,7 +29,7 @@ from app.pipeline.agent import (
     prompts,
     run_agent,
 )
-from app.pipeline.agent.trip import TripView, region_key
+from app.pipeline.agent.trip import TripView, region_key, release_unshowable_new_places
 from app.pipeline.bootstrap import build_context
 from app.pipeline.run import run
 from app.pipeline.state import TimeStatus, build_photo_states
@@ -466,6 +466,85 @@ def test_run_assigns_with_agent_and_result_passes_contract(tmp_path, loop):
     assert [u.trip_attachment_id for u in result.unclassified] == [203]
     clustering = [done for step, done in steps if step is ProcessStep.CLUSTERING]
     assert clustering[0] == 0 and clustering[-1] == 4 and 0 < max(clustering[1:-1]) < 4
+
+
+def test_new_place_with_only_blurry_photos_is_released(tmp_path, loop):
+    """흐린 사진만 든 새 장소는 만들지 않고 미분류로 남긴다. 작업은 실패하지 않는다(결정 166)."""
+    rng = np.random.default_rng(3)
+    attachments = []
+    for i in range(3):
+        image = rng.integers(0, 256, (32, 32, 3), dtype=np.uint8)
+        if i == 2:
+            image = np.full((32, 32, 3), 128, dtype=np.uint8)  # 분산 0이라 흐림 판정
+        Image.fromarray(image).save(tmp_path / f"{i}.png")
+        attachments.append(
+            dict(
+                trip_attachment_id=300 + i,
+                analyze_storage_key=f"{i}.png",
+                taken_at=(BASE + timedelta(minutes=i * 90)).isoformat(),
+                latitude=HOME[0] + i * 0.05 if i < 2 else None,
+                longitude=HOME[1] if i < 2 else None,
+            )
+        )
+    request = ProcessRequest.model_validate(
+        dict(
+            trip_name="정선 여행",
+            period={"start_date": "2026-10-02", "end_date": "2026-10-04"},
+            regions=[{"latitude": HOME[0], "longitude": HOME[1]}],
+            attachments=attachments,
+        )
+    )
+    settings = Settings(
+        _env_file=None,
+        API_KEY="t",
+        IMAGE_SOURCE="local",
+        IMAGE_DIR=tmp_path,
+        QDRANT_URL=":memory:",
+        FAKE_PIPELINE=False,
+    )
+
+    class Engine:
+        model_version, dim = "siglip2-so400m-naflex", 3
+        vectors = [unit(1, 0, 0), unit(0, 1, 0), unit(0, 0, 1)]
+
+        def encode_images(self, images):
+            return np.stack(self.vectors[: len(images)])
+
+    found = KakaoPlace("kakao:9", "협재 해수욕장", "관광", "", HOME[0] + 0.2, HOME[1], 100)
+
+    def estimate(messages):
+        if not any(m["role"] == "tool" for m in messages):
+            return call("kakao_keyword_search", query="해수욕장", near="trip")
+        return call("decide", decision="new", candidate_id="kakao:9", confidence="high", reason="r")
+
+    vlm = ScriptedVlm(estimate)
+    ctx = replace(
+        build_context(settings, Engine()), agent=resources(loop, vlm, FakeKakao(found=[found]))
+    )
+    ctx.thresholds.update(blur_var_min=10, phash_max_dist=0, inherit_min_sim=0.99)
+    result = run(request, ctx, lambda step, done, total: None, lambda: False)
+    assert sorted(a.trip_attachment_id for p in result.places for a in p.attachments) == [300, 301]
+    (released,) = [u for u in result.unclassified if u.trip_attachment_id == 302]
+    assert released.issue is Issue.BLURRY and released.place_id is None
+    assert released.latitude is None and released.region_origin is RegionOrigin.UNKNOWN
+
+
+def test_release_keeps_gps_folders_and_showable_new_places():
+    request, photos = scene(TWO_PLACES)
+    photo = by_id(photos)
+    for p in photos:
+        if p.place_id:
+            p.issue = Issue.BLURRY  # GPS 폴더는 모두 흐려도 그대로 둔다(이전 동작과 같음).
+    photo[4].place_id, photo[4].region_origin = "n1", RegionOrigin.INFERRED
+    photo[4].latitude, photo[4].longitude = HOME
+    photo[4].issue = None
+    photo[5].place_id, photo[5].region_origin = "n1", RegionOrigin.INFERRED
+    photo[5].latitude, photo[5].longitude = HOME
+    photo[5].issue = Issue.BLURRY
+    assert release_unshowable_new_places(photos) == []
+    photo[4].issue = Issue.BLURRY
+    assert release_unshowable_new_places(photos) == [4, 5]
+    assert photo[4].place_id is None and photo[1].place_id == "p1"
 
 
 # ---------- 정리 실행기 연결

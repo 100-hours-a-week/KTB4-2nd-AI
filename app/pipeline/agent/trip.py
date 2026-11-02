@@ -249,6 +249,33 @@ class TripView:
         return _minute(photo.taken_at) if photo.taken_at is not None else "시각 없음"
 
 
+def release_unshowable_new_places(photos: list[PhotoState]) -> list[int]:
+    """흐림·중복 판정 뒤 보일 사진이 하나도 없는 새 장소를 풀고, 그 사진의 ID를 돌려준다(결정 166).
+
+    FILTERING은 폴더마다 흐리지 않은 첫 사진을 보존하므로, 지금 구조에서 풀리는 폴더는 사진이 모두
+    흐린 폴더뿐이다. 장소 ID는 다시 매기지 않으므로 번호에 빈칸이 생길 수 있다.
+
+    FINALIZING은 폴더마다 흐림·중복이 아닌 대표 후보가 있어야 하므로, 에이전트가 흐린 사진만으로
+    만든 새 장소가 있으면 작업 전체가 실패한다. GPS 사진이 없는 폴더(에이전트가 만든 새 장소)만
+    대상이며, 그 사진은 위치 불명의 흐림·중복 사진으로 되돌려 미분류로 남긴다.
+    GPS 사진이 있는 폴더는 바꾸지 않는다.
+    """
+    groups: dict[str, list[PhotoState]] = defaultdict(list)
+    for photo in photos:
+        if photo.place_id:
+            groups[photo.place_id].append(photo)
+    released = []
+    for members in groups.values():
+        if any(p.region_origin is RegionOrigin.EXIF or p.issue is None for p in members):
+            continue
+        for photo in members:
+            photo.place_id = None
+            photo.latitude = photo.longitude = None
+            photo.region_origin = RegionOrigin.UNKNOWN
+            released.append(photo.source.trip_attachment_id)
+    return sorted(released)
+
+
 def _place_order(place: str) -> tuple[str, int]:
     digits = place[1:]
     return place[:1], int(digits) if digits.isdigit() else 0
