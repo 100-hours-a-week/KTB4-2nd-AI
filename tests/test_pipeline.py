@@ -138,6 +138,21 @@ def test_real_stages_results_storage_and_progress(setup, tmp_path, decoded):
         decoded[0].getpixel((0, 0))  # 성공 후에도 디코딩 자원을 닫는다.
 
 
+def test_unlocated_photo_between_same_folder_photos_is_placed_by_time(setup):
+    # 가운데 사진은 GPS도 닮은 사진도 없어 LOCATING에서 미분류지만, 1분 앞뒤 사진이 같은 폴더다.
+    request, ctx, engine = setup(3)
+    request.attachments[1].latitude = request.attachments[1].longitude = None
+    engine.vectors[1] = [0, 0, 1]
+
+    result = select_run(ctx.settings)(request, ctx, lambda *args: None, lambda: False)
+
+    assert result.unclassified == []
+    [place] = result.places
+    placed = {a.trip_attachment_id: a for a in place.attachments}
+    assert placed[101].region_origin is RegionOrigin.INFERRED
+    assert (placed[101].latitude, placed[101].longitude) == (37.5, 127)
+
+
 def test_clock_correction_precedes_period_check_and_gps_inheritance(setup):
     request, ctx, engine = setup(6)
     engine.vectors = np.vstack([np.eye(3), np.eye(3)]).astype(np.float32)
