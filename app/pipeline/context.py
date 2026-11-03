@@ -9,6 +9,7 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 
@@ -17,6 +18,10 @@ from app.embedding.contracts import EmbeddingEngine
 from app.infra.images import ImageSource
 from app.infra.qdrant import QdrantStore
 from app.pipeline.steps.filtering import PhotoMetrics
+
+if TYPE_CHECKING:
+    # 파이프라인 컨텍스트가 에이전트 자원 모듈(카카오, 색인 클라이언트)에 의존하지 않게 한다.
+    from app.pipeline.agent.resources import AgentResources
 
 Thresholds = dict[str, float | int]
 
@@ -35,6 +40,8 @@ class PipelineContext:
     reuse_vectors: bool = False
     # 업로드 묶음에서 계산한 {사진 ID: 지표}. reuse_vectors이고 벡터도 저장된 사진은 다운로드 생략
     photo_metrics: Mapping[int, PhotoMetrics] = field(default_factory=dict)
+    # CLUSTERING 규칙 단계 뒤의 정리 에이전트 자원(#153). None이면 에이전트 없이 규칙 결과로 완료
+    agent: "AgentResources | None" = None
 
 
 def load_thresholds(path: Path, model_version: str) -> Thresholds:

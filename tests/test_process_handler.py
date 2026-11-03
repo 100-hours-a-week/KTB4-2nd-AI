@@ -55,6 +55,8 @@ def configured(tmp_path, monkeypatch):
         IMAGE_DIR=tmp_path,
         QDRANT_URL=":memory:",
         EMBED_MODEL=MODEL_VERSION,
+        # 에이전트 연결은 tests/test_agent.py에서 확인한다.
+        PROCESS_AGENT_ENABLED=False,
     )
     engine = Engine()
     monkeypatch.setattr(process_handler, "JobsSettings", lambda: cfg)

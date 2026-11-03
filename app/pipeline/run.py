@@ -39,7 +39,7 @@ def run(
                       사본 키는 request.attachments[].analyze_storage_key
         ctx           외부 자원. ctx.images.get_many(keys), ctx.engine.encode_images(사본 bytes),
                       ctx.qdrant.upsert(ids, vectors), ctx.qdrant.fetch(ids), ctx.thresholds[키],
-                      ctx.settings, ctx.log, ctx.reuse_vectors, ctx.photo_metrics
+                      ctx.settings, ctx.log, ctx.reuse_vectors, ctx.photo_metrics, ctx.agent
         on_progress   진행률 보고 함수 on_progress(step, done, total). 워커가 api로 콜백
         is_cancelled  취소 확인 함수. True면 즉시 PipelineCancelled를 raise
 
@@ -52,16 +52,21 @@ def run(
         CLOCK        device_model로 기기별 묶음, 유사도 쌍으로 기기별 단일 오프셋 산출과 적용
         LOCATING     기간 밖 분리, GPS 앵커, 유사도 상속
         CLUSTERING   haversine DBSCAN, 재방문은 한 폴더. 이어서 위치를 못 찾은 GPS 없는 사진을
-                     촬영 시각 끼워 넣기와 닮은 사진 따라가기로 폴더에 넣음
+                     촬영 시각 끼워 넣기와 닮은 사진 따라가기로 폴더에 넣음.
+                     ctx.agent가 있으면 남은 사진을 정리 에이전트로 추정하고 폴더를 묶음,
+                     에이전트 호출이 끝날 때마다 done을 올리고 total 직전에서 멈춤
         FILTERING    라플라시안 BLURRY, pHash DUPLICATED, 원래 폴더 place_id 연결.
-                     다운로드한 사진만 측정하고 나머지는 ctx.photo_metrics 사용
+                     다운로드한 사진만 측정하고 나머지는 ctx.photo_metrics 사용.
+                     ctx.agent가 있으면 GPS 사진이 없고 보일 사진도 없는 폴더(흐린 사진만 든
+                     에이전트의 새 장소)를 풀어 그 사진을 위치 불명으로 되돌림(결정 166)
         FINALIZING   대표컷은 폴더 평균 임베딩 최근접, first/last_taken_at, ProcessResult 조립
 
     진행률 규칙
         total은 항상 사진 수(len(request.attachments)), 단계가 바뀌어도 같음
         DOWNLOADING과 EMBEDDING은 사진 묶음 또는 배치마다 done을 올림.
         다운로드나 임베딩을 생략한 사진 수는 먼저 한 번에 올림
-        나머지 다섯 단계는 시작에 (step, 0, total), 끝에 (step, total, total) 한 번씩
+        나머지 다섯 단계는 시작에 (step, 0, total), 끝에 (step, total, total) 한 번씩.
+        에이전트를 켠 CLUSTERING은 그 사이에도 done을 올림
         어떤 단계도 120초 넘게 on_progress 없이 조용하면 안 됨. api가 WORKER_DEAD로 판정.
         넘길 수 있는 단계는 중간에 done을 갱신해 호출
 
@@ -78,7 +83,8 @@ def run(
 
     결과 규칙
         ProcessResult의 검증기가 명세 규칙을 확인함. 시각은 오프셋 있는 datetime만,
-        BLURRY와 DUPLICATED는 place_id 필수, DUPLICATED는 duplicate_of_attachment_id 필수,
+        폴더에 든 BLURRY와 DUPLICATED는 place_id를 달고, 위치를 모르는 것은 place_id 없이 나감.
+        DUPLICATED는 duplicate_of_attachment_id 필수,
         대표컷은 폴더 안 사진. 검증 실패는 INTERNAL_ERROR
 
     금지
@@ -230,6 +236,20 @@ def run(
                     inherit_min_sim=thresholds["inherit_min_sim"],
                     interpolate_max_gap_min=thresholds["interpolate_max_gap_min"],
                 )
+                if ctx.agent is not None:
+                    # LangGraph는 에이전트를 켠 정리 실행기에서만 불러온다.
+                    from app.pipeline.agent import run_agent
+
+                    # 진행 단계는 CLUSTERING 그대로 두고 완료 수만 올린다(결정 147).
+                    run_agent(
+                        photos,
+                        request,
+                        ctx,
+                        lambda done: progress.report(
+                            ProcessStep.CLUSTERING, min(done, max(total - 1, 0))
+                        ),
+                        check_cancel,
+                    )
 
             stage(ProcessStep.CLUSTERING, clustering)
             variances = stage(
@@ -242,6 +262,22 @@ def run(
                     phash_max_dist=thresholds["phash_max_dist"],
                 ),
             )
+            if ctx.agent is not None:
+                from app.pipeline.agent.trip import release_unshowable_new_places
+
+                places_before = {p.place_id for p in photos if p.place_id}
+                released = release_unshowable_new_places(photos)
+                if released:
+                    # ai_agent_summary의 새 장소 수는 이 단계 전에 남으므로 풀린 수를 따로 남긴다.
+                    places_after = {p.place_id for p in photos if p.place_id}
+                    ctx.log.info(
+                        "흐린 사진만 남은 새 장소를 풂",
+                        extra={
+                            "event": "ai_agent_released_places",
+                            "place_count": len(places_before - places_after),
+                            "photo_count": len(released),
+                        },
+                    )
             result = stage(
                 ProcessStep.FINALIZING, lambda: finalize_photos(photos, variances, offsets)
             )

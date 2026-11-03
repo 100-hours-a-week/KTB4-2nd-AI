@@ -356,7 +356,10 @@ class RedisJobStore:
                     pipe.set(key, record.model_dump_json())
                     pipe.zadd(
                         self.key("running"),
-                        {identity: now + min(self.cfg.JOBS_LEASE_SEC, self.cfg.JOBS_TIMEOUT_SEC)},
+                        {
+                            identity: now
+                            + min(self.cfg.JOBS_LEASE_SEC, self.cfg.job_timeout(record.kind))
+                        },
                     )
                     await pipe.execute()
                     if should_stop and should_stop():
@@ -409,7 +412,7 @@ class RedisJobStore:
                     elif record.status == TaskStatus.PROCESSING:
                         deadline = min(
                             record.heartbeat_at + self.cfg.JOBS_LEASE_SEC,
-                            record.started_at + self.cfg.JOBS_TIMEOUT_SEC,
+                            record.started_at + self.cfg.job_timeout(record.kind),
                         )
                         pipe.zadd(self.key("running"), {identity: deadline})
                     elif record.status == TaskStatus.QUEUED and queue_score is not None:
@@ -445,7 +448,7 @@ class RedisJobStore:
             record.status == TaskStatus.PROCESSING
             and record.owner == owner
             and now < record.heartbeat_at + self.cfg.JOBS_LEASE_SEC
-            and now < record.started_at + self.cfg.JOBS_TIMEOUT_SEC
+            and now < record.started_at + self.cfg.job_timeout(record.kind)
         )
 
     async def heartbeat(self, identity: str, owner: str) -> bool:
@@ -571,7 +574,7 @@ class RedisJobStore:
             def update(record: JobRecord, current: float) -> bool:
                 if record.status != TaskStatus.PROCESSING:
                     return False
-                timed_out = current >= record.started_at + self.cfg.JOBS_TIMEOUT_SEC
+                timed_out = current >= record.started_at + self.cfg.job_timeout(record.kind)
                 dead = current >= record.heartbeat_at + self.cfg.JOBS_LEASE_SEC
                 if not timed_out and not dead:
                     return False
