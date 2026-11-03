@@ -3,7 +3,7 @@
 import json
 from typing import Any
 
-from app.infra.vlm import ChatMessage
+from app.infra.vlm import ChatMessage, ChatTurn
 from app.schemas.query import SearchHit
 from app.search.context import SearchContext
 
@@ -16,23 +16,32 @@ class MockVLM:
         max_tokens: int,
         response_format: dict[str, Any] | None = None,
         *,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
         temperature: float | None = None,
-    ) -> str:
-        # response_format과 temperature는 받지만 모의 응답의 생성이나 검증에 사용하지 않는다.
+    ) -> ChatTurn:
+        # response_format, 도구와 temperature는 받지만 모의 응답의 생성이나 검증에 사용하지 않는다.
         if image_urls:
             answer = f"[MOCK] 근거 사진 {len(image_urls)}장으로 답변 경로를 확인했습니다."
-            return json.dumps({"answerable": True, "answer": answer}, ensure_ascii=False)
+            return ChatTurn(json.dumps({"answerable": True, "answer": answer}, ensure_ascii=False))
         query = json.loads(messages[-1]["content"])["query"]
-        return json.dumps(
-            {
-                "intent": "QUESTION" if "?" in query else "SEARCH",
-                "date_from": None,
-                "date_to": None,
-                "relative_date": {"unit": "none", "offset": None, "weekday": None, "season": None},
-                "region_names": None,
-                "visual_query": query,
-            },
-            ensure_ascii=False,
+        return ChatTurn(
+            json.dumps(
+                {
+                    "intent": "QUESTION" if "?" in query else "SEARCH",
+                    "date_from": None,
+                    "date_to": None,
+                    "relative_date": {
+                        "unit": "none",
+                        "offset": None,
+                        "weekday": None,
+                        "season": None,
+                    },
+                    "region_names": None,
+                    "visual_query": query,
+                },
+                ensure_ascii=False,
+            )
         )
 
 

@@ -43,7 +43,7 @@ async def parse(
                 response_format=prompts.PARSE_RESPONSE_FORMAT,
                 temperature=prompts.PARSE_TEMPERATURE,
             )
-            return prompts.parse_output(output, request)
+            return prompts.parse_output(output.content, request)
     except (VLMUnavailable, InvalidModelOutput, TimeoutError):
         return parse_fallback(request)
 
@@ -106,7 +106,7 @@ async def search(
                 response_format=prompts.ANSWER_RESPONSE_FORMAT,
                 temperature=prompts.ANSWER_TEMPERATURE,
             )
-            answer = prompts.parse_answer(output)
+            answer = prompts.parse_answer(output.content)
         # 컷오프로 근거가 없을 때와 같은 NO_EVIDENCE라 로그에서는 answerable로 구분한다.
         if trace := current_trace():
             trace.fields["answerable"] = answer is not None

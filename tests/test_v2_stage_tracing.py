@@ -162,6 +162,8 @@ async def test_traced_vlm_forwards_temperature_only_when_given():
     await vlm.chat([], [], 20)
     assert inner.chat.await_args_list[0].kwargs == {"temperature": 0}
     assert inner.chat.await_args_list[1].kwargs == {}
+    await vlm.chat([], [], 20, tools=["tool"], tool_choice="required")
+    assert inner.chat.await_args_list[2].kwargs == {"tools": ["tool"], "tool_choice": "required"}
 
 
 @scenario
