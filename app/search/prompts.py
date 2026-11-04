@@ -38,7 +38,8 @@ PARSE_SYSTEM_PROMPT = (
     "날짜 표현이 없거나 '최근', '지난 주말'처럼 이 단위로 나타낼 수 없으면 "
     "relative_date의 unit은 none, 나머지 필드와 날짜는 null. "
     "region_names는 질문에 나온 지명만 넣는다. "
-    "visual_query는 사진에 보이는 내용만 한국어로 짧게 쓰고 날짜와 지역 표현은 뺀다. "
+    "visual_query는 사진에 보이는 내용만 한국어로 짧게 쓰고 "
+    "날짜, 아침, 점심, 저녁 같은 시간대, 지역 표현은 뺀다. "
     "없는 조건은 null."
 )
 
