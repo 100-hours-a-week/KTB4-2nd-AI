@@ -55,9 +55,11 @@ class SearchOptions:
     # 컷오프 임시값, 10/14 로컬 시험의 음식과 건물 점수 경계 기준, 배포 뒤 검색 평가로 확정
     min_score: float = 0.20
     score_ratio: float = 0.80
-    parse_timeout_sec: float = 5.0
+    # 생성 모델 31B(dense) 교체 뒤 11/4 스테이징 해석 3건이 모두 5초 초과, 스테이징 실측 뒤 재조정
+    # 호출 하나가 BE의 AI 호출 읽기 상한 30초 안에 끝나야 BE 시간 초과 대신 대체 응답
+    parse_timeout_sec: float = 15.0
     retrieval_timeout_sec: float = 5.0
-    answer_timeout_sec: float = 10.0
+    answer_timeout_sec: float = 20.0
     request_timeout_sec: float = 30.0
 
     def __post_init__(self) -> None:

@@ -7,11 +7,12 @@ from app.infra.vlm import VLMUnavailable
 from app.schemas.query import (
     ParseRequest,
     ParseResponse,
+    SearchCandidate,
     SearchHit,
     SearchRequest,
     SearchResponse,
 )
-from app.search import prompts
+from app.search import prompts, times
 from app.search.context import (
     Evidence,
     InvalidModelOutput,
@@ -59,16 +60,53 @@ def apply_cutoff(ranked: list[SearchHit], options: SearchOptions) -> list[Search
     return [hit for hit in ranked if hit.score >= threshold]
 
 
+def has_visual_query(request: SearchRequest) -> bool:
+    """사진 내용 조건 여부
+
+    BE는 해석 결과에 사진 내용이 없으면 원문 query로 바꿔 보내고, 채점 스크립트는 null을 그대로 보냄
+    """
+    visual_query = (request.visual_query or "").strip()
+    return bool(visual_query) and visual_query != request.query.strip()
+
+
+def order_by_taken_at(candidates: list[SearchCandidate], limit: int) -> list[SearchHit]:
+    """사진 내용 조건이 없는 질문의 촬영 시각순 결과
+
+    BE가 score 내림차순으로 다시 정렬하므로 score는 순위에 따라 감소하는 값
+    """
+    ordered = sorted(candidates, key=lambda item: (item.taken_at, item.trip_attachment_id))[:limit]
+    return [
+        SearchHit(
+            trip_attachment_id=item.trip_attachment_id, score=(len(ordered) - rank) / len(ordered)
+        )
+        for rank, item in enumerate(ordered)
+    ]
+
+
 async def search(
     request: SearchRequest, context: SearchContext, options: SearchOptions
 ) -> SearchResponse:
-    if not request.candidates:
+    candidates = {item.trip_attachment_id: item for item in request.candidates}
+    words = times.time_words(request.query)
+    if words:
+        candidates = {
+            key: item
+            for key, item in candidates.items()
+            if times.in_time_windows(item.taken_at, words)
+        }
+        if trace := current_trace():
+            trace.fields["time_words"] = list(words)
+            trace.fields["time_candidate_count"] = len(candidates)
+    if not candidates:
         return SearchResponse(
             attachments=[], answer_error="NO_EVIDENCE" if request.intent == "QUESTION" else None
         )
 
-    candidates = {item.trip_attachment_id: item for item in request.candidates}
     limit = request.limit if request.intent == "SEARCH" else options.question_k
+    # 시간대만 있는 질문은 원문 임베딩 점수가 정답 여부와 무관해 컷오프가 정답을 버림
+    if words and request.intent == "SEARCH" and not has_visual_query(request):
+        return SearchResponse(attachments=order_by_taken_at(list(candidates.values()), limit))
+
     async with asyncio.timeout(options.retrieval_timeout_sec):
         vector = await context.embedder.encode_text(
             request.visual_query if request.visual_query is not None else request.query
