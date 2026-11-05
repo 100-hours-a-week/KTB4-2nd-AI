@@ -424,7 +424,8 @@ def timed_body(query, visual_query, hours, intent="SEARCH"):
 
 
 # BE는 사진 내용이 없으면 원문을 보내고, 채점 스크립트는 null을 보냄
-@pytest.mark.parametrize("visual_query", [None, "아침에 찍은 사진"])
+# 질의 해석이 시간대 단어만 남긴 경우도 내용 없음(11/4 live T02 "저녁")
+@pytest.mark.parametrize("visual_query", [None, "아침에 찍은 사진", "아침", "아침에"])
 async def test_time_only_search_returns_time_window_by_taken_at(visual_query):
     context = replace(create_mock_context(), embedder=UnexpectedEmbedder())
     body = timed_body("아침에 찍은 사진", visual_query, [19, 8, None, 7, 13])
@@ -459,6 +460,19 @@ async def test_time_with_visual_query_embeds_only_time_window():
         assert vectors.candidate_ids == [1, 3]
         returned = [item["trip_attachment_id"] for item in response.json()["attachments"]]
         assert returned == [1, 3]
+
+
+async def test_time_word_compound_visual_query_keeps_embedding():
+    # "밤바다"는 시간대 단어로 지우지 않으므로 사진 내용 조건
+    vectors = FixedVectors([SearchHit(trip_attachment_id=1, score=0.50)])
+    context = replace(create_mock_context(), vectors=vectors)
+    body = timed_body("밤에 본 밤바다", "밤바다", [23, 12])
+    async with client_for(context) as client:
+        response = await client.post("/query/search", json=body)
+        assert response.status_code == 200
+        assert vectors.candidate_ids == [1]
+        returned = [item["trip_attachment_id"] for item in response.json()["attachments"]]
+        assert returned == [1]
 
 
 async def test_time_only_question_keeps_embedding_within_time_window():

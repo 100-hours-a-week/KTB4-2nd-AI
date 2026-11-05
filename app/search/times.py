@@ -41,6 +41,11 @@ def time_words(query: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(match.group(1) for match in _PATTERN.finditer(query)))
 
 
+def strip_time_words(text: str) -> str:
+    """시간대 단어와 뒤에 붙은 말을 지운 문자열, 합성어와 고유명사는 남김"""
+    return _PATTERN.sub("", text)
+
+
 def in_time_windows(taken_at: datetime | None, words: Iterable[str]) -> bool:
     """촬영 시각이 단어 구간 중 하나에 들면 참, 촬영 시각이 없으면 거짓(못 믿으면 붙이지 않음)"""
     if taken_at is None:
