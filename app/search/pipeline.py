@@ -64,9 +64,12 @@ def has_visual_query(request: SearchRequest) -> bool:
     """사진 내용 조건 여부
 
     BE는 해석 결과에 사진 내용이 없으면 원문 query로 바꿔 보내고, 채점 스크립트는 null을 그대로 보냄
+    질의 해석이 시간대 단어만 남긴 경우("저녁")도 내용 없음, 11/4 live T02, T06 대응
     """
     visual_query = (request.visual_query or "").strip()
-    return bool(visual_query) and visual_query != request.query.strip()
+    if not times.strip_time_words(visual_query).strip():
+        return False
+    return visual_query != request.query.strip()
 
 
 def order_by_taken_at(candidates: list[SearchCandidate], limit: int) -> list[SearchHit]:

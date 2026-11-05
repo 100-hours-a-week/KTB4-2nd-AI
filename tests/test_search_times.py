@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
-from app.search.times import KST, in_time_windows, time_words
+from app.search.times import KST, in_time_windows, strip_time_words, time_words
 
 
 @pytest.mark.parametrize(
@@ -42,6 +42,23 @@ def test_time_words(query, expected):
 )
 def test_time_words_ignores_compound_words_and_names(query):
     assert time_words(query) == ()
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("저녁", ""),
+        ("점심에", ""),
+        ("점심시간", ""),
+        ("아침 저녁", " "),
+        ("저녁 노을", " 노을"),
+        # 합성어와 고유명사는 지우지 않음
+        ("밤바다", "밤바다"),
+        ("아침고요수목원", "아침고요수목원"),
+    ],
+)
+def test_strip_time_words(text, expected):
+    assert strip_time_words(text) == expected
 
 
 def kst(hour, minute=0):
