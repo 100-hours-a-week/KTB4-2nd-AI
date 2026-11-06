@@ -637,3 +637,103 @@ async def test_empty_tool_call_history_is_not_sent():
 
     async with client_for(handler) as client:
         assert await client.chat(messages, [], 64) == ChatTurn("응답")
+
+
+def sse(*chunks, done=True):
+    lines = [f"data: {json.dumps(c, ensure_ascii=False)}" for c in chunks]
+    if done:
+        lines.append("data: [DONE]")
+    return httpx.Response(
+        200, content="\n\n".join(lines).encode(), headers={"content-type": "text/event-stream"}
+    )
+
+
+def delta(text=None, finish=None):
+    return {"choices": [{"delta": {"content": text} if text else {}, "finish_reason": finish}]}
+
+
+async def test_stream_request_joins_chunks_and_logs_usage(caplog):
+    seen = {}
+
+    def handler(request):
+        seen.update(json.loads(request.content))
+        return sse(
+            delta('{"a":'),
+            delta(" 1}"),
+            delta(finish="stop"),
+            {"choices": [], "usage": {"prompt_tokens": 7, "completion_tokens": 3}},
+        )
+
+    caplog.set_level(logging.INFO)
+    async with client_for(handler) as client:
+        turn = await client.chat(MESSAGES, [], 64, {"type": "json_object"}, stream=True)
+    assert turn.content == '{"a": 1}'
+    assert seen["stream"] is True and seen["stream_options"] == {"include_usage": True}
+    record = next(r for r in caplog.records if getattr(r, "event", None) == "ai_model_call")
+    assert (record.result, record.stream, record.completion_tokens) == ("success", True, 3)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        lambda: sse(delta("잘린"), delta(finish="length")),
+        lambda: sse(delta("끝 없음"), done=False),
+        lambda: httpx.Response(200, content=b"data: {broken\n\ndata: [DONE]"),
+        lambda: sse({"choices": [{"delta": {"content": 5}, "finish_reason": "stop"}]}),
+    ],
+)
+async def test_incomplete_or_broken_stream_is_unavailable(response):
+    async with client_for(lambda request: response()) as client:
+        with pytest.raises(VLMUnavailable):
+            await client.chat(MESSAGES, [], 64, stream=True)
+
+
+async def test_stream_http_error_keeps_transient_contract():
+    async with client_for(lambda request: httpx.Response(503)) as client:
+        with pytest.raises(VLMTransientError):
+            await client.chat(MESSAGES, [], 64, stream=True)
+
+
+async def test_stream_total_deadline_is_enforced():
+    async def handler(request):
+        await asyncio.sleep(1)
+        return sse(delta("늦음"), delta(finish="stop"))
+
+    async with client_for(handler, timeout_sec=0.05) as client:
+        with pytest.raises(TimeoutError):
+            await client.chat(MESSAGES, [], 64, stream=True)
+
+
+async def test_stream_with_tools_is_rejected_before_network():
+    tools = [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}]
+    async with client_for(lambda request: pytest.fail("전송하면 안 됨")) as client:
+        with pytest.raises(ValueError):
+            await client.chat(MESSAGES, [], 64, tools=tools, stream=True)
+
+
+class SlowStream(httpx.AsyncByteStream):
+    def __init__(self, fail=False):
+        self.fail = fail
+
+    async def __aiter__(self):
+        yield b'data: {"choices": [{"delta": {"content": "a"}, "finish_reason": null}]}\n\n'
+        if self.fail:
+            raise httpx.RemoteProtocolError("끊김")
+        await asyncio.sleep(1)
+        yield b"data: [DONE]\n\n"
+
+
+async def test_stream_deadline_applies_while_chunks_are_arriving():
+    async with client_for(
+        lambda request: httpx.Response(200, stream=SlowStream()), timeout_sec=0.1
+    ) as client:
+        with pytest.raises(TimeoutError):
+            await client.chat(MESSAGES, [], 64, stream=True)
+
+
+async def test_stream_cut_midway_is_transient():
+    async with client_for(
+        lambda request: httpx.Response(200, stream=SlowStream(fail=True))
+    ) as client:
+        with pytest.raises(VLMTransientError):
+            await client.chat(MESSAGES, [], 64, stream=True)
