@@ -57,6 +57,12 @@ class JobsSettings(Settings):
     STORY_PHASH_MAX_DIST: int = Field(default=4, ge=0, le=64)
     STORY_DEDUPE_Z: float = Field(default=1.0, ge=0, allow_inf_nan=False)
     STORY_MAX_TOKENS: int = Field(default=2048, ge=1)
+    # 분위기 변경 미리보기(동기 HTTP). 검색처럼 실제 VLM과 S3 URL 발급기를 연결한다.
+    # 처리 상한 300초는 위키 계약 값이고, BE 읽기 상한은 320초 이상이다.
+    STORY_REWRITE_ENABLED: bool = False
+    STORY_REWRITE_TIMEOUT_SEC: float = Field(default=300, gt=0, allow_inf_nan=False)
+    # 블록 30개 출력의 초기 상한(11/3 R1 조사). Pod 측정 뒤 조정한다.
+    STORY_REWRITE_MAX_TOKENS: int = Field(default=6144, ge=1)
     # API 복제본과 스토리 프로세스가 공유하는 HTTP 호출 한도. GPU 성능 보장값은 아니다.
     GPU_GENERATION_INFLIGHT: int = Field(default=8, ge=1)
     GPU_SEARCH_EMBEDDING_INFLIGHT: int = Field(default=2, ge=1)

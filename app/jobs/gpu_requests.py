@@ -94,9 +94,13 @@ class GatedVlm:
         tools=None,
         tool_choice=None,
         temperature=None,
+        stream=False,
     ):
-        # 값이 있을 때만 넘겨, 도구나 temperature를 받지 않는 구현도 그대로 감쌀 수 있게 한다.
-        options = _given(tools=tools, tool_choice=tool_choice, temperature=temperature)
+        # 값이 있을 때만 넘겨, 도구나 temperature, 스트리밍을 받지 않는 구현도
+        # 그대로 감쌀 수 있게 한다.
+        options = _given(
+            tools=tools, tool_choice=tool_choice, temperature=temperature, stream=stream or None
+        )
         try:
             return await self.gate.run(
                 lambda: self.client.chat(
@@ -123,7 +127,8 @@ class GatedEmbedder:
             raise ModelUnavailable("임베딩 서버의 호출 대기 한도를 초과했습니다.") from None
 
 
-def generation_client(client, redis, cfg):
+def generation_client(client, redis, cfg, *, timeout_sec=None):
+    # 분위기 변경처럼 호출 상한이 다른 기능은 같은 슬롯을 쓰되 상한만 따로 준다.
     return GatedVlm(
         client,
         RequestGate(
@@ -132,7 +137,7 @@ def generation_client(client, redis, cfg):
             cfg.GPU_GENERATION_INFLIGHT,
             cfg.GPU_WAIT_SEC,
         ),
-        cfg.VLM_TIMEOUT_SEC,
+        cfg.VLM_TIMEOUT_SEC if timeout_sec is None else timeout_sec,
     )
 
 

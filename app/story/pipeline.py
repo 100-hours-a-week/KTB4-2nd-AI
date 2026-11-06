@@ -12,7 +12,7 @@ from app.infra.vlm import VLMUnavailable
 from app.jobs.models import StoryBlock, StoryMessage, StoryResult, Verification
 from app.jobs.sync_bridge import run_sync
 from app.search.context import ModelUnavailable
-from app.story.prompts import StoryDraft, messages, response_format
+from app.story.prompts import MOOD_FALLBACK, StoryDraft, messages, response_format
 from app.story.selection import (
     duplicate_threshold,
     failure,
@@ -69,6 +69,14 @@ def invalid_output(rule: str, **fields) -> Exception:
     )
 
 
+def day_label(taken_at, start_date, place_name: str) -> str:
+    """N일차는 한국 시각의 날짜로 센다. 여행 시작 전 사진은 날짜를 그대로 쓴다."""
+    local = taken_at.astimezone(ZoneInfo("Asia/Seoul")).date()
+    day = (local - start_date).days + 1
+    label = local.isoformat() if day < 1 else f"{day}일차"
+    return f"{label}, {place_name}"[:40]
+
+
 def finalize(raw: str, request: StoryMessage, selected) -> dict:
     try:
         draft = StoryDraft.model_validate_json(raw)
@@ -102,18 +110,13 @@ def finalize(raw: str, request: StoryMessage, selected) -> dict:
         blocks = []
         for order, block in enumerate(ordered, 1):
             place_id, photo = photos[block.trip_attachment_id]
-            day = (
-                photo.taken_at.astimezone(ZoneInfo("Asia/Seoul")).date() - request.period.start_date
-            ).days + 1
-            if day < 1:
-                label = photo.taken_at.astimezone(ZoneInfo("Asia/Seoul")).date().isoformat()
-            else:
-                label = f"{day}일차"
             blocks.append(
                 StoryBlock(
                     order_number=order,
                     trip_place_id=place_id,
-                    day_label=f"{label}, {places[place_id]}"[:40],
+                    day_label=day_label(
+                        photo.taken_at, request.period.start_date, places[place_id]
+                    ),
                     **block.model_dump(),
                 )
             )
@@ -177,6 +180,16 @@ async def run(request: dict, reporter, ctx: StoryContext, options: StoryOptions)
                 urls.append(await ctx.urls.resolve(photo.analyze_storage_key))
         await reporter.report("WRITING", 2, 4)
         await reporter.check_cancel()
+        if message.mood in MOOD_FALLBACK:
+            # 대체가 남아 있는 동안 두 값이 실제로 오는지 본다(결정 57번).
+            log.info(
+                "스토리 분위기 대체",
+                extra={
+                    "event": "ai_story_mood_fallback",
+                    "requested_mood": message.mood,
+                    "used_mood": MOOD_FALLBACK[message.mood],
+                },
+            )
         with stage("generate", parent="writing", images=len(urls)):
             raw = await ctx.vlm.chat(
                 messages(message, selected),
