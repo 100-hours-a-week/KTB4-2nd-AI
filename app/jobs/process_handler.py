@@ -208,7 +208,9 @@ def open_context(
             images = wrap_images(images)
         wait_for_qdrant(cfg.QDRANT_URL)
         check()
-        vectors = QdrantStore(cfg.QDRANT_URL, engine.model_version, engine.dim)
+        vectors = QdrantStore(
+            cfg.QDRANT_URL, engine.model_version, engine.dim, api_key=cfg.QDRANT_API_KEY
+        )
         resources.callback(vectors.close)
         yield build_context(
             cfg,

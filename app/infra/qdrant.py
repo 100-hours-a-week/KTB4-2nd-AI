@@ -9,6 +9,7 @@ import re
 
 import httpx
 import numpy as np
+from pydantic import SecretStr
 from qdrant_client import AsyncQdrantClient, QdrantClient
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 from qdrant_client.models import Distance, Filter, HasIdCondition, PointStruct, VectorParams
@@ -22,6 +23,11 @@ logger = get_logger(__name__)
 MEMORY = ":memory:"
 
 
+def _secret(api_key: SecretStr | None) -> str | None:
+    """빈 값은 키 없음으로 본다. HTTPS 신뢰는 httpx가 SSL_CERT_FILE로 정함"""
+    return (api_key.get_secret_value() or None) if api_key is not None else None
+
+
 def collection_name(model_version: str) -> str:
     """vectors_{model_version}. 이름에 못 쓰는 문자는 _로"""
     return "vectors_" + re.sub(r"[^A-Za-z0-9_-]", "_", model_version)
@@ -30,10 +36,16 @@ def collection_name(model_version: str) -> str:
 class QdrantStore:
     """워커는 QDRANT_URL로 서버에, 테스트와 로컬 개발은 ":memory:"로 프로세스 안에서"""
 
-    def __init__(self, location: str, model_version: str, dim: int) -> None:
+    def __init__(
+        self, location: str, model_version: str, dim: int, api_key: SecretStr | None = None
+    ) -> None:
         self.dim = dim
         self.collection = collection_name(model_version)
-        self._client = QdrantClient(MEMORY) if location == MEMORY else QdrantClient(url=location)
+        self._client = (
+            QdrantClient(MEMORY)
+            if location == MEMORY
+            else QdrantClient(url=location, api_key=_secret(api_key))
+        )
         try:
             self._ensure_collection()
         except BaseException:
@@ -96,14 +108,26 @@ class AsyncQdrantVectors:
     컬렉션이 없으면 빈 결과, 시간 초과는 TimeoutError, 그 외 연결과 응답 오류는 ModelUnavailable
     """
 
-    def __init__(self, location: str, model_version: str, dim: int, timeout_sec: int = 5) -> None:
+    def __init__(
+        self,
+        location: str,
+        model_version: str,
+        dim: int,
+        timeout_sec: int = 5,
+        api_key: SecretStr | None = None,
+    ) -> None:
         self.dim = dim
         self.collection = collection_name(model_version)
         # 원격 클라이언트는 생성자에서 서버 버전을 동기로 확인하므로 끔, 이벤트 루프 차단 방지
         self._client = (
             AsyncQdrantClient(location=MEMORY)
             if location == MEMORY
-            else AsyncQdrantClient(url=location, timeout=timeout_sec, check_compatibility=False)
+            else AsyncQdrantClient(
+                url=location,
+                api_key=_secret(api_key),
+                timeout=timeout_sec,
+                check_compatibility=False,
+            )
         )
         self._collection_ready = False
 

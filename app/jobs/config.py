@@ -16,7 +16,12 @@ class JobsSettings(Settings):
     JOBS_ENV: str = Field(default="local", pattern=r"^[a-z][a-z0-9-]*$")
     REDIS_URL: SecretStr = SecretStr("redis://127.0.0.1:6379/0")
     KAFKA_BOOTSTRAP_SERVERS: str = "127.0.0.1:9092"
-    KAFKA_SECURITY_PROTOCOL: Literal["PLAINTEXT"] = "PLAINTEXT"
+    KAFKA_SECURITY_PROTOCOL: Literal["PLAINTEXT", "SASL_SSL"] = "PLAINTEXT"
+    # SASL_SSL에서만 사용. TLS로 서버 인증서와 호스트 이름을 검증하고 SCRAM으로 계정을 인증
+    KAFKA_SASL_MECHANISM: Literal["SCRAM-SHA-256", "SCRAM-SHA-512"] = "SCRAM-SHA-512"
+    KAFKA_SASL_USERNAME: str | None = None
+    KAFKA_SASL_PASSWORD: SecretStr | None = None
+    KAFKA_SSL_CAFILE: str | None = None
     KAFKA_TRIP_CREATE_REQUEST_TOPIC: str = "local.yeodam.trip-create.request"
     KAFKA_TRIP_CREATE_RESULT_TOPIC: str = "local.yeodam.trip-create.result"
     KAFKA_TRIP_UPDATE_REQUEST_TOPIC: str = "local.yeodam.trip-update.request"
@@ -100,6 +105,19 @@ class JobsSettings(Settings):
         ]
         if len(set(topics)) != 6 or any(not topic.strip() for topic in topics):
             raise ValueError("요청과 결과 토픽 6개는 서로 다른 이름이어야 함")
+        if self.KAFKA_SECURITY_PROTOCOL == "SASL_SSL":
+            password = self.KAFKA_SASL_PASSWORD
+            if not (self.KAFKA_SASL_USERNAME or "").strip():
+                raise ValueError("SASL_SSL에는 KAFKA_SASL_USERNAME이 필요함")
+            if password is None or not password.get_secret_value().strip():
+                raise ValueError("SASL_SSL에는 KAFKA_SASL_PASSWORD가 필요함")
+            if not (self.KAFKA_SSL_CAFILE or "").strip():
+                raise ValueError("SASL_SSL에는 KAFKA_SSL_CAFILE이 필요함")
+        # V3 Qdrant는 API Key 인증을 켠 상태로만 운영. V2와 로컬은 무인증 유지
+        if self.JOBS_ENV == "v3-foundation":
+            key = self.QDRANT_API_KEY
+            if key is None or not key.get_secret_value().strip():
+                raise ValueError("JOBS_ENV=v3-foundation에는 QDRANT_API_KEY가 필요함")
         # 환경 변수 예시처럼 빈 값으로 둔 항목은 쓰지 않는 것으로 본다.
         if self.PLACE_INDEX_S3_URI or self.PLACE_INDEX_SHA256:
             if not re.fullmatch(r"s3://[^/]+/.+", self.PLACE_INDEX_S3_URI or ""):

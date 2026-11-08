@@ -30,7 +30,8 @@ def wait_for_qdrant(url: str, timeout: float = 60.0, interval: float = 1.0) -> N
     """Qdrant /readyz가 200이 될 때까지 대기. 워커 기동 때 한 번
 
     supervisord가 qdrant와 worker를 같이 띄우므로 워커가 먼저 붙으면 연결 실패로 죽음.
-    :memory:는 대기 없음
+    :memory:는 대기 없음. HTTPS 인증서 검증은 Qdrant 클라이언트와 같이 httpx 기본값(SSL_CERT_FILE)
+    /readyz는 api-key 없이 부르므로 성공해도 데이터 API 인증 확인은 아님
     """
     if url == MEMORY:
         return
@@ -96,7 +97,9 @@ def build_context(
         images = build_images(settings)
     if qdrant is None:
         wait_for_qdrant(settings.QDRANT_URL)
-        qdrant = QdrantStore(settings.QDRANT_URL, engine.model_version, engine.dim)
+        qdrant = QdrantStore(
+            settings.QDRANT_URL, engine.model_version, engine.dim, api_key=settings.QDRANT_API_KEY
+        )
     thresholds = (
         {}
         if settings.FAKE_PIPELINE

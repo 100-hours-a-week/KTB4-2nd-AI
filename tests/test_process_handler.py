@@ -145,7 +145,7 @@ async def test_stored_photo_metrics_replace_process_download(configured, monkeyp
     # 실행마다 새로 여는 :memory: Qdrant 대신 묶음과 정리가 같은 저장소를 보게 한다.
     shared = QdrantStore(":memory:", engine.model_version, engine.dim)
     monkeypatch.setattr(shared, "close", lambda: None)
-    monkeypatch.setattr(process_handler, "QdrantStore", lambda *args: shared)
+    monkeypatch.setattr(process_handler, "QdrantStore", lambda *args, **kwargs: shared)
     monkeypatch.setattr(datasets, "reference_sets", lambda: (reference(["a"] * 12),))
     evaluated = []
     monkeypatch.setattr(
