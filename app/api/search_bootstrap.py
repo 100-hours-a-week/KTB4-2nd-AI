@@ -41,7 +41,11 @@ async def search_service(
             resources.push_async_callback(embedder.aclose)
         if vectors is None:
             vectors = AsyncQdrantVectors(
-                settings.QDRANT_URL, MODEL_VERSION, DIM, settings.QDRANT_TIMEOUT_SEC
+                settings.QDRANT_URL,
+                MODEL_VERSION,
+                DIM,
+                settings.QDRANT_TIMEOUT_SEC,
+                api_key=settings.QDRANT_API_KEY,
             )
             resources.push_async_callback(vectors.aclose)
         images = await S3ImageResolver.create(settings)

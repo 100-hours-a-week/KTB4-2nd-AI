@@ -454,7 +454,7 @@ async def test_handler_cleans_clients_after_initialization_failure(monkeypatch):
     vlm = AsyncMock()
     vectors = AsyncMock()
     monkeypatch.setattr(handler.VllmClient, "from_settings", lambda _: vlm)
-    monkeypatch.setattr(handler, "AsyncQdrantVectors", lambda *args: vectors)
+    monkeypatch.setattr(handler, "AsyncQdrantVectors", lambda *args, **kwargs: vectors)
     monkeypatch.setattr(
         handler.S3ImageResolver, "create", AsyncMock(side_effect=RuntimeError("S3 unavailable"))
     )
@@ -472,7 +472,7 @@ async def test_handler_passes_duplicate_setting(monkeypatch):
     cfg = JobsSettings(_env_file=None, API_KEY="test", IMAGE_SOURCE="local", STORY_DEDUPE_Z=1.5)
     monkeypatch.setattr(handler, "JobsSettings", lambda: cfg)
     monkeypatch.setattr(handler.VllmClient, "from_settings", lambda _: AsyncMock())
-    monkeypatch.setattr(handler, "AsyncQdrantVectors", lambda *args: AsyncMock())
+    monkeypatch.setattr(handler, "AsyncQdrantVectors", lambda *args, **kwargs: AsyncMock())
     monkeypatch.setattr(handler.S3ImageResolver, "create", AsyncMock(return_value=AsyncMock()))
     pipeline = AsyncMock(return_value={})
     monkeypatch.setattr(handler, "run_pipeline", pipeline)

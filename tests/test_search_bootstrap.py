@@ -504,7 +504,7 @@ async def test_default_qdrant_uses_qwen_collection_and_is_closed(monkeypatch, im
         async with search_service(cfg) as service:
             assert service.context.vectors.inner is vectors
         images.aclose.assert_awaited_once()
-    factory.assert_called_once_with(cfg.QDRANT_URL, MODEL_VERSION, DIM, 2)
+    factory.assert_called_once_with(cfg.QDRANT_URL, MODEL_VERSION, DIM, 2, api_key=None)
     vectors.aclose.assert_awaited_once()
     assert vlm._client.is_closed and embedder._client.is_closed
 

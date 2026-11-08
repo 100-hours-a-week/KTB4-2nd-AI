@@ -36,7 +36,9 @@ async def run(request: dict, reporter) -> dict:
     await reporter.check_cancel()
     async with AsyncExitStack() as resources:
         vlm = await resources.enter_async_context(VllmClient.from_settings(cfg))
-        vectors = AsyncQdrantVectors(cfg.QDRANT_URL, MODEL_VERSION, DIM, cfg.QDRANT_TIMEOUT_SEC)
+        vectors = AsyncQdrantVectors(
+            cfg.QDRANT_URL, MODEL_VERSION, DIM, cfg.QDRANT_TIMEOUT_SEC, api_key=cfg.QDRANT_API_KEY
+        )
         resources.push_async_callback(vectors.aclose)
         urls = await S3ImageResolver.create(cfg)
         resources.push_async_callback(urls.aclose)

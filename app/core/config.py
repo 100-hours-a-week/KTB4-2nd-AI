@@ -18,6 +18,8 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        # 검증 실패 메시지에 입력값(비밀번호, API Key)을 남기지 않음
+        hide_input_in_errors=True,
     )
 
     # 프로파일과 모델
@@ -31,6 +33,8 @@ class Settings(BaseSettings):
     API_URL: str = "http://127.0.0.1:8000"
     QDRANT_URL: str = "http://127.0.0.1:6333"
     QDRANT_TIMEOUT_SEC: int = Field(default=5, ge=1)
+    # 원격 Qdrant의 api-key 헤더. BE가 AI API를 부르는 API_KEY와 다른 값, 미설정이면 무인증
+    QDRANT_API_KEY: SecretStr | None = None
 
     # v2 VLM. 미설정이면 기존 v1 기동에 영향이 없고, 클라이언트 생성 시 필수값을 확인한다.
     VLM_BASE_URL: str | None = None
