@@ -12,7 +12,7 @@ from app.infra.vlm import VLMUnavailable
 from app.jobs.models import StoryBlock, StoryMessage, StoryResult, Verification
 from app.jobs.sync_bridge import run_sync
 from app.search.context import ModelUnavailable
-from app.story.prompts import MOOD_FALLBACK, StoryDraft, messages, response_format
+from app.story.prompts import StoryDraft, messages, response_format
 from app.story.selection import (
     duplicate_threshold,
     failure,
@@ -180,16 +180,6 @@ async def run(request: dict, reporter, ctx: StoryContext, options: StoryOptions)
                 urls.append(await ctx.urls.resolve(photo.analyze_storage_key))
         await reporter.report("WRITING", 2, 4)
         await reporter.check_cancel()
-        if message.mood in MOOD_FALLBACK:
-            # 대체가 남아 있는 동안 두 값이 실제로 오는지 본다(결정 57번).
-            log.info(
-                "스토리 분위기 대체",
-                extra={
-                    "event": "ai_story_mood_fallback",
-                    "requested_mood": message.mood,
-                    "used_mood": MOOD_FALLBACK[message.mood],
-                },
-            )
         with stage("generate", parent="writing", images=len(urls)):
             raw = await ctx.vlm.chat(
                 messages(message, selected),

@@ -87,7 +87,7 @@ class StoryMessage(RequestModel):
     execution_id: str = Field(min_length=1, max_length=128)
     trip_name: str = Field(min_length=1, max_length=10)
     period: Period
-    mood: Literal["PLAIN", "EMOTIONAL", "HUMOROUS", "CALM", "LITERARY"]
+    mood: Literal["PLAIN", "HUMOROUS", "LITERARY"]
     places: list[StoryPlace] = Field(min_length=1, max_length=10)
 
 

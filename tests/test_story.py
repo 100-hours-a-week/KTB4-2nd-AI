@@ -5,6 +5,7 @@ import json
 import logging
 from contextlib import nullcontext
 from datetime import datetime
+from typing import get_args
 from unittest.mock import AsyncMock
 
 import numpy as np
@@ -14,6 +15,7 @@ from PIL import Image
 from app.core.errors import ErrorCode, PipelineCancelled, PipelineError
 from app.core.tracing import end_trace, start_trace
 from app.infra.vlm import ChatTurn, VLMUnavailable
+from app.jobs.models import StoryMessage
 from app.story.pipeline import StoryContext, StoryOptions, finalize, run, validate_request
 from app.story.prompts import MOOD_RULES, StoryDraft, response_format, system_prompt
 from app.story.selection import (
@@ -318,15 +320,23 @@ async def test_pinned_photo_order_follows_image_order_when_place_and_time_order_
     ]
 
 
+@pytest.mark.parametrize("mood", ["PLAIN", "HUMOROUS", "LITERARY"])
 @scenario
-async def test_system_prompt_is_adopted_text_with_requested_mood_rule_only():
+async def test_system_prompt_is_adopted_text_with_requested_mood_rule_only(mood):
     ctx = context()
-    await run(request_two_places(), AsyncMock(), ctx, StoryOptions())
-    system = ctx.vlm.chat.call_args.args[0][0]
-    assert system == {"role": "system", "content": system_prompt("PLAIN")}
-    assert MOOD_RULES["PLAIN"] in system["content"]
-    assert MOOD_RULES["HUMOROUS"] not in system["content"]
+    await run({**request_two_places(), "mood": mood}, AsyncMock(), ctx, StoryOptions())
+    system, user = ctx.vlm.chat.call_args.args[0]
+    assert system == {"role": "system", "content": system_prompt(mood)}
+    for other, rule in MOOD_RULES.items():
+        assert (rule in system["content"]) == (other == mood)
     assert "1인칭 시점" in system["content"]
+    # 입력 JSON의 mood도 system의 규칙과 같은 값이다.
+    assert json.loads(user["content"][-1]["text"])["mood"] == mood
+
+
+def test_story_request_moods_match_prompt_rules():
+    # 요청이 받는 분위기와 프롬프트 규칙이 어긋나면 KeyError로 내부 오류가 난다.
+    assert set(get_args(StoryMessage.model_fields["mood"].annotation)) == set(MOOD_RULES)
 
 
 def test_only_humorous_rule_mentions_summary_and_bans_laughter_there():
@@ -339,23 +349,13 @@ def test_only_humorous_rule_mentions_summary_and_bans_laughter_there():
 
 @pytest.mark.parametrize("mood", ["EMOTIONAL", "CALM"])
 @scenario
-async def test_unused_moods_fall_back_to_plain_and_are_logged(mood, caplog):
-    # BE·FE가 세 값으로 바꾸기 전까지 두 값은 담백하게로 쓴다(결정 57번).
-    caplog.set_level(logging.INFO)
+async def test_removed_moods_are_invalid_requests(mood):
+    # BE·FE가 세 값만 보내므로 대체 없이 거절한다(스토리 트랙 결정 80번).
     ctx = context()
-    await run({**request_two_places(), "mood": mood}, AsyncMock(), ctx, StoryOptions())
-    system, user = ctx.vlm.chat.call_args.args[0]
-    assert system["content"] == system_prompt("PLAIN")
-    assert json.loads(user["content"][-1]["text"])["mood"] == "PLAIN"
-    fallback = [r for r in caplog.records if getattr(r, "event", None) == "ai_story_mood_fallback"]
-    assert [(r.requested_mood, r.used_mood) for r in fallback] == [(mood, "PLAIN")]
-
-
-@scenario
-async def test_supported_mood_is_not_logged_as_fallback(caplog):
-    caplog.set_level(logging.INFO)
-    await run(request_two_places(), AsyncMock(), context(), StoryOptions())
-    assert not [r for r in caplog.records if getattr(r, "event", None) == "ai_story_mood_fallback"]
+    with pytest.raises(PipelineError) as error:
+        await run({**request_two_places(), "mood": mood}, AsyncMock(), ctx, StoryOptions())
+    assert error.value.code == ErrorCode.INVALID_REQUEST
+    ctx.vlm.chat.assert_not_called()
 
 
 @pytest.mark.parametrize(

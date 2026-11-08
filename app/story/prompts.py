@@ -65,17 +65,10 @@ AFTER_MOOD = (
     "출력하세요. story_summary와 각 블록의 detail_summary는 40자 이내의 짧은 한 구절, memo는 125자 "
     "이내로 작성하세요."
 )
-# BE·FE가 세 값으로 바꾸기 전까지 EMOTIONAL·CALM은 담백하게 규칙으로 쓴다(결정 57번).
-# 두 값이 더 오지 않게 되면 이 표와 대체 로그를 지운다.
-MOOD_FALLBACK = {"EMOTIONAL": "PLAIN", "CALM": "PLAIN"}
-
-
-def prompt_mood(mood: str) -> str:
-    return MOOD_FALLBACK.get(mood, mood)
 
 
 def system_prompt(mood: str) -> str:
-    return BEFORE_MOOD + MOOD_RULES[prompt_mood(mood)] + AFTER_MOOD
+    return BEFORE_MOOD + MOOD_RULES[mood] + AFTER_MOOD
 
 
 class DraftBlock(BaseModel):
@@ -95,8 +88,7 @@ def messages(request, selected):
     places = {place.trip_place_id: place.place_name for place in request.places}
     data = {
         "trip_name": request.trip_name,
-        # 입력 JSON의 mood도 system의 규칙과 같은 값으로 맞춘다.
-        "mood": prompt_mood(request.mood),
+        "mood": request.mood,
         "period": request.period.model_dump(mode="json"),
         "photos": [
             {

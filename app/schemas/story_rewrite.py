@@ -6,7 +6,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validato
 
 from app.schemas.process import Period
 
-# 분위기 변경은 세 값만 받는다(결정 46번). 스토리 생성은 전환 기간에 다섯 값을 받는다.
+# 분위기 변경은 세 값만 받는다(결정 46번). 스토리 생성도 세 값만 받는다(스토리 트랙 결정 80번).
 RewriteMood = Literal["PLAIN", "HUMOROUS", "LITERARY"]
 
 
