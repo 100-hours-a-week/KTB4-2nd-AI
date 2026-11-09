@@ -17,6 +17,12 @@ from typing import Any
 
 from app.core.tracing import current_trace
 
+try:
+    # 계측은 Cloud가 이미지 밖에서 주입. 패키지가 없으면 trace_id, span_id는 null
+    from opentelemetry import trace as otel_trace
+except ImportError:  # pragma: no cover - 운영 이미지 의존성 확정 전
+    otel_trace = None
+
 SERVICE = "ai"
 
 # 클라우드 관측 계약의 공통 필드. 값이 없어도 null로 남김
@@ -29,6 +35,8 @@ COMMON_FIELDS = (
     "duration_ms",
     "failure_stage",
     "error_code",
+    "trace_id",
+    "span_id",
 )
 
 # ProcessStep 이름과 클라우드가 정한 단계 이름의 매핑
@@ -175,6 +183,19 @@ def current_job() -> str | None:
     return _job_id.get()
 
 
+def otel_ids() -> tuple[str | None, str | None]:
+    """현재 OpenTelemetry Span의 trace_id와 span_id, 소문자 hex 32자리와 16자리
+
+    APM Trace와 로그를 잇는 용도. 유효한 Span이 없으면 둘 다 None이고 ID를 새로 만들지 않음
+    """
+    if otel_trace is None:
+        return None, None
+    span_context = otel_trace.get_current_span().get_span_context()
+    if not span_context.is_valid:
+        return None, None
+    return format(span_context.trace_id, "032x"), format(span_context.span_id, "016x")
+
+
 class JsonFormatter(logging.Formatter):
     """한 줄 JSON. 공통 필드는 해당하지 않아도 null로 남김
 
@@ -204,10 +225,13 @@ class JsonFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
+        trace_id, span_id = otel_ids()
         context: dict[str, Any] = {
             "request_id": current_request(),
             "trip_id": current_trip(),
             "job_id": current_job(),
+            "trace_id": trace_id,
+            "span_id": span_id,
         }
         for key in COMMON_FIELDS:
             payload[key] = extras.pop(key, context.get(key))
