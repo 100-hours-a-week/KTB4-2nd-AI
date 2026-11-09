@@ -13,6 +13,7 @@ from pathlib import Path
 import httpx
 import pytest
 from fastapi import FastAPI
+from opentelemetry import trace as otel_trace
 
 from app.core.config import Settings
 from app.core.errors import DEFAULT_MESSAGE, AppError, ErrorCode
@@ -124,6 +125,54 @@ def test_clear_context_removes_identifiers():
     assert payload["request_id"] is None
     assert payload["trip_id"] is None
     assert payload["job_id"] is None
+
+
+def otel_span(trace_id: int, span_id: int) -> otel_trace.Span:
+    """SDK 없이 현재 Span으로 둘 수 있는 Span. 자동 계측이 만든 Span과 같은 맥락 경로"""
+    return otel_trace.NonRecordingSpan(
+        otel_trace.SpanContext(
+            trace_id=trace_id,
+            span_id=span_id,
+            is_remote=False,
+            trace_flags=otel_trace.TraceFlags(otel_trace.TraceFlags.SAMPLED),
+        )
+    )
+
+
+def test_otel_ids_are_lowercase_fixed_width_hex():
+    """앞자리 0을 채운 소문자 hex. APM의 Trace ID와 문자열 그대로 비교되어야 함"""
+    with otel_trace.use_span(otel_span(0xABC, 0xDEF), end_on_exit=False):
+        payload = format_record()
+
+    assert payload["trace_id"] == "00000000000000000000000000000abc"
+    assert payload["span_id"] == "0000000000000def"
+
+
+def test_otel_ids_are_null_without_valid_span():
+    """맥락이 없거나 무효 Span이면 null, 로그용 ID를 새로 만들지 않음"""
+    assert format_record()["trace_id"] is None
+
+    with otel_trace.use_span(otel_trace.INVALID_SPAN, end_on_exit=False):
+        payload = format_record()
+
+    assert payload["trace_id"] is None
+    assert payload["span_id"] is None
+
+
+def test_otel_ids_keep_business_identifiers_and_error_fields():
+    bind_request("req-1")
+    bind_job("exec-1")
+
+    with otel_trace.use_span(otel_span(1, 2), end_on_exit=False):
+        payload = format_record(
+            event="ai_job", result="failed", failure_stage="embedding", error_code="TIMEOUT"
+        )
+
+    assert payload["request_id"] == "req-1"
+    assert payload["job_id"] == "exec-1"
+    assert payload["failure_stage"] == "embedding"
+    assert payload["error_code"] == "TIMEOUT"
+    assert payload["trace_id"] == f"{1:032x}"
 
 
 def test_extra_overrides_context():
