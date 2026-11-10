@@ -1,4 +1,4 @@
-"""한 번의 VLM 집필을 수행하고 BE에 전달할 스토리 결과를 검증한다."""
+"""사진 확인과 집필, 두 번의 VLM 호출로 스토리를 쓰고 BE에 전달할 결과를 검증한다."""
 
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
@@ -12,7 +12,14 @@ from app.infra.vlm import VLMUnavailable
 from app.jobs.models import StoryBlock, StoryMessage, StoryResult, Verification
 from app.jobs.sync_bridge import run_sync
 from app.search.context import ModelUnavailable
-from app.story.prompts import StoryDraft, messages, response_format
+from app.story.prompts import (
+    PhotoNotes,
+    StoryDraft,
+    messages,
+    perceive_format,
+    perceive_messages,
+    response_format,
+)
 from app.story.selection import (
     duplicate_threshold,
     failure,
@@ -33,6 +40,10 @@ class StoryContext:
     vlm: object
 
 
+PERCEIVE_TOKENS_PER_PHOTO = 150
+WRITE_TOKENS_PER_PHOTO = 200
+
+
 @dataclass(frozen=True)
 class StoryOptions:
     image_budget: int = 10
@@ -40,6 +51,7 @@ class StoryOptions:
     phash_max: int = 4
     dedupe_z: float = 1.0
     max_tokens: int = 2048
+    perceive_max_tokens: int = 1024
 
 
 def validate_request(request: dict) -> StoryMessage:
@@ -67,6 +79,29 @@ def invalid_output(rule: str, **fields) -> Exception:
         "생성된 스토리가 출력 규칙을 만족하지 못했습니다.",
         reason="INVALID_STORY_OUTPUT",
     )
+
+
+async def perceive(vlm, message: StoryMessage, selected, urls, max_tokens: int) -> dict | None:
+    """사진마다 실제로 찍힌 것을 적게 한다. 형식이 틀리면 메모 없이 쓰도록 None을 돌려준다.
+
+    생성 서버 오류와 시간 초과는 집필 호출과 같이 호출자에게 올린다.
+    """
+    ids = [photo.trip_attachment_id for _, photo in selected]
+    turn = await vlm.chat(
+        perceive_messages(message, selected), urls, max_tokens, response_format=perceive_format(ids)
+    )
+    try:
+        notes = PhotoNotes.model_validate_json(turn.content).notes
+        shows = {note.trip_attachment_id: note.shows for note in notes}
+        if len(shows) != len(notes) or set(shows) != set(ids):
+            raise ValueError("사진 확인 메모의 사진 ID가 요청과 다르다")
+    except (ValidationError, ValueError):
+        log.warning(
+            "사진 확인 메모가 출력 규칙을 만족하지 못해 메모 없이 씁니다.",
+            extra={"event": "ai_story_perceive_invalid", "result": "skipped", "photos": len(ids)},
+        )
+        return None
+    return shows
 
 
 def day_label(taken_at, start_date, place_name: str) -> str:
@@ -117,7 +152,7 @@ def finalize(raw: str, request: StoryMessage, selected) -> dict:
                     day_label=day_label(
                         photo.taken_at, request.period.start_date, places[place_id]
                     ),
-                    **block.model_dump(),
+                    **block.model_dump(exclude={"about"}),
                 )
             )
         return StoryResult(
@@ -180,11 +215,19 @@ async def run(request: dict, reporter, ctx: StoryContext, options: StoryOptions)
                 urls.append(await ctx.urls.resolve(photo.analyze_storage_key))
         await reporter.report("WRITING", 2, 4)
         await reporter.check_cancel()
+        # 출력이 상한에서 잘리면 스토리가 실패하므로, 사진이 많으면 상한을 사진 수에 맞춰 늘린다.
+        # 사진 한 장에 사진 확인은 150토큰, 글은 200토큰까지 잡는다(11/10 측정: 평균 50, 100).
+        perceive_tokens = max(options.perceive_max_tokens, PERCEIVE_TOKENS_PER_PHOTO * len(urls))
+        write_tokens = max(options.max_tokens, WRITE_TOKENS_PER_PHOTO * len(urls))
+        with stage("perceive", parent="writing", images=len(urls)) as fields:
+            shows = await perceive(ctx.vlm, message, selected, urls, perceive_tokens)
+            fields["noted"] = 0 if shows is None else len(shows)
+        await reporter.check_cancel()
         with stage("generate", parent="writing", images=len(urls)):
             raw = await ctx.vlm.chat(
-                messages(message, selected),
+                messages(message, selected, shows),
                 urls,
-                options.max_tokens,
+                write_tokens,
                 response_format=response_format(
                     [photo.trip_attachment_id for _, photo in selected]
                 ),

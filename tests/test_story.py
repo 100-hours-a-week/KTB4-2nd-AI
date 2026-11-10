@@ -17,7 +17,20 @@ from app.core.tracing import end_trace, start_trace
 from app.infra.vlm import ChatTurn, VLMUnavailable
 from app.jobs.models import StoryMessage
 from app.story.pipeline import StoryContext, StoryOptions, finalize, run, validate_request
-from app.story.prompts import MOOD_RULES, StoryDraft, response_format, system_prompt
+from app.story.prompts import (
+    EXAMPLES,
+    LENGTH,
+    MOOD_VOICE,
+    PERCEIVE_SYSTEM,
+    SPEECH,
+    PhotoNotes,
+    StoryDraft,
+    perceive_format,
+    response_format,
+    sentence_plan,
+    system_prompt,
+    voice_of,
+)
 from app.story.selection import (
     allocate,
     duplicate_threshold,
@@ -67,6 +80,7 @@ def draft(ids=(101, 102)):
             "blocks": [
                 {
                     "trip_attachment_id": i,
+                    "about": "풍경을 본 일",
                     "detail_summary": "사진 속 풍경",
                     "memo": "풍경을 사진에 남겼다.",
                 }
@@ -76,11 +90,34 @@ def draft(ids=(101, 102)):
     )
 
 
+def photo_notes(ids):
+    return json.dumps(
+        {"notes": [{"trip_attachment_id": i, "shows": f"실외, 맑음, 풍경 {i}"} for i in ids]}
+    )
+
+
+def pinned_ids(response_format, field):
+    items = response_format["json_schema"]["schema"]["properties"][field]["prefixItems"]
+    return [item["properties"]["trip_attachment_id"]["const"] for item in items]
+
+
+def respond(story=None, notes=None):
+    """사진 확인 호출에는 확인 메모를, 집필 호출에는 스토리 초안을 돌려준다."""
+
+    async def chat(messages, urls, max_tokens, response_format=None, **kwargs):
+        if response_format["json_schema"]["name"] == "photo_notes":
+            ids = pinned_ids(response_format, "notes")
+            return ChatTurn(photo_notes(ids) if notes is None else notes)
+        return ChatTurn(draft() if story is None else story)
+
+    return chat
+
+
 def context():
     vectors = AsyncMock()
     vectors.fetch.return_value = {101: np.array([1.0, 0]), 102: np.array([0.0, 1.0])}
     vlm = AsyncMock()
-    vlm.chat.return_value = ChatTurn(draft())
+    vlm.chat.side_effect = respond()
     urls = AsyncMock()
     urls.resolve.side_effect = lambda key: "https://images.test/" + key
     return StoryContext(lambda: nullcontext(Images()), vectors, urls, vlm)
@@ -220,12 +257,19 @@ def test_duplicate_setting_rejects_invalid_values(value):
 
 
 @scenario
-async def test_one_vlm_call_and_code_derived_metadata():
+async def test_perceive_then_write_calls_and_code_derived_metadata():
     ctx = context()
     reporter = AsyncMock()
     result = await run(request_two_places(), reporter, ctx, StoryOptions())
-    assert ctx.vlm.chat.await_count == 1
-    args = ctx.vlm.chat.call_args
+    assert ctx.vlm.chat.await_count == 2
+    first, args = ctx.vlm.chat.call_args_list
+    # 사진 확인 호출은 같은 사진을 같은 순서로 보내고, 분위기와 장소 메모는 주지 않는다.
+    assert first.args[0][0] == {"role": "system", "content": PERCEIVE_SYSTEM}
+    assert first.args[1] == args.args[1] and first.args[2] == 1024
+    assert pinned_ids(first.kwargs["response_format"], "notes") == [101, 102]
+    seen = json.loads(first.args[0][-1]["content"][-1]["text"])
+    assert "mood" not in seen and "place_notes" not in seen
+    assert all("shows" not in photo for photo in seen["photos"])
     assert args.args[1] == ["https://images.test/a.jpg", "https://images.test/b.jpg"]
     assert args.kwargs["response_format"]["type"] == "json_schema"
     assert [b["trip_place_id"] for b in result["blocks"]] == [5001, 5002]
@@ -259,7 +303,7 @@ async def test_story_skips_near_duplicate_photo_by_trip_threshold(dedupe_z, expe
         103: np.array([0.999, 0.04]),
         104: np.array([0.6, 0.8]),
     }
-    ctx.vlm.chat.return_value = ChatTurn(draft(expected))
+    ctx.vlm.chat.side_effect = respond(draft(expected))
     caplog.set_level(logging.INFO)
     _, token = start_trace("story", emit_stage_logs=True)
     try:
@@ -289,8 +333,12 @@ async def test_each_image_is_labeled_and_precedes_photo_text():
         {"type": "text", "text": "image_number 2, trip_attachment_id 102:"},
         {"type": "image"},
     ]
-    photos = json.loads(content[4]["text"])["photos"]
+    data = json.loads(content[4]["text"])
+    photos = data["photos"]
     assert [(p["image_number"], p["trip_attachment_id"]) for p in photos] == [(1, 101), (2, 102)]
+    # 사진 확인 메모는 사진 항목에 붙고, 장소 메모 제공자가 없으면 장소 메모는 빈 목록이다.
+    assert [p["shows"] for p in photos] == ["실외, 맑음, 풍경 101", "실외, 맑음, 풍경 102"]
+    assert data["place_notes"] == []
     assert len(content) == 5
 
 
@@ -326,25 +374,149 @@ async def test_system_prompt_is_adopted_text_with_requested_mood_rule_only(mood)
     ctx = context()
     await run({**request_two_places(), "mood": mood}, AsyncMock(), ctx, StoryOptions())
     system, user = ctx.vlm.chat.call_args.args[0]
-    assert system == {"role": "system", "content": system_prompt(mood)}
-    for other, rule in MOOD_RULES.items():
+    voice = voice_of(story_request()["trip_id"])
+    assert system == {"role": "system", "content": system_prompt(mood, voice)}
+    for other, rule in MOOD_VOICE.items():
         assert (rule in system["content"]) == (other == mood)
-    assert "1인칭 시점" in system["content"]
+    # 말씨는 분위기가 아니라 여행으로 정하고, 예시는 요청한 분위기와 말씨의 것만 넣는다.
+    for (other, speech), example in EXAMPLES.items():
+        assert (example in system["content"]) == ((other, speech) == (mood, voice))
+    assert SPEECH[voice] in system["content"]
+    assert "직접 겪은 일처럼" in system["content"] and "과거형" in system["content"]
     # 입력 JSON의 mood도 system의 규칙과 같은 값이다.
     assert json.loads(user["content"][-1]["text"])["mood"] == mood
 
 
+@scenario
+async def test_each_photo_is_given_a_sentence_count_in_the_writing_call_only():
+    ctx = context()
+    await run(request_two_places(), AsyncMock(), ctx, StoryOptions())
+    first, second = ctx.vlm.chat.call_args_list
+    assert all(
+        "sentences" not in p for p in json.loads(first.args[0][-1]["content"][-1]["text"])["photos"]
+    )
+    photos = json.loads(second.args[0][-1]["content"][-1]["text"])["photos"]
+    assert [p["sentences"] for p in photos] == sentence_plan(story_request()["trip_id"], 2)
+    assert LENGTH in second.args[0][0]["content"]
+
+
+def test_sentence_plan_varies_block_length_and_is_stable_per_trip():
+    plan = sentence_plan(33, 10)
+    # 열 장이면 한 문장 3, 두 문장 5, 세 문장 2이고, 같은 여행은 다시 만들어도 같다.
+    assert sorted(plan) == [1, 1, 1, 2, 2, 2, 2, 2, 3, 3] and plan == sentence_plan(33, 10)
+    assert plan != sentence_plan(40, 10)
+    assert len(sentence_plan(33, 30)) == 30 and set(sentence_plan(33, 30)) == {1, 2, 3}
+    assert sentence_plan(33, 1) in ([1], [2], [3])
+
+
+@pytest.mark.parametrize(
+    "options,expected",
+    [
+        (StoryOptions(), (1024, 2048)),
+        # 설정한 상한이 사진 수에 비해 작으면 사진 한 장에 150, 200토큰으로 늘린다.
+        (StoryOptions(perceive_max_tokens=100, max_tokens=150), (300, 400)),
+    ],
+)
+@scenario
+async def test_output_token_limits_grow_with_the_number_of_photos(options, expected):
+    ctx = context()
+    await run(request_two_places(), AsyncMock(), ctx, options)
+    first, second = ctx.vlm.chat.call_args_list
+    assert (first.args[2], second.args[2]) == expected
+
+
+@scenario
+async def test_output_token_limits_follow_photos_not_places():
+    # 장소는 둘이고 사진은 넷이다. 상한은 사진 수로 계산한다.
+    ctx = context()
+    ctx.vectors.fetch.return_value = {
+        101: np.array([1.0, 0]),
+        102: np.array([0, 1.0]),
+        103: np.array([0.999, 0.04]),
+        104: np.array([0.6, 0.8]),
+    }
+    ctx.vlm.chat.side_effect = respond(draft([101, 103, 104, 102]))
+    options = StoryOptions(perceive_max_tokens=100, max_tokens=150, dedupe_z=100.0)
+    result = await run(request_near_duplicates(), AsyncMock(), ctx, options)
+    assert len(result["blocks"]) == 4
+    first, second = ctx.vlm.chat.call_args_list
+    assert (first.args[2], second.args[2]) == (600, 800)
+
+
 def test_story_request_moods_match_prompt_rules():
     # 요청이 받는 분위기와 프롬프트 규칙이 어긋나면 KeyError로 내부 오류가 난다.
-    assert set(get_args(StoryMessage.model_fields["mood"].annotation)) == set(MOOD_RULES)
+    moods = set(get_args(StoryMessage.model_fields["mood"].annotation))
+    assert moods == set(MOOD_VOICE)
+    assert set(EXAMPLES) == {(mood, voice) for mood in moods for voice in SPEECH}
 
 
-def test_only_humorous_rule_mentions_summary_and_bans_laughter_there():
-    # 요약을 쓰는 방식은 정하지 않고, 웃음 표현과 이모지만 막는다(결정 48·49·52번).
-    ban = "detail_summary와 story_summary에는 웃음 표현과 이모지를 쓰지 마세요."
-    for mood, rule in MOOD_RULES.items():
-        assert rule.replace(ban, "").count("story_summary") == 0
+def test_prompt_keeps_the_rules_found_by_evaluation():
+    # 판정에서 드러난 문제를 막으려고 넣은 문장들이다(11/10 실험). 문구가 빠지면 알 수 있게 둔다.
+    literary = MOOD_VOICE["LITERARY"]
+    # 서정적으로: 감각을 지어내지 않고, 다듬은 표현을 쓰지 않으며, 느낌이나 맺음말로 끝내지 않는다.
+    assert "shows나 place_notes에 없는 소리나 냄새를 지어내지 말고" in literary
+    assert "다듬은 표현과 비유는" in literary and "두세 블록에만" in literary
+    assert "나머지 블록은 한 일과 본 것만으로 끝내세요" in literary
+    assert "느낌을 정리하는 문장으로 블록을 끝내지 마세요" in literary
+    assert "'-했음' 같은 말끝도 쓰지 않습니다" in literary
+    # "-요" 말씨: "-습니다"가 되풀이되거나 "-다"가 섞이지 않게 한다.
+    assert "'-습니다'로 끝나는 문장은 스토리 전체에서 서너 번을 넘기지 말고" in SPEECH["yo"]
+    assert "'-다'로 끝나는 문장은 쓰지 않습니다" in SPEECH["yo"]
+    assert "'-습니다'로 끝나는 문장은" not in SPEECH["da"]
+    # 사진 확인 호출: 가장 눈에 띄는 대상을 먼저 적게 한다.
+    assert "가장 눈에 띄는 대상" in PERCEIVE_SYSTEM
+    for mood in MOOD_VOICE:
+        system = system_prompt(mood, "da")
+        assert "촬영 시각에 맞게 쓰세요" in system
+        assert "마지막 사진이라고 해서 여행이나 행사가 끝났다고 쓰지 마세요" in system
+        # 맺음말의 예를 넣으면 그 구절이 그대로 쓰였다. 예 없이 조건만 적는다.
+        assert "끝났다는 말은 그 사진의 촬영 시각이 저녁 이후일 때만 씁니다" in system
+        assert "일정을 마쳤다" not in system and "마무리했다" not in system
+        assert "묘한 분위기" not in system and "시간이 훌쩍" not in system
+        # 그곳에 오래 다닌 사람의 일은 빌리지 않고, 사진 확인 메모의 수는 쓰지 않는다.
+        assert "그 사진을 찍은 날 그 자리에서 할 수 있었던 일만 고르고" in system
+        assert "몇 명, 몇 잔 같은 수는 쓰지 않습니다" in system
+        # 장소 메모가 사진의 장면을 밀어내지 않게 하고, 사진 확인 메모의 문구는 옮기지 않는다.
+        assert "그것을 본 일이 그 블록에 한 번은 나오게 하세요" in system
+        assert "shows의 문구(사람 수, 색, 배경)를 그대로 옮기지도 않습니다" in system
+        assert "사진을 찍었다는 말은 스토리 전체에서 두 번까지만 쓰세요" in system
+        assert "about에 그 블록에서 이야기할 일을 한 줄로 정하세요" in system
+        assert "음식 이름 없이 먹었다는 것만 쓰세요" in system
+        assert "모든 문장은 지난 여행을 돌아보는 과거형으로 쓰세요" in system
+        assert LENGTH in system
+
+
+def test_photo_note_allows_eighty_characters():
+    # 주된 대상과 배경을 함께 적게 하면서 상한을 60자에서 80자로 올렸다(지시문은 70자 이내).
+    assert "70자 이내" in PERCEIVE_SYSTEM
+    schema = perceive_format([101])["json_schema"]["schema"]
+    note = schema["properties"]["notes"]["prefixItems"][0]
+    assert note["properties"]["shows"]["maxLength"] == 80
+    PhotoNotes.model_validate({"notes": [{"trip_attachment_id": 101, "shows": "가" * 80}]})
+    with pytest.raises(ValueError):
+        PhotoNotes.model_validate({"notes": [{"trip_attachment_id": 101, "shows": "가" * 81}]})
+
+
+def test_mood_is_not_tied_to_sentence_endings():
+    # 분위기 문단은 말끝을 정하지 않고, 말끝은 여행마다 정한 말씨 문단이 정한다(결정 120번).
+    for rule in MOOD_VOICE.values():
+        assert "분위기는 말끝이 아니라 글 전체에서 드러나야 합니다." in rule
+        assert "'-다'로 끝나는" not in rule and "'-요'로 끝나는" not in rule
+    assert voice_of(33) == "da" and voice_of(40) == "yo"
+    ban = "detail_summary와 story_summary에는 웃음 표시를 쓰지 않습니다."
+    for mood, rule in MOOD_VOICE.items():
         assert (ban in rule) == (mood == "HUMOROUS")
+
+
+def test_about_is_written_before_the_text_and_left_out_of_the_result():
+    schema = response_format([101])["json_schema"]["schema"]
+    block = schema["properties"]["blocks"]["prefixItems"][0]
+    assert list(block["properties"]) == ["trip_attachment_id", "about", "detail_summary", "memo"]
+    assert set(block["required"]) == set(block["properties"])
+    request = validate_request(story_request())
+    photo = request.places[0].attachments[0]
+    result = finalize(draft([photo.trip_attachment_id]), request, [(5001, photo)])
+    assert "about" not in result["blocks"][0]
 
 
 @pytest.mark.parametrize("mood", ["EMOTIONAL", "CALM"])
@@ -460,13 +632,42 @@ def test_response_schemas_do_not_share_mutable_state_between_requests():
         (TimeoutError("secret endpoint"), ErrorCode.TIMEOUT),
     ],
 )
+@pytest.mark.parametrize("failing_call", ["photo_notes", "travel_story"])
 @scenario
-async def test_generation_error_mapping(fault, code):
+async def test_generation_error_mapping(fault, code, failing_call):
+    # 사진 확인 호출과 집필 호출 어느 쪽의 서버 오류도 같은 실패로 알린다.
     ctx = context()
-    ctx.vlm.chat.side_effect = fault
+    normal = respond()
+
+    async def chat(messages, urls, max_tokens, response_format=None, **kwargs):
+        if response_format["json_schema"]["name"] == failing_call:
+            raise fault
+        return await normal(messages, urls, max_tokens, response_format, **kwargs)
+
+    ctx.vlm.chat.side_effect = chat
     with pytest.raises(PipelineError) as error:
         await run(request_two_places(), AsyncMock(), ctx, StoryOptions())
     assert error.value.code == code and "secret" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "notes",
+    [
+        "not json",
+        json.dumps({"notes": [{"trip_attachment_id": 101, "shows": "한 장만 적음"}]}),
+        photo_notes([101, 101]),
+    ],
+)
+@scenario
+async def test_invalid_photo_notes_are_skipped_without_failing_the_story(notes, caplog):
+    ctx = context()
+    ctx.vlm.chat.side_effect = respond(notes=notes)
+    caplog.set_level(logging.WARNING)
+    result = await run(request_two_places(), AsyncMock(), ctx, StoryOptions())
+    assert len(result["blocks"]) == 2
+    data = json.loads(ctx.vlm.chat.call_args.args[0][-1]["content"][-1]["text"])
+    assert all("shows" not in photo for photo in data["photos"])
+    assert len(events(caplog, "ai_story_perceive_invalid")) == 1
 
 
 @scenario
@@ -494,9 +695,13 @@ async def test_cancel_after_generation_cannot_return_completed():
     ctx = context()
     reporter = AsyncMock()
 
-    async def generate(*args, **kwargs):
-        reporter.check_cancel.side_effect = PipelineCancelled()
-        return ChatTurn(draft())
+    normal = respond()
+
+    async def generate(messages, urls, max_tokens, response_format=None, **kwargs):
+        # 집필 호출이 끝난 뒤에 취소가 들어온 경우만 본다.
+        if response_format["json_schema"]["name"] == "travel_story":
+            reporter.check_cancel.side_effect = PipelineCancelled()
+        return await normal(messages, urls, max_tokens, response_format, **kwargs)
 
     ctx.vlm.chat.side_effect = generate
     with pytest.raises(PipelineCancelled):
@@ -565,6 +770,14 @@ async def test_actual_vlm_transport_and_job_result_outbox():
     def complete(request):
         body = json.loads(request.content)
         requests.append(body)
+        content = body["messages"][-1]["content"]
+        assert [part["type"] for part in content] == ["text", "image_url"] * 2 + ["text"]
+        if body["response_format"]["json_schema"]["name"] == "photo_notes":
+            assert body["max_tokens"] == 1024
+            reply = photo_notes(pinned_ids(body["response_format"], "notes"))
+            return httpx.Response(
+                200, json={"choices": [{"finish_reason": "stop", "message": {"content": reply}}]}
+            )
         assert body["response_format"]["json_schema"]["name"] == "travel_story"
         schema = body["response_format"]["json_schema"]["schema"]
         assert schema["properties"]["blocks"]["minItems"] == 2
@@ -573,8 +786,6 @@ async def test_actual_vlm_transport_and_job_result_outbox():
         assert [b["properties"]["trip_attachment_id"]["const"] for b in pinned] == [101, 102]
         assert body["max_tokens"] == 2048
         assert "40자 이내의 짧은 한 구절" in body["messages"][0]["content"]
-        content = body["messages"][-1]["content"]
-        assert [part["type"] for part in content] == ["text", "image_url"] * 2 + ["text"]
         assert [part["image_url"]["url"] for part in content if part["type"] == "image_url"] == [
             "https://images.test/a.jpg",
             "https://images.test/b.jpg",
@@ -602,4 +813,4 @@ async def test_actual_vlm_transport_and_job_result_outbox():
             assert done.event.type == "story_result"
             assert done.event.result["blocks"][1]["trip_place_id"] == 5002
             assert not done.published
-            assert len(requests) == 1
+            assert len(requests) == 2

@@ -12,14 +12,19 @@ from pydantic import ValidationError
 from app.core.errors import AppError, ErrorCode
 from app.infra.vlm import ChatTurn, VLMUnavailable
 from app.schemas.story_rewrite import RewriteRequest
+from app.story.prompts import EXAMPLES, MOOD_VOICE, SPEECH, STYLE, voice_of
 from app.story.prompts import system_prompt as generation_system_prompt
 from app.story.rewrite import InvalidRewrite, RewriteService, finalize
 from app.story.rewrite_prompts import (
-    AFTER_MOOD,
-    BEFORE_MOOD,
-    MOOD_RULES,
+    CONTENT,
+    HEAD,
+    LENGTH,
+    SOURCES,
+    TAIL,
     messages,
+    mood_voice,
     response_format,
+    sentence_count,
     system_prompt,
 )
 from app.v2_main import create_app
@@ -141,10 +146,10 @@ def test_invalid_requests_are_rejected(change):
 
 
 def test_messages_mark_empty_memo_and_label_images_in_block_order():
-    system, user = messages(rewrite_request())
-    assert system["content"] == system_prompt("HUMOROUS")
-    assert MOOD_RULES["HUMOROUS"] in system["content"]
-    assert MOOD_RULES["PLAIN"] not in system["content"]
+    system, user = messages(rewrite_request(), 77)
+    assert system["content"] == system_prompt("HUMOROUS", voice_of(77))
+    assert MOOD_VOICE["HUMOROUS"] in system["content"]
+    assert MOOD_VOICE["PLAIN"] not in system["content"]
     assert "story_summary는 10자 내외의 짧은 한 구절" in system["content"]
     labels = [p["text"] for p in user["content"] if p["type"] == "text"][:-1]
     assert labels == [
@@ -154,25 +159,69 @@ def test_messages_mark_empty_memo_and_label_images_in_block_order():
     assert sum(p["type"] == "image" for p in user["content"]) == 2
     data = json.loads(user["content"][-1]["text"])
     assert [b["memo_needed"] for b in data["blocks"]] == [True, False]
+    # 서술 문장이 있는 블록에만 지금 문구의 문장 수를 준다.
+    assert data["blocks"][0]["sentences"] == 1 and "sentences" not in data["blocks"][1]
     assert data["blocks"][1]["current_detail_summary"] is None
     assert "analyze_storage_key" not in data["blocks"][0]
     assert "day_label" not in data["blocks"][0]
 
 
-def test_prompt_keeps_generation_diary_sentence_and_shared_mood_rules():
-    # 분위기 변경도 생성과 같은 일기 문장과 분위기 규칙을 쓰고, 덧붙인 문장이 없다
-    # (스토리 트랙 결정 73번).
-    diary = (
-        "그날의 일기를 쓰듯 하루 순서대로 쓰고, 블록마다 앞 블록과 이어지는 말(장소 이동, "
-        "시간 흐름)을 넣으세요."
-    )
-    assert diary in generation_system_prompt("PLAIN")
+def test_prompt_uses_the_same_style_speech_and_mood_as_generation():
+    # 분위기를 바꿔도 생성과 같은 글투, 그 여행의 말씨, 분위기 문단, 예시를 쓴다(결정 40·50·120번).
+    diary = "그날의 일기를 쓰듯 하루 순서대로 쓰고"
     for mood in ("PLAIN", "HUMOROUS", "LITERARY"):
-        system = system_prompt(mood)
-        assert system == BEFORE_MOOD + MOOD_RULES[mood] + AFTER_MOOD
-        assert diary in system
-        assert "blocks의 순서가 이 일기의 순서입니다." not in system
-        assert "순서를 단정하는 말" not in system
+        for voice in ("da", "yo"):
+            system = system_prompt(mood, voice)
+            generation = generation_system_prompt(mood, voice)
+            for shared in (STYLE, SPEECH[voice], EXAMPLES[(mood, voice)]):
+                assert shared in system and shared in generation
+            assert MOOD_VOICE[mood] in generation and mood_voice(mood) in system
+            assert system.startswith(HEAD + CONTENT + STYLE + LENGTH) and system.endswith(TAIL)
+            assert diary not in system and "어조 규칙" not in system
+    # 말씨는 분위기가 아니라 여행으로 정한다.
+    assert SPEECH["da"] in messages(rewrite_request(), 33)[0]["content"]
+    assert SPEECH["yo"] in messages(rewrite_request(), 40)[0]["content"]
+    # 지금 문구의 사실은 담고 말끝은 따르지 않으며, 장소 메모나 지어내는 규칙은 없다.
+    assert "새 문구에도 담으세요" in CONTENT and "말끝, 문장 구조" in CONTENT
+    # 이 호출이 받지 않는 자료(사진 확인 메모, 장소 메모)의 이름은 어느 분위기에도 남지 않는다.
+    for mood in ("PLAIN", "HUMOROUS", "LITERARY"):
+        for voice in ("da", "yo"):
+            system = system_prompt(mood, voice)
+            for missing in ("place_notes", "shows", "사진 확인 메모", "장소 메모"):
+                assert missing not in system
+    assert mood_voice("PLAIN") == MOOD_VOICE["PLAIN"]
+    assert mood_voice("HUMOROUS") == MOOD_VOICE["HUMOROUS"]
+    # 생성 문단의 문구가 바뀌어 바꿀 구절이 사라지면 알 수 있게, 구절마다 한 번씩 있는지 본다.
+    for generation, rewrite in SOURCES:
+        assert MOOD_VOICE["LITERARY"].count(generation) == 1
+        assert rewrite in mood_voice("LITERARY") and generation not in mood_voice("LITERARY")
+    # 소리와 냄새는 [내용]이 허용한 "장면에서 짐작되는 감각"과 부딪치지 않게 막는다.
+    assert "장면에서 짐작되는 감정, 감각은 글쓴이가 겪은 것으로 써도 됩니다" in CONTENT
+    literary = mood_voice("LITERARY")
+    assert "(사진이나 지금 문구에 있는 것)을 하나 짚어" in literary
+    # 지금 문구에 적힌 소리나 냄새(사용자가 직접 적었을 수 있다)는 빼지 않게 두 자료를 모두 적는다.
+    assert "지금 문구에 없고 사진에서도 짐작할 수 없는 소리나 냄새를 지어내지 말고" in literary
+    # 생성이 사진을 찍었다는 말을 두 번까지 쓰므로, 그 말을 금지하면 지금 문구의 일을 담으라는
+    # 지시와 부딪친다.
+    assert "사진을 찍었다" not in CONTENT and "'사진 속에는 ~'" in CONTENT
+    assert "memo를 장소 이름으로 시작하지 말고" in HEAD
+
+
+@pytest.mark.parametrize(
+    "memo,count",
+    [
+        ("택시를 타고 도착해서 전나무숲길을 걸었다.", 1),
+        ("아쉬웠다ㅠㅠ 그래서 인형 뽑기에 매달렸음ㅋㅋ", 2),
+        ("요금 15,000원 내고 탔는데 길더라. 정상에서 2.5km 걸었다.", 2),
+        ("갔다. 먹었다. 걸었다. 잤다.", 4),
+        ("하나 했다. 둘 했다. 셋 했다. 넷 했다. 다섯 했다. 여섯 했다.", 5),
+        ("2023.5.1. 방문했다.", 1),
+        ("아. 좋았다.", 1),
+        ("ㅋㅋ", 1),
+    ],
+)
+def test_sentence_count_follows_current_memo(memo, count):
+    assert sentence_count(memo) == count
 
 
 def test_response_format_limits_ids_count_and_summary():
@@ -237,6 +286,16 @@ async def test_service_streams_one_call_and_releases_lock():
         }
     ]
     assert await svc.redis.get("t:story-rewrite:7") is None
+
+
+@pytest.mark.parametrize("trip_id,voice", [(33, "da"), (40, "yo")])
+@scenario
+async def test_service_writes_in_the_speech_of_the_trip(trip_id, voice):
+    # 말씨는 생성과 같이 여행 ID로 정한다. 같은 여행은 분위기를 바꿔도 말씨가 같다.
+    vlm = FakeVlm()
+    await service(vlm).rewrite(trip_id, rewrite_request())
+    system = vlm.calls[0]["messages"][0]["content"]
+    assert system == system_prompt("HUMOROUS", voice) and SPEECH[voice] in system
 
 
 @scenario
@@ -412,30 +471,6 @@ async def test_zero_trip_id_is_rejected():
                 "/trips/0/story/rewrite", json=BODY, headers={"Authorization": "Bearer test"}
             )
     assert response.status_code == 422
-
-
-@pytest.mark.parametrize("mood", sorted(MOOD_RULES))
-def test_mood_rules_do_not_say_how_to_write_summary(mood):
-    # 요약은 목표 길이만 공통 문장에 두고 분위기마다 쓰는 방법은 적지 않는다(결정 48번).
-    # 친근하게만 요약의 웃음 표현과 이모지를 막는다(결정 52번).
-    ban = "detail_summary와 story_summary에는 웃음 표현과 이모지를 쓰지 마세요."
-    assert MOOD_RULES[mood].replace(ban, "").count("story_summary") == 0
-    assert (ban in MOOD_RULES[mood]) == (mood == "HUMOROUS")
-
-
-def test_humorous_laugh_rules():
-    rule = MOOD_RULES["HUMOROUS"]
-    assert "둘 다" not in rule
-    # 'ㅋㅋ'·'ㅎㅎ'만 번갈아 쓰지 않고 과하지 않게 쓴다(결정 50번).
-    assert "'ㅋㅋ'와 'ㅎㅎ' 두 가지로만 번갈아 쓰지 말고" in rule
-    assert "과하지 않게" in rule
-
-
-def test_memo_opening_rules_are_not_counted():
-    # 숫자로 조이지 않고 첫머리를 바꿔도 된다고만 알린다(결정 50번).
-    assert "시간 표현으로 시작하지 말고" in MOOD_RULES["PLAIN"]
-    assert "장소 이름으로 시작하지 말고" in MOOD_RULES["LITERARY"]
-    assert not any(ch.isdigit() for ch in MOOD_RULES["LITERARY"].split("detail_summary")[-1])
 
 
 @scenario
