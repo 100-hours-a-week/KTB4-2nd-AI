@@ -1,5 +1,8 @@
 """카카오 로컬 API의 키워드 장소 검색과 좌표의 행정구역 변환. 정리 에이전트가 쓴다(#151, #153).
 
+워크플로우 정리 파이프라인은 좌표 없는 전국 키워드 검색, 거리순 정렬, 분류 검색을 더 쓴다
+(search_keyword, search_category). 두 주소 문자열을 함께 돌려주어 호출자가 시·군 이름으로 거른다.
+
 REST 키는 실행기 비밀값(KAKAO_REST_API_KEY)으로만 받는다. 하루 무료 한도는 모든 작업이 함께 쓰므로
 작업마다 KakaoBudget을 새로 만들어 호출 수를 제한한다. 한도를 넘기면 호출하지 않고 None을 돌려준다.
 """
@@ -46,6 +49,13 @@ class KakaoPlace:
     latitude: float
     longitude: float
     distance_m: int | None
+    # 워크플로우가 시·군 이름으로 거를 때 쓰는 원래 두 주소. keyword()는 채우지 않는다.
+    address_name: str = ""
+    road_address_name: str = ""
+
+
+MAX_CATEGORY_SIZE = 15
+SORTS = ("accuracy", "distance")
 
 
 @dataclass(frozen=True)
@@ -114,6 +124,62 @@ class KakaoLocalClient:
         except (KeyError, TypeError, ValueError):
             raise KakaoUnavailable("카카오 키워드 검색 응답 형식이 다릅니다.") from None
 
+    async def search_keyword(
+        self,
+        query: str,
+        budget: KakaoBudget,
+        *,
+        center: tuple[float, float] | None = None,
+        radius_m: int | None = None,
+        size: int = MAX_KEYWORD_SIZE,
+        sort: str = "accuracy",
+    ) -> list[KakaoPlace] | None:
+        """키워드 검색. center가 없으면 좌표 없이 전국에서 찾는다. 상한을 넘기면 None이다."""
+        if sort not in SORTS:
+            raise ValueError(f"카카오 정렬은 {SORTS} 가운데 하나여야 합니다.")
+        if not query.strip():
+            return []
+        if not budget.take():
+            return None
+        params: dict = {"query": query, "size": max(1, min(size, MAX_KEYWORD_SIZE)), "sort": sort}
+        if center is not None:
+            params["x"], params["y"] = f"{center[1]:.6f}", f"{center[0]:.6f}"
+            if radius_m is not None:
+                params["radius"] = max(0, min(int(radius_m), MAX_KEYWORD_RADIUS_M))
+        data = await self._get("search/keyword.json", params, "keyword")
+        return _places(data, "키워드 검색")
+
+    async def search_category(
+        self,
+        code: str,
+        latitude: float,
+        longitude: float,
+        radius_m: int,
+        budget: KakaoBudget,
+        *,
+        size: int = MAX_CATEGORY_SIZE,
+        sort: str = "accuracy",
+        page: int = 1,
+    ) -> tuple[list[KakaoPlace], bool] | None:
+        """분류 검색. (장소 목록, 마지막 쪽인지)를 돌려준다. 상한을 넘기면 None이다."""
+        if sort not in SORTS:
+            raise ValueError(f"카카오 정렬은 {SORTS} 가운데 하나여야 합니다.")
+        if not budget.take():
+            return None
+        params = {
+            "category_group_code": code,
+            "x": f"{longitude:.6f}",
+            "y": f"{latitude:.6f}",
+            "radius": max(0, min(int(radius_m), MAX_KEYWORD_RADIUS_M)),
+            "size": max(1, min(size, MAX_CATEGORY_SIZE)),
+            "sort": sort,
+            "page": max(1, int(page)),
+        }
+        data = await self._get("search/category.json", params, "category")
+        places = _places(data, "분류 검색")
+        meta = data.get("meta")
+        return places, bool(meta.get("is_end", True)) if isinstance(meta, dict) else True
+
     async def region(
         self, latitude: float, longitude: float, budget: KakaoBudget
     ) -> KakaoRegion | None:
@@ -170,3 +236,23 @@ class KakaoLocalClient:
 
     async def __aexit__(self, *exc_info: object) -> None:
         await self.aclose()
+
+
+def _places(data: dict, operation: str) -> list[KakaoPlace]:
+    try:
+        return [
+            KakaoPlace(
+                candidate_id=f"kakao:{d['id']}",
+                name=d["place_name"],
+                category=d.get("category_name") or "",
+                address=d.get("road_address_name") or d.get("address_name") or "",
+                latitude=float(d["y"]),
+                longitude=float(d["x"]),
+                distance_m=int(d["distance"]) if d.get("distance") else None,
+                address_name=d.get("address_name") or "",
+                road_address_name=d.get("road_address_name") or "",
+            )
+            for d in data["documents"]
+        ]
+    except (KeyError, TypeError, ValueError):
+        raise KakaoUnavailable(f"카카오 {operation} 응답 형식이 다릅니다.") from None

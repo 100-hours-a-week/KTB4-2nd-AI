@@ -19,6 +19,7 @@ from app.jobs.config import JobsSettings
 from app.jobs.execution import handler_for, handoff_line
 from app.jobs.models import JobKind, JobRecord
 from app.jobs.redis_store import PhotoBatchClaim, RedisJobStore
+from app.pipeline.workflow.resources import prepare_tour_raw
 from app.schemas.task import TERMINAL_STATUSES, ErrorBody
 
 log = get_logger(__name__)
@@ -352,6 +353,7 @@ async def main(kind: JobKind = "process") -> None:
         if kind == "process":
             # 대기 자식을 띄우기 전에 받아 둬서, 자식들은 같은 파일을 열기만 한다.
             await asyncio.to_thread(prepare_place_index, cfg)
+            await asyncio.to_thread(prepare_tour_raw, cfg)
         await runner_loop(RedisJobStore(redis, cfg), kind)
     finally:
         await redis.aclose()

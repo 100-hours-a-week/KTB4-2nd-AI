@@ -129,6 +129,7 @@ async def test_all_features_use_real_handlers_and_http_clients(tmp_path):
         cfg.VLM_BASE_URL, cfg.VLM_MODEL = base + "/v1", "test-vlm"
         # 공공 장소 색인과 카카오가 없는 환경이다. 에이전트 연결은 tests/test_agent.py에서 확인한다.
         cfg.PROCESS_AGENT_ENABLED = False
+        cfg.PROCESS_WORKFLOW_ENABLED = False
         cfg.QDRANT_URL = base
         cfg.JOBS_POLL_SEC, cfg.JOBS_HEARTBEAT_SEC = 0.05, 0.5
         cfg.LOG_LEVEL = "INFO"

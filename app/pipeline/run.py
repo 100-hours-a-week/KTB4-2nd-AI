@@ -39,7 +39,8 @@ def run(
                       사본 키는 request.attachments[].analyze_storage_key
         ctx           외부 자원. ctx.images.get_many(keys), ctx.engine.encode_images(사본 bytes),
                       ctx.qdrant.upsert(ids, vectors), ctx.qdrant.fetch(ids), ctx.thresholds[키],
-                      ctx.settings, ctx.log, ctx.reuse_vectors, ctx.photo_metrics, ctx.agent
+                      ctx.settings, ctx.log, ctx.reuse_vectors, ctx.photo_metrics, ctx.agent,
+                      ctx.workflow
         on_progress   진행률 보고 함수 on_progress(step, done, total). 워커가 api로 콜백
         is_cancelled  취소 확인 함수. True면 즉시 PipelineCancelled를 raise
 
@@ -50,15 +51,18 @@ def run(
         EMBEDDING    16장 배치의 사본 bytes로 ctx.engine.encode_images, 배치마다 ctx.qdrant.upsert.
                      ctx.reuse_vectors면 조회한 저장 벡터를 먼저 쓰고 없는 사진만 임베딩
         CLOCK        device_model로 기기별 묶음, 유사도 쌍으로 기기별 단일 오프셋 산출과 적용
-        LOCATING     기간 밖 분리, GPS 앵커, 유사도 상속
+        LOCATING     기간 밖 분리, GPS 앵커, 유사도 상속.
+                     ctx.workflow가 있으면 기간 밖 분리만 함(유사도 상속 없음)
         CLUSTERING   haversine DBSCAN, 재방문은 한 폴더. 이어서 위치를 못 찾은 GPS 없는 사진을
                      촬영 시각 끼워 넣기와 닮은 사진 따라가기로 폴더에 넣음.
                      ctx.agent가 있으면 남은 사진을 정리 에이전트로 추정하고 폴더를 묶음,
-                     에이전트 호출이 끝날 때마다 done을 올리고 total 직전에서 멈춤
+                     에이전트 호출이 끝날 때마다 done을 올리고 total 직전에서 멈춤.
+                     ctx.workflow가 있으면 규칙 단계와 에이전트 대신 워크플로우 정리 파이프라인이
+                     폴더를 정함. 모델 호출이 끝날 때마다 done을 올리고 total 직전에서 멈춤
         FILTERING    라플라시안 BLURRY, pHash DUPLICATED, 원래 폴더 place_id 연결.
                      다운로드한 사진만 측정하고 나머지는 ctx.photo_metrics 사용.
-                     ctx.agent가 있으면 GPS 사진이 없고 보일 사진도 없는 폴더(흐린 사진만 든
-                     에이전트의 새 장소)를 풀어 그 사진을 위치 불명으로 되돌림(결정 166)
+                     ctx.agent나 ctx.workflow가 있으면 GPS 사진이 없고 보일 사진도 없는 폴더
+                     (흐린 사진만 든 새 장소)를 풀어 그 사진을 위치 불명으로 되돌림(결정 166)
         FINALIZING   대표컷은 폴더 평균 임베딩 최근접, first/last_taken_at, ProcessResult 조립
 
     진행률 규칙
@@ -217,12 +221,53 @@ def run(
                     clock_offset_tolerance_sec=thresholds["clock_offset_tolerance_sec"],
                 ),
             )
+            from app.pipeline.workflow.organize import exclude_out_of_period
+
             stage(
                 ProcessStep.LOCATING,
-                lambda: locate_photos(
+                # 워크플로우는 기간 밖 사진만 미분류로 빼고 유사도 상속은 하지 않는다(결정 221).
+                (lambda: exclude_out_of_period(photos, request.period))
+                if ctx.workflow is not None
+                else lambda: locate_photos(
                     photos, request.period, inherit_min_sim=thresholds["inherit_min_sim"]
                 ),
             )
+
+            def workflow():
+                from app.pipeline.workflow import run_workflow
+
+                # 격자를 그리려면 모든 사진의 사본이 필요하다.
+                # 저장 벡터를 재사용해 DOWNLOADING에서 받지 않은 사진만 여기서 받는다.
+                blobs = dict(raw_images)
+                wanted = {p.source.trip_attachment_id for p in photos if p.issue is None}
+                missing = [
+                    a
+                    for a in request.attachments
+                    if a.trip_attachment_id in wanted and a.trip_attachment_id not in blobs
+                ]
+                failed = []
+                for start in range(0, len(missing), 16):
+                    check_cancel()
+                    try:
+                        raw, decoded = load_images(missing[start : start + 16], ctx.images)
+                    except DecodeFailed as exc:
+                        failed.extend(exc.ids)
+                        continue
+                    for image in decoded.values():
+                        image.close()
+                    blobs.update(raw)
+                if failed:
+                    raise DecodeFailed(failed)
+                run_workflow(
+                    photos,
+                    request,
+                    ctx,
+                    blobs,
+                    lambda done: progress.report(
+                        ProcessStep.CLUSTERING, min(done, max(total - 1, 0))
+                    ),
+                    check_cancel,
+                )
 
             def clustering():
                 cluster_photos(
@@ -251,7 +296,7 @@ def run(
                         check_cancel,
                     )
 
-            stage(ProcessStep.CLUSTERING, clustering)
+            stage(ProcessStep.CLUSTERING, workflow if ctx.workflow is not None else clustering)
             variances = stage(
                 ProcessStep.FILTERING,
                 lambda: filter_photos(
@@ -262,7 +307,7 @@ def run(
                     phash_max_dist=thresholds["phash_max_dist"],
                 ),
             )
-            if ctx.agent is not None:
+            if ctx.agent is not None or ctx.workflow is not None:
                 from app.pipeline.agent.trip import release_unshowable_new_places
 
                 places_before = {p.place_id for p in photos if p.place_id}

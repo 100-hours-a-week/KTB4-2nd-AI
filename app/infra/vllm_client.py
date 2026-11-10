@@ -86,7 +86,12 @@ class VllmClient:
         tool_choice: str | dict[str, Any] | None = None,
         temperature: float | None = None,
         stream: bool = False,
+        extra_body: dict[str, Any] | None = None,
     ) -> ChatTurn:
+        """extra_body는 요청 본문에 더할 vLLM 전용 값(예: mm_processor_kwargs)이다.
+
+        본문이 이미 가진 키(model, messages, max_tokens, stream 등)는 덮어쓰지 않는다.
+        """
         if tools is None and tool_choice is not None:
             raise ValueError("도구 없이 tool_choice를 지정할 수 없습니다.")
         if tools is not None and (not isinstance(tools, list) or not tools):
@@ -94,6 +99,10 @@ class VllmClient:
         if stream and tools is not None:
             raise ValueError("도구 호출은 스트리밍으로 보내지 않습니다.")
         body, call = self._request(messages, image_urls, max_tokens, temperature)
+        if extra_body:
+            if clash := set(extra_body) & set(body):
+                raise ValueError(f"extra_body가 본문의 키를 덮어씀: {sorted(clash)}")
+            body.update(extra_body)
         if response_format is not None:
             body["response_format"] = response_format
         call["structured"] = response_format is not None

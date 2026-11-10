@@ -245,7 +245,11 @@ async def test_expired_worker_cannot_renew_or_finish_and_new_execution_is_isolat
 async def test_timeout_even_if_heartbeat_keeps_running(kind):
     # 정리만 따로 둔 제한 시간이 그 종류의 작업에만 적용된다.
     limits = (
-        {"JOBS_PROCESS_TIMEOUT_SEC": 10, "PROCESS_AGENT_BUDGET_SEC": 5}
+        {
+            "JOBS_PROCESS_TIMEOUT_SEC": 10,
+            "PROCESS_AGENT_BUDGET_SEC": 5,
+            "PROCESS_WORKFLOW_BUDGET_SEC": 5,
+        }
         if kind == "process"
         else {"JOBS_TIMEOUT_SEC": 10}
     )
