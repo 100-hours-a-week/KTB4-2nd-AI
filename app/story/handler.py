@@ -35,7 +35,11 @@ async def run(request: dict, reporter) -> dict:
     )
     await reporter.check_cancel()
     async with AsyncExitStack() as resources:
-        vlm = await resources.enter_async_context(VllmClient.from_settings(cfg))
+        # 스토리 생성 호출은 검색보다 오래 걸려 호출 제한 시간을 따로 둔다. 호출 슬롯은 함께 쓴다.
+        call_timeout = cfg.STORY_VLM_TIMEOUT_SEC
+        vlm = await resources.enter_async_context(
+            VllmClient.from_settings(cfg.model_copy(update={"VLM_TIMEOUT_SEC": call_timeout}))
+        )
         vectors = AsyncQdrantVectors(
             cfg.QDRANT_URL, MODEL_VERSION, DIM, cfg.QDRANT_TIMEOUT_SEC, api_key=cfg.QDRANT_API_KEY
         )
@@ -46,6 +50,6 @@ async def run(request: dict, reporter) -> dict:
             images=lambda: image_source(cfg),
             vectors=vectors,
             urls=urls,
-            vlm=generation_client(vlm, reporter.store.redis, cfg),
+            vlm=generation_client(vlm, reporter.store.redis, cfg, timeout_sec=call_timeout),
         )
         return await run_pipeline(request, reporter, ctx, options)

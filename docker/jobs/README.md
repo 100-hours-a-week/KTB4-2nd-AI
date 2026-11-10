@@ -46,6 +46,7 @@ async def run(request: dict, reporter: JobReporter) -> dict:
 | `API_KEY`, `REDIS_URL` | BE의 HTTP 인증과 API가 공유할 작업 저장소 |
 | `SEARCH_ENABLED=true` | 기본 API에서 실제 검색 활성화 |
 | `STORY_REWRITE_ENABLED=true`, `STORY_REWRITE_TIMEOUT_SEC`, `STORY_REWRITE_MAX_TOKENS` | 분위기 변경 미리보기(`POST /trips/{trip_id}/story/rewrite`) 활성화, 처리 상한과 출력 토큰 상한. 기본 300초와 6144 |
+| `STORY_VLM_TIMEOUT_SEC` | 스토리 생성 호출 하나의 제한 시간. 기본 90초이며 검색이 쓰는 `VLM_TIMEOUT_SEC`와 따로 둡니다 |
 | `EMBEDDING_BASE_URL`, `EMBEDDING_SERVED_MODEL_NAME`, `EMBEDDING_API_KEY` | AWS Qwen 임베딩 서버의 주소와 모델 이름, 서버가 인증을 사용할 때의 키 |
 | `QDRANT_URL`, `QDRANT_TIMEOUT_SEC` | Qdrant 주소와 개별 HTTP 요청의 시간 상한. 기본 5초 |
 | `VLM_BASE_URL`, `VLM_MODEL`, `VLM_API_KEY` | RunPod 생성 서버의 주소와 모델 이름, 서버가 인증을 사용할 때의 키 |
@@ -167,11 +168,11 @@ JOBS_TEST_REDIS_URL=redis://127.0.0.1:6379/0 JOBS_TEST_KAFKA_URL=localhost:9092 
 
 `JOBS_STORY_HANDLER=app.story.handler:run`으로 실제 스토리를 활성화합니다. Qwen 사진 벡터가 Qdrant에 먼저 저장되어 있어야 합니다. `IMAGE_SOURCE=s3`, `S3_BUCKET`, `AWS_REGION`, `QDRANT_URL`, `VLM_BASE_URL`, `VLM_MODEL`과 필요한 인증값을 전달합니다.
 
-스토리는 S3 사본의 흐림과 중복을 제외하고, 장소마다 한 장을 확보한 뒤 나머지 사진 예산을 남은 사진 수에 비례해 배분합니다. 소수점은 최대 나머지 방식으로 처리하며 동점에서는 입력 장소 순서를 사용합니다. 장소별 평균 임베딩에 가까운 사진부터 고르되, 이미 고른 사진과 코사인 유사도가 기준 이상이면 같은 장면으로 보고 건너뜁니다. 기준은 여행 안 같은 장소 사진 쌍 유사도의 평균 + `STORY_DEDUPE_Z` × 표준편차이며, 건너뛰어 못 채운 자리는 비워 둡니다. 고른 사진은 VLM에 한 번 전달합니다. 모델이 반환한 사진 ID와 형식 및 모든 선택 장소의 포함 여부를 검사하며 결과는 촬영 시각순으로 정렬합니다.
+스토리는 S3 사본의 흐림과 중복을 제외하고, 장소마다 한 장을 확보한 뒤 나머지 사진 예산을 남은 사진 수에 비례해 배분합니다. 소수점은 최대 나머지 방식으로 처리하며 동점에서는 입력 장소 순서를 사용합니다. 장소별 평균 임베딩에 가까운 사진부터 고르되, 이미 고른 사진과 코사인 유사도가 기준 이상이면 같은 장면으로 보고 건너뜁니다. 기준은 여행 안 같은 장소 사진 쌍 유사도의 평균 + `STORY_DEDUPE_Z` × 표준편차이며, 건너뛰어 못 채운 자리는 비워 둡니다. 고른 사진은 VLM에 두 번 전달합니다. 먼저 사진마다 실제로 찍힌 것을 한 줄씩 적게 하고(사진 확인), 그 메모와 함께 글을 쓰게 합니다. 사진 확인 메모의 형식이 틀리면 메모 없이 쓰고, 생성 서버 오류와 시간 초과는 두 호출 모두 작업 실패로 알립니다. 모델이 반환한 사진 ID와 형식 및 모든 선택 장소의 포함 여부를 검사하며 결과는 촬영 시각순으로 정렬합니다.
 
-분위기 변경 미리보기는 검색처럼 작업 큐를 거치지 않는 동기 HTTP입니다. `STORY_REWRITE_ENABLED=true`이면 API마다 생성용 VLM 클라이언트와 S3 URL 발급기를 한 번 만들고, 꺼져 있으면 503 `VLM_UNAVAILABLE`을 반환합니다. 생성 호출은 스트리밍으로 보내 RunPod 프록시의 무응답 상한을 넘기지 않습니다. 생성 호출은 요청마다 하나이며 검색·스토리와 같은 `GPU_GENERATION_INFLIGHT` 슬롯을 씁니다. 요약이 20자를 넘으면 다시 쓰지 않고 500 `INTERNAL_ERROR`로 실패합니다. 같은 여행의 요청은 Redis 잠금으로 하나만 처리하며 처리 중이면 409 `DUPLICATE_TASK`입니다. BE 읽기 상한과 사이 프록시의 유휴 상한은 처리 상한보다 길게(320초 이상) 둡니다.
+분위기 변경 미리보기는 검색처럼 작업 큐를 거치지 않는 동기 HTTP입니다. 글투와 말씨, 분위기 규칙은 스토리 생성과 같은 문장을 쓰고(서정적으로 문단에서 사진 확인 메모와 장소 메모를 가리키는 두 구절만 사진과 지금 문구로 바꿉니다), 말씨는 생성과 같이 여행 ID로 정합니다. `STORY_REWRITE_ENABLED=true`이면 API마다 생성용 VLM 클라이언트와 S3 URL 발급기를 한 번 만들고, 꺼져 있으면 503 `VLM_UNAVAILABLE`을 반환합니다. 생성 호출은 스트리밍으로 보내 RunPod 프록시의 무응답 상한을 넘기지 않습니다. 생성 호출은 요청마다 하나이며 검색·스토리와 같은 `GPU_GENERATION_INFLIGHT` 슬롯을 씁니다. 요약이 20자를 넘으면 다시 쓰지 않고 500 `INTERNAL_ERROR`로 실패합니다. 같은 여행의 요청은 Redis 잠금으로 하나만 처리하며 처리 중이면 409 `DUPLICATE_TASK`입니다. BE 읽기 상한과 사이 프록시의 유휴 상한은 처리 상한보다 길게(320초 이상) 둡니다.
 
-초기 설정은 `STORY_IMAGE_BUDGET=10`, `STORY_BLUR_VAR_MIN=80`, `STORY_PHASH_MAX_DIST=4`, `STORY_DEDUPE_Z=1.0`, `STORY_MAX_TOKENS=2048`입니다. RunPod의 이미지 입력 상한은 사진 예산 이상이어야 하며, 선택한 장소 수보다 예산이 작으면 요청이 실패합니다. 사진이 남지 않은 장소는 `INVALID_REQUEST`의 `NO_USABLE_PHOTOS`, 필요한 벡터 누락은 `MODEL_NOT_READY`의 `MISSING_VECTORS`로 알립니다. 필터 임계값과 실제 호출 품질은 스테이징에서 확인합니다.
+초기 설정은 `STORY_IMAGE_BUDGET=10`, `STORY_BLUR_VAR_MIN=80`, `STORY_PHASH_MAX_DIST=4`, `STORY_DEDUPE_Z=1.0`, `STORY_MAX_TOKENS=2048`입니다. 출력 토큰 상한은 사진 수에 맞춰 늘립니다(사진 한 장에 사진 확인 150, 글 200토큰이 설정값보다 크면 그 값을 씁니다). RunPod의 이미지 입력 상한은 사진 예산 이상이어야 하며, 선택한 장소 수보다 예산이 작으면 요청이 실패합니다. 사진이 남지 않은 장소는 `INVALID_REQUEST`의 `NO_USABLE_PHOTOS`, 필요한 벡터 누락은 `MODEL_NOT_READY`의 `MISSING_VECTORS`로 알립니다. 필터 임계값과 실제 호출 품질은 스테이징에서 확인합니다.
 
 프롬프트는 요약 두 필드를 각각 40자 이내의 짧은 구절로, `memo`를 125자 이내로 요청합니다. 응답 스키마는 선별한 사진 수만큼 블록을 요구하고 사진 ID도 해당 요청의 선별 ID로 제한합니다. 최종 검증에서는 모든 선별 사진이 정확히 한 번씩 포함되었는지 검사합니다. 출력 한도에 도달하거나 사진이 누락된 응답을 완료 결과로 전달하지 않습니다. 서버의 `disable_any_whitespace` 옵션은 사용하지 않습니다.
 

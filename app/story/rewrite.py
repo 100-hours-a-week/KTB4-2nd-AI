@@ -106,7 +106,7 @@ class RewriteService:
         error_code, rule = None, None
         try:
             async with asyncio.timeout(self.timeout_sec):
-                return await self._run(request)
+                return await self._run(trip_id, request)
         except TimeoutError:
             error_code = ErrorCode.TIMEOUT
             raise AppError(ErrorCode.TIMEOUT, http_status=504) from None
@@ -156,10 +156,10 @@ class RewriteService:
             )
             await self._release(key, token)
 
-    async def _run(self, request: RewriteRequest) -> RewriteResponse:
+    async def _run(self, trip_id: int, request: RewriteRequest) -> RewriteResponse:
         urls = [await self.urls.resolve(block.analyze_storage_key) for block in request.blocks]
         turn = await self.vlm.chat(
-            messages(request),
+            messages(request, trip_id),
             urls,
             self.max_tokens,
             response_format=response_format([b.trip_attachment_id for b in request.blocks]),
