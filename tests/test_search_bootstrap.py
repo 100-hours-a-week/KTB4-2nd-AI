@@ -355,7 +355,7 @@ async def test_owned_qwen_client_search_http_and_failure_contract(monkeypatch, o
     assert len(requests) == 1 and requests[0].url.path == "/v1/embeddings"
     payload = json.loads(requests[0].content)
     assert payload["messages"][0]["content"][0]["text"] == QUERY_INSTRUCTION
-    assert payload["messages"][1]["content"][0]["text"] == search_body()["query"]
+    assert payload["messages"][1]["content"][0]["text"] == search_body()["visual_query"]
     assert payload["model"] == "qwen-test" and payload["encoding_format"] == "float"
 
 
