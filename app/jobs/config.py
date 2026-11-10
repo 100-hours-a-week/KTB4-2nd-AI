@@ -32,10 +32,10 @@ class JobsSettings(Settings):
     JOBS_HEARTBEAT_SEC: float = Field(default=5, gt=0)
     JOBS_LEASE_SEC: float = Field(default=120, gt=0)
     JOBS_TIMEOUT_SEC: float = Field(default=300, gt=0)
-    # 정리 작업만의 제한 시간. 에이전트 결과를 보려고 지연 목표 10분보다 넉넉하게,
-    # BE의 결과 대기 한도 1시간보다 짧게 둔다(결정 142, 148).
+    # 정리 작업만의 제한 시간. 워크플로우 예산 3,600초(결정 222)에 결과 저장 여유 300초를 더한다.
+    # 이전 값 3,000초는 BE의 결과 대기 한도 1시간보다 짧게 둔 값이었다(결정 142, 148).
     # 작업을 회수하는 API와 실행기가 같은 값을 써야 함
-    JOBS_PROCESS_TIMEOUT_SEC: float = Field(default=3000, gt=0, allow_inf_nan=False)
+    JOBS_PROCESS_TIMEOUT_SEC: float = Field(default=3900, gt=0, allow_inf_nan=False)
     JOBS_PUBLISH_LEASE_SEC: float = Field(default=60, gt=0)
     JOBS_POLL_SEC: float = Field(default=0.5, gt=0)
     # 정리 실행기가 import와 처리기 적재까지 마쳐 두는 대기 자식 수, 0이면 작업마다 새로 기동
@@ -101,6 +101,28 @@ class JobsSettings(Settings):
     # 전송 오류, HTTP 408, 429, 5xx, 호출 시간 초과를 다시 보내는 횟수(n번째는 5×n초 뒤).
     # 넘으면 작업 실패. 불완전 응답과 슬롯 대기 초과는 다시 보내지 않음(결정 159)
     PROCESS_VLM_RETRIES: int = Field(default=3, ge=0, le=5)
+    # 워크플로우 정리 파이프라인(실험 코드 2026-11-05 step3-agent를 옮김). 켜면 CLUSTERING에서
+    # 규칙 단계와 정리 에이전트 대신 돈다(에이전트 설정은 무시). 기본은 켜짐(결정 221),
+    # 끄면 PROCESS_AGENT_ENABLED에 따라 정리 에이전트나 규칙 단계로 완료한다.
+    # 켜면 VLM, 공공 장소 색인, 카카오 키, TourAPI 원자료 파일이 필요하다.
+    PROCESS_WORKFLOW_ENABLED: bool = True
+    # TourAPI 국문 관광정보 원자료(JSON). 실험은 2026-10-30에 받은 tourapi_all.json을 썼다.
+    # 색인과 같이 S3 URI가 있으면 실행기 시작 때 SHA-256을 확인하고 한 번 받는다(결정 221)
+    TOURAPI_RAW_PATH: str | None = None
+    TOURAPI_RAW_S3_URI: str | None = None
+    TOURAPI_RAW_SHA256: str | None = None
+    # 워크플로우 단계의 시간 예산(결정 222). 작업 자원을 만든 때부터 재고, 넘기면 작업 실패
+    PROCESS_WORKFLOW_BUDGET_SEC: float = Field(default=3600, gt=0, allow_inf_nan=False)
+    # 동시 생성 호출 수(결정 222: 슬롯 8개 가운데 정리 4개, 실험은 8). 검색, 스토리와 슬롯을 나눠 씀
+    PROCESS_WORKFLOW_CONCURRENCY: int = Field(default=4, ge=1)
+    # 생성 호출 한 번의 제한 시간(실험 300초)
+    PROCESS_WORKFLOW_VLM_TIMEOUT_SEC: float = Field(default=300, gt=0, allow_inf_nan=False)
+    # 작업당 카카오 호출 상한. 실험은 상한이 없었고 200장 평가에서 많게는 604회를 불렀다
+    PROCESS_WORKFLOW_KAKAO_CALLS: int = Field(default=1000, ge=0)
+    # 사진 순서를 섞는 시드(실험 기본값). 사진 ID와 저장 키 순서를 쓰지 않으려는 규칙
+    PROCESS_WORKFLOW_PHOTO_SEED: int = 61106
+    # 격자 칸 번호 글꼴. 비우면 실험 글꼴(Arial Bold), DejaVu Sans Bold, Pillow 기본 글꼴 순
+    PROCESS_WORKFLOW_FONT_PATH: str | None = None
 
     @model_validator(mode="after")
     def check_jobs_settings(self) -> Self:
@@ -132,6 +154,13 @@ class JobsSettings(Settings):
                 raise ValueError("PLACE_INDEX_SHA256은 소문자 16진수 64자여야 함")
             if not self.PLACE_INDEX_PATH:
                 raise ValueError("PLACE_INDEX_S3_URI를 쓰려면 PLACE_INDEX_PATH가 필요함")
+        if self.TOURAPI_RAW_S3_URI or self.TOURAPI_RAW_SHA256:
+            if not re.fullmatch(r"s3://[^/]+/.+", self.TOURAPI_RAW_S3_URI or ""):
+                raise ValueError("TOURAPI_RAW_S3_URI는 s3://버킷/키 형식이어야 함")
+            if not re.fullmatch(r"[0-9a-f]{64}", self.TOURAPI_RAW_SHA256 or ""):
+                raise ValueError("TOURAPI_RAW_SHA256은 소문자 16진수 64자여야 함")
+            if not self.TOURAPI_RAW_PATH:
+                raise ValueError("TOURAPI_RAW_S3_URI를 쓰려면 TOURAPI_RAW_PATH가 필요함")
         # 에이전트를 끈 배포는 예전 제한 시간과 슬롯 수로도 시작할 수 있게 한다.
         if self.PROCESS_AGENT_ENABLED:
             if self.PROCESS_AGENT_BUDGET_SEC >= self.JOBS_PROCESS_TIMEOUT_SEC:
@@ -140,6 +169,15 @@ class JobsSettings(Settings):
                 )
             if self.PROCESS_AGENT_CONCURRENCY > self.GPU_GENERATION_INFLIGHT:
                 raise ValueError("PROCESS_AGENT_CONCURRENCY는 GPU_GENERATION_INFLIGHT 이하여야 함")
+        if self.PROCESS_WORKFLOW_ENABLED:
+            if self.PROCESS_WORKFLOW_BUDGET_SEC >= self.JOBS_PROCESS_TIMEOUT_SEC:
+                raise ValueError(
+                    "PROCESS_WORKFLOW_BUDGET_SEC는 JOBS_PROCESS_TIMEOUT_SEC보다 짧아야 함"
+                )
+            if self.PROCESS_WORKFLOW_CONCURRENCY > self.GPU_GENERATION_INFLIGHT:
+                raise ValueError(
+                    "PROCESS_WORKFLOW_CONCURRENCY는 GPU_GENERATION_INFLIGHT 이하여야 함"
+                )
         return self
 
     def job_timeout(self, kind: str) -> float:

@@ -22,6 +22,7 @@ from app.pipeline.steps.filtering import PhotoMetrics
 if TYPE_CHECKING:
     # 파이프라인 컨텍스트가 에이전트 자원 모듈(카카오, 색인 클라이언트)에 의존하지 않게 한다.
     from app.pipeline.agent.resources import AgentResources
+    from app.pipeline.workflow.resources import WorkflowResources
 
 Thresholds = dict[str, float | int]
 
@@ -42,6 +43,8 @@ class PipelineContext:
     photo_metrics: Mapping[int, PhotoMetrics] = field(default_factory=dict)
     # CLUSTERING 규칙 단계 뒤의 정리 에이전트 자원(#153). None이면 에이전트 없이 규칙 결과로 완료
     agent: "AgentResources | None" = None
+    # 워크플로우 정리 파이프라인 자원. 있으면 LOCATING과 CLUSTERING의 규칙 단계, 에이전트 대신 돈다
+    workflow: "WorkflowResources | None" = None
 
 
 def load_thresholds(path: Path, model_version: str) -> Thresholds:

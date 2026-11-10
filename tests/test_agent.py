@@ -567,6 +567,7 @@ def configured(tmp_path, monkeypatch):
         QDRANT_URL=":memory:",
         EMBED_MODEL=MODEL_VERSION,
         PROCESS_AGENT_ENABLED=False,
+        PROCESS_WORKFLOW_ENABLED=False,
     )
     engine = Engine()
     monkeypatch.setattr(process_handler, "JobsSettings", lambda: cfg)
@@ -597,6 +598,8 @@ def agent_settings(cfg, monkeypatch, vlm, kakao):
 
     for name, value in {
         "PROCESS_AGENT_ENABLED": True,
+        # 워크플로우 정리가 기본이므로 에이전트 경로를 보려면 끈다(결정 221).
+        "PROCESS_WORKFLOW_ENABLED": False,
         "VLM_BASE_URL": "http://vlm.test/v1",
         "VLM_MODEL": "gemma-4",
         "PLACE_INDEX_PATH": "/tmp/places.sqlite",
@@ -652,6 +655,7 @@ async def test_process_handler_fails_when_agent_settings_are_missing(configured)
 
     cfg, engine = configured
     cfg.PROCESS_AGENT_ENABLED = True
+    cfg.PROCESS_WORKFLOW_ENABLED = False
     with pytest.raises(PipelineError) as error:
         await process_handler.run(process_request(), reporter())
     assert error.value.code == ErrorCode.MODEL_NOT_READY and not engine.batches
@@ -695,7 +699,7 @@ def test_job_timeout_is_separate_for_process():
     from app.jobs.config import JobsSettings
 
     cfg = JobsSettings(_env_file=None, API_KEY="t", IMAGE_SOURCE="local")
-    assert cfg.job_timeout("process") == cfg.JOBS_PROCESS_TIMEOUT_SEC == 3000
+    assert cfg.job_timeout("process") == cfg.JOBS_PROCESS_TIMEOUT_SEC == 3900
     assert cfg.job_timeout("story") == cfg.JOBS_TIMEOUT_SEC == 300
 
 
@@ -796,6 +800,7 @@ def test_disabled_agent_accepts_previous_timeout_and_slots():
         API_KEY="t",
         IMAGE_SOURCE="local",
         PROCESS_AGENT_ENABLED=False,
+        PROCESS_WORKFLOW_ENABLED=False,
         JOBS_PROCESS_TIMEOUT_SEC=300,
         GPU_GENERATION_INFLIGHT=2,
     )

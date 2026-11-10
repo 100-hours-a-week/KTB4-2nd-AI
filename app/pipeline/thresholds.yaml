@@ -1,5 +1,5 @@
 # 파이프라인 임계값, 모델별. 인터페이스 3
-# 키 10개는 steps/와 agent/가 ctx.thresholds["키"]로 읽음. 이름을 바꾸면 읽는 곳과 여기를 같이
+# 키는 steps/, agent/, workflow/가 ctx.thresholds["키"]로 읽음. 이름을 바꾸면 읽는 곳과 여기를 같이
 # 값은 파이프라인 담당이 평가셋으로 측정해 교체
 # FAKE_PIPELINE=1이면 이 파일을 읽지 않음
 
@@ -16,6 +16,12 @@ siglip2-so400m-naflex:
   interpolate_max_gap_min: 30       # CLUSTERING 뒤. 바로 앞뒤 폴더 사진이 같은 폴더이고 둘 다 이 분 이내면 끼워 넣음
   # 정리 에이전트 종합 단계. 이 유사도 이상인데 다른 곳으로 제안된 두 사진을 연속 촬영 충돌로 알림
   agent_same_photo_min_sim: 0.95    # v1은 에이전트를 쓰지 않음, 키 맞춤용
+  # 워크플로우 정리는 Qwen 임베딩으로만 쟀다. 아래는 키 맞춤용으로 같은 값을 둠(SigLIP에서 측정하지 않음)
+  workflow_group_min_sim: 0.90
+  workflow_gps_link_m: 100
+  workflow_insert_gap_min: 30
+  workflow_clock_pair_min_sim: 0.7
+  workflow_time_veto_min: 30
 
 # 10/14 200장 평가셋과 임베딩 vLLM 벡터로 측정, 배포 환경에서 1회 확인 예정
 # 임베딩 유사도를 쓰는 두 값만 재측정, 나머지는 SigLIP과 같음
@@ -30,3 +36,9 @@ qwen3-vl-embedding-2b:
   clock_offset_tolerance_sec: 1800
   interpolate_max_gap_min: 30
   agent_same_photo_min_sim: 0.95    # 10/28 평가 도구 값, 같은 임베딩
+  # 워크플로우 정리(PROCESS_WORKFLOW_ENABLED). 실험 코드 2026-11-05 step3-agent의 값 그대로.
+  workflow_group_min_sim: 0.90      # 1단계 그룹. 사진 쌍 코사인 이상이면 단일 연결(결정 186)
+  workflow_gps_link_m: 100          # 2단계. 두 그룹의 GPS 사진 쌍 하나라도 이 거리 이하면 같은 장소
+  workflow_insert_gap_min: 30       # 2단계 끼워 넣기. 앞뒤 GPS 장소 사진과 각각 이 분 이내
+  workflow_clock_pair_min_sim: 0.7  # 2단계 시각 보정. 최소 쌍 수와 허용 오차 없음(서비스 CLOCK과 다름)
+  workflow_time_veto_min: 30        # 6~12단계 시각 거부. 방문 구간 ± 이 분 밖이면 옮기지 않음

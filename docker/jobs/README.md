@@ -115,6 +115,16 @@ BE가 모든 사진의 업로드와 분석용 사본 생성을 마친 뒤 보내
 - 여행 지역은 요청의 지역 좌표를 카카오 좌표-행정구역 변환으로 시도와 시·군 이름으로 바꿉니다. 새 장소는 후보 좌표의 시·군이 여행 지역 가운데 하나일 때만 만듭니다.
 - 관측 이벤트는 단계마다 `ai_agent_stage`(`agent_stage`, `round`, 단계의 모델과 도구 호출 수, 확신도별 수, 반영 수, `duration_ms`), 끝에 `ai_agent_summary`(반영 수, 새 장소와 묶은 폴더 수, 모델과 도구 호출 수, 카카오 호출 수)입니다. 모델 호출 하나마다 `ai_model_call`의 `target=vlm`이 남습니다.
 
+워크플로우 정리(`PROCESS_WORKFLOW_ENABLED`, 기본 true)는 실험 코드로 만든 정리 파이프라인을 옮긴 것입니다. 켜면 LOCATING은 기간 밖 사진만 미분류로 빼고(유사도 상속 없음), CLUSTERING의 규칙 단계와 정리 에이전트 대신 1단계 그룹, GPS와 촬영 시각 잇기, 생성 모델 단계(그룹 설명, GPS 장소 레코드, 묶음 제안과 검토, 이름 붙이기, 다수결 배정, 정리, 미분류 재배정)를 차례로 돌립니다.
+
+- `PROCESS_AGENT_ENABLED`가 true여도 워크플로우를 켜면 에이전트는 쓰지 않습니다. 에이전트나 규칙 단계로 돌리려면 `PROCESS_WORKFLOW_ENABLED=false`로 둡니다. 켜면 `VLM_BASE_URL`, `VLM_MODEL`, `PLACE_INDEX_PATH`, `KAKAO_REST_API_KEY`, `TOURAPI_RAW_PATH`가 모두 있어야 하며, 없으면 `MODEL_NOT_READY`로 실패합니다.
+- TourAPI 원자료는 색인과 같이 `TOURAPI_RAW_S3_URI`가 있으면 정리 실행기가 시작할 때 `TOURAPI_RAW_PATH`에 받아 `TOURAPI_RAW_SHA256`과 맞춰 봅니다.
+- 생성 호출은 `PROCESS_WORKFLOW_CONCURRENCY`(기본 4)건까지 동시에 보내고, 호출 제한 시간은 `PROCESS_WORKFLOW_VLM_TIMEOUT_SEC`(기본 300초)입니다. 실패 처리는 에이전트와 같습니다. 전송 오류, HTTP 408, 429, 5xx, 시간 초과만 `PROCESS_VLM_RETRIES`번 다시 보내고, 그래도 실패하거나 불완전 응답, 슬롯 대기 초과면 작업이 실패합니다(시간 초과는 `TIMEOUT`, 나머지는 `MODEL_NOT_READY`).
+- `PROCESS_WORKFLOW_BUDGET_SEC`(기본 60분)를 넘기면 `TIMEOUT`으로 실패하며, 작업 제한 `JOBS_PROCESS_TIMEOUT_SEC`(기본 65분)보다 짧아야 합니다. 카카오 호출은 작업당 `PROCESS_WORKFLOW_KAKAO_CALLS`(기본 1000)번까지입니다.
+- 지역 밖 사진: 요청 지역 좌표를 카카오 좌표-행정구역 변환으로 시·군으로 바꾸고, 대표 좌표가 그 시·군들 밖인 GPS 장소와, 이름 단계에서 고른 장소가 그 밖인 GPS 없는 묶음을 미분류로 보냅니다. "성남시 분당구"는 "성남시"로 비교합니다. 변환에 실패하면 빼지 않습니다.
+- 사진은 서명된 URL 대신 격자 그림을 만들어 data URL로 보냅니다. 저장 벡터를 재사용해 내려받지 않은 사진도 이 단계에서 내려받습니다.
+- 끝나면 `ai_workflow_summary`에 단계별 시간, 모델 호출 수, 카카오 호출 수, 지역 밖으로 뺀 수가 남습니다.
+
 ## 통신과 실패 처리
 
 - 요청과 결과 토픽은 클라우드가 전달하는 환경변수 6개를 그대로 사용합니다. `JOBS_ENV`는 Redis 키 공간만 구분합니다. `.env.example`의 `local` 값은 로컬 검증용이며 스테이징과 운영에서는 환경별 값을 주입합니다.
@@ -126,7 +136,7 @@ BE가 모든 사진의 업로드와 분석용 사본 생성을 마친 뒤 보내
 - 실행 ID와 실행 소유권으로 중복 접수와 이전 실행의 늦은 결과를 차단합니다. 다른 실행이 진행 중이면 새 요청은 기존 계약대로 무시하며 재전달 때도 실행하지 않습니다.
 - Kafka 재배치로 파티션 배정이 해제되면 기존 메시지의 커밋 반복을 끝내고 새 배정에서 소비를 이어갑니다.
 - Linux에서는 부모 종료 신호로 작업 프로세스를 중단합니다. 별도 감시 스레드도 사용하므로 동기 작업이 asyncio 이벤트 루프를 막아도 부모 종료를 감지합니다. 이미 외부 모델 서버로 보낸 연산의 중단까지 보장하지는 않습니다.
-- heartbeat가 120초 끊기면 WORKER_DEAD, 실행 시작 후 스토리는 `JOBS_TIMEOUT_SEC`(기본 5분), 정리는 `JOBS_PROCESS_TIMEOUT_SEC`(기본 50분)가 지나면 TIMEOUT으로 처리합니다. 두 값은 작업을 회수하는 API와 정리 실행기에 같은 값으로 넣습니다. 결과 전달 실패는 분석 실패로 바꾸지 않고 재전달합니다.
+- heartbeat가 120초 끊기면 WORKER_DEAD, 실행 시작 후 스토리는 `JOBS_TIMEOUT_SEC`(기본 5분), 정리는 `JOBS_PROCESS_TIMEOUT_SEC`(기본 65분)가 지나면 TIMEOUT으로 처리합니다. 두 값은 작업을 회수하는 API와 정리 실행기에 같은 값으로 넣습니다. 결과 전달 실패는 분석 실패로 바꾸지 않고 재전달합니다.
 - 결과 발행 성공 후 Redis 기록 전에 장애가 나면 같은 결과가 다시 발행될 수 있습니다. BE도 execution_id로 중복 결과를 제거해야 합니다.
 - JSON 해석 불가, 식별자 누락, key 또는 작업 종류 불일치는 동일 메시지 검증이 3번 실패한 뒤 `요청 토픽-dlt`에 보냅니다. 원본 key와 본문을 보존하며 헤더에는 `original-topic`, `original-partition`, `original-offset`, `ai-error`(사유), `failure`(예외 종류), `attempts`를 넣습니다. 원본 key가 없는 경우 임의의 trip_id를 만들지 않고 null을 유지합니다.
 - DLT 발행 성공 뒤에만 원래 offset을 커밋하고 `kafka_dlt_published` JSON 로그를 남깁니다. 검증 실패 횟수는 원본 topic/partition/offset별로 Redis에 공유하며 30일 동안 보관합니다. Redis 또는 Kafka의 연결 실패는 DLT 격리 사유로 세지 않습니다.

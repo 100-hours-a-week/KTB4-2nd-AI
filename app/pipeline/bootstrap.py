@@ -85,6 +85,7 @@ def build_context(
     reuse_vectors: bool = False,
     photo_metrics: Mapping[int, PhotoMetrics] | None = None,
     agent=None,
+    workflow=None,
 ) -> PipelineContext:
     """images와 qdrant는 테스트가 LocalDirImageSource와 :memory:를 넣기 위한 자리
 
@@ -92,6 +93,7 @@ def build_context(
     reuse_vectors는 v2 정리 실행기가 EMBED_ON_PHOTOS_READY 값으로 넘김
     photo_metrics는 v2 정리 실행기가 Redis에서 읽은 업로드 묶음의 사진 지표
     agent는 v2 정리 실행기가 에이전트를 켰을 때 넘기는 AgentResources
+    workflow는 v2 정리 실행기가 워크플로우 정리를 켰을 때 넘기는 WorkflowResources
     """
     if images is None:
         images = build_images(settings)
@@ -115,6 +117,7 @@ def build_context(
         reuse_vectors=reuse_vectors,
         photo_metrics=photo_metrics or {},
         agent=agent,
+        workflow=workflow,
     )
 
 

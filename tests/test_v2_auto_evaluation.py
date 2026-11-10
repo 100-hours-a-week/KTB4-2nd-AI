@@ -153,6 +153,7 @@ def handler_settings(monkeypatch, tmp_path, base_cfg):
             "RELEASE": "test-release",
             "JOBS_FAKE_PIPELINE": False,
             "PROCESS_AGENT_ENABLED": False,
+            "PROCESS_WORKFLOW_ENABLED": False,
         }
     )
     monkeypatch.setattr(process_handler, "JobsSettings", lambda: cfg)

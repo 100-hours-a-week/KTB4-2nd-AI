@@ -32,6 +32,13 @@ from app.pipeline.bootstrap import build_context, build_engine, build_images, wa
 from app.pipeline.context import PipelineContext
 from app.pipeline.run import run as run_pipeline
 from app.pipeline.steps.filtering import PhotoMetrics
+from app.pipeline.workflow.resources import (
+    HttpRemoteImages,
+    WorkflowResources,
+    WorkflowTimeout,
+    WorkflowUnavailable,
+    load_tour_raw,
+)
 
 log = get_logger(__name__)
 
@@ -120,7 +127,8 @@ async def agent_resources(cfg: JobsSettings, reporter: JobReporter) -> AsyncIter
     대신하지 않고 작업을 실패시킨다(결정 147). 생성 호출은 검색, 스토리와 같은 GPU 슬롯을 쓰되
     정리 작업만의 제한 시간과 슬롯 대기 시간을 둔다.
     """
-    if not cfg.PROCESS_AGENT_ENABLED:
+    if not cfg.PROCESS_AGENT_ENABLED or cfg.PROCESS_WORKFLOW_ENABLED:
+        # 워크플로우 정리를 켜면 정리 에이전트는 쓰지 않는다.
         yield None
         return
     missing = [
@@ -188,6 +196,84 @@ async def agent_resources(cfg: JobsSettings, reporter: JobReporter) -> AsyncIter
         )
 
 
+@asynccontextmanager
+async def workflow_resources(cfg: JobsSettings, reporter: JobReporter) -> AsyncIterator:
+    """워크플로우 정리를 켰으면 이 작업에 쓸 VLM, 공공 장소 색인, 카카오, TourAPI 원자료를 만든다.
+
+    끄면 None. 켰는데 설정이 없거나 파일을 열 수 없으면 작업을 실패시킨다(에이전트와 같은 규칙).
+    """
+    if not cfg.PROCESS_WORKFLOW_ENABLED:
+        yield None
+        return
+    names = (
+        "VLM_BASE_URL",
+        "VLM_MODEL",
+        "PLACE_INDEX_PATH",
+        "KAKAO_REST_API_KEY",
+        "TOURAPI_RAW_PATH",
+    )
+    missing = [name for name in names if not getattr(cfg, name)]
+    if missing:
+        log.error(
+            "워크플로우 정리 설정 누락",
+            extra={"event": "ai_workflow_config_missing", "missing": missing},
+        )
+        raise _failure(ErrorCode.MODEL_NOT_READY, "워크플로우 정리 설정이 없습니다.")
+    deadline = time.monotonic() + cfg.PROCESS_WORKFLOW_BUDGET_SEC
+    async with AsyncExitStack() as resources:
+        try:
+            places = PlaceIndex(cfg.PLACE_INDEX_PATH)
+        except (OSError, ValueError, sqlite3.Error):
+            raise _failure(ErrorCode.MODEL_NOT_READY, "공공 장소 색인을 열 수 없습니다.") from None
+        resources.callback(places.close)
+        try:
+            tour = await asyncio.to_thread(load_tour_raw, cfg.TOURAPI_RAW_PATH)
+        except (OSError, ValueError, StopIteration, AttributeError):
+            raise _failure(ErrorCode.MODEL_NOT_READY, "TourAPI 원자료를 열 수 없습니다.") from None
+        try:
+            client = await resources.enter_async_context(
+                VllmClient(
+                    cfg.VLM_BASE_URL,
+                    cfg.VLM_MODEL,
+                    api_key=cfg.VLM_API_KEY.get_secret_value() if cfg.VLM_API_KEY else None,
+                    timeout_sec=cfg.PROCESS_WORKFLOW_VLM_TIMEOUT_SEC,
+                    connect_timeout_sec=cfg.VLM_CONNECT_TIMEOUT_SEC,
+                )
+            )
+            kakao = await resources.enter_async_context(
+                KakaoLocalClient(
+                    cfg.KAKAO_REST_API_KEY.get_secret_value(), timeout_sec=cfg.KAKAO_TIMEOUT_SEC
+                )
+            )
+        except (ValueError, httpx.InvalidURL):
+            raise _failure(
+                ErrorCode.MODEL_NOT_READY, "워크플로우 정리 설정이 올바르지 않습니다."
+            ) from None
+        remote = HttpRemoteImages()
+        resources.push_async_callback(remote.aclose)
+        gate = RequestGate(
+            reporter.store.redis,
+            cfg.redis_prefix + "gpu:generation",
+            cfg.GPU_GENERATION_INFLIGHT,
+            cfg.PROCESS_VLM_WAIT_SEC,
+        )
+        loop = asyncio.get_running_loop()
+        yield WorkflowResources(
+            vlm=GatedVlm(client, gate, cfg.PROCESS_WORKFLOW_VLM_TIMEOUT_SEC),
+            kakao=kakao,
+            places=places,
+            tour=tour,
+            remote_images=remote,
+            submit=lambda coroutine: asyncio.run_coroutine_threadsafe(coroutine, loop),
+            deadline=deadline,
+            concurrency=cfg.PROCESS_WORKFLOW_CONCURRENCY,
+            kakao_calls=cfg.PROCESS_WORKFLOW_KAKAO_CALLS,
+            photo_seed=cfg.PROCESS_WORKFLOW_PHOTO_SEED,
+            font_path=cfg.PROCESS_WORKFLOW_FONT_PATH,
+            vlm_retries=cfg.PROCESS_VLM_RETRIES,
+        )
+
+
 @contextmanager
 def open_context(
     cfg: JobsSettings,
@@ -195,6 +281,7 @@ def open_context(
     wrap_images: Callable[[ImageSource], ImageSource] | None = None,
     photo_metrics: Mapping[int, PhotoMetrics] | None = None,
     agent=None,
+    workflow=None,
 ) -> Iterator[PipelineContext]:
     """엔진, 이미지, Qdrant를 조립한 컨텍스트. 정리와 사진 묶음이 공유, 나가면 역순으로 해제"""
     with ExitStack() as resources:
@@ -220,6 +307,7 @@ def open_context(
             reuse_vectors=cfg.EMBED_ON_PHOTOS_READY,
             photo_metrics=photo_metrics,
             agent=agent,
+            workflow=workflow,
         )
 
 
@@ -231,10 +319,12 @@ def _run(
     reports=None,
     stored: Mapping[int, PhotoMetricsRecord] | None = None,
     agent=None,
+    workflow=None,
 ) -> dict:
     """stored는 업로드 묶음이 Redis에 저장한 사진 지표, 다운로드하지 않는 사진의 지표와 지문
 
     agent는 정리 에이전트 자원(AgentResources), None이면 규칙 단계 결과로 완료
+    workflow는 워크플로우 정리 자원(WorkflowResources), 있으면 규칙 단계와 에이전트 대신 돈다
     """
 
     def check():
@@ -262,7 +352,7 @@ def _run(
     }
     try:
         check()
-        with open_context(cfg, check, fingerprint, metrics, agent) as ctx:
+        with open_context(cfg, check, fingerprint, metrics, agent, workflow) as ctx:
             result = run_pipeline(request, ctx, progress, cancelled).model_dump(mode="json")
             if hashes:
                 reports.extend(auto_evaluate(result, hashes, cfg))
@@ -284,7 +374,9 @@ def _run(
             (c.response.status_code for c in causes if isinstance(c, httpx.HTTPStatusError)), None
         )
         embedding = any(isinstance(c, EmbeddingUnavailable) for c in causes)
-        agent_failed = isinstance(exc, (AgentUnavailable, AgentTimeout))
+        agent_failed = isinstance(
+            exc, (AgentUnavailable, AgentTimeout, WorkflowUnavailable, WorkflowTimeout)
+        )
         if status is not None or embedding:
             log.warning(
                 "정리 작업의 외부 호출 실패",
@@ -325,9 +417,14 @@ async def run(request: dict, reporter: JobReporter) -> dict:
     await reporter.check_cancel()
     stored = await reporter.store.photo_metrics(ids) if cfg.EMBED_ON_PHOTOS_READY else {}
     reports: list[dict] = []
-    async with agent_resources(cfg, reporter) as agent:
+    async with (
+        agent_resources(cfg, reporter) as agent,
+        workflow_resources(cfg, reporter) as workflow,
+    ):
         result = await run_sync(
-            lambda progress, cancel: _run(message, cfg, progress, cancel, reports, stored, agent),
+            lambda progress, cancel: _run(
+                message, cfg, progress, cancel, reports, stored, agent, workflow
+            ),
             reporter,
         )
     if trace := current_trace():

@@ -57,6 +57,8 @@ def configured(tmp_path, monkeypatch):
         EMBED_MODEL=MODEL_VERSION,
         # 에이전트 연결은 tests/test_agent.py에서 확인한다.
         PROCESS_AGENT_ENABLED=False,
+        # 워크플로우 정리 연결은 tests/test_workflow.py에서 확인한다(기본 true, 결정 221).
+        PROCESS_WORKFLOW_ENABLED=False,
     )
     engine = Engine()
     monkeypatch.setattr(process_handler, "JobsSettings", lambda: cfg)
