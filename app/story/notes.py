@@ -6,15 +6,15 @@
 
 검색은 주 검색이 답하지 못하거나(오류, 시간 초과, 호출 한도, 형식이 다른 답) 결과가 0건이면
 보조 검색을 부른다(스토리 트랙 결정 126번). 검색에서는 주소 목록만 받고 페이지 본문은 요청하지
-않는다.
+않는다. 검색과 받기는 BLOG_DOMAINS의 블로그 플랫폼(티스토리)으로 한정한다(결정 130번).
 
 메모는 스토리의 보조 자료이므로 여기서 난 실패(검색, 받기, 요약, 저장)는 그 장소의 빈 결과가 된다.
 후기가 없어서 빈 결과이면 하루 동안 저장하고, 잠깐의 실패로 빈 결과이면 저장하지 않아 다음에 다시
 찾는다.
 
-받지 않는 곳: 네이버 등 자동 수집을 막은 플랫폼, robots.txt가 막은 주소, robots.txt에서 AI 크롤러를
-루트나 그 주소에서 막은 호스트, https가 아닌 주소, IP 주소나 내부 이름으로 된 주소, 공인 주소로
-풀리지 않는 호스트. 리디렉션은 따르지 않는다.
+받지 않는 곳: 블로그 플랫폼 밖의 주소, 네이버 등 자동 수집을 막은 플랫폼, robots.txt가 막은 주소,
+robots.txt에서 AI 크롤러를 루트나 그 주소에서 막은 호스트, https가 아닌 주소, IP 주소나 내부
+이름으로 된 주소, 공인 주소로 풀리지 않는 호스트. 리디렉션은 따르지 않는다.
 """
 
 import asyncio
@@ -45,13 +45,10 @@ SLOW_FAILURES = ("timeout", "http_408", "http_504")
 # robots.txt에서 이 크롤러를 가리키는 이름과, 요청에 붙이는 User-Agent
 ROBOT_NAME = "yeodam-story"
 USER_AGENT = f"Mozilla/5.0 (compatible; {ROBOT_NAME}/0.1)"
-# 검색에서 빼는 곳: 받지 않는 플랫폼과, 후기가 아닌 예약·백과·홍보 사이트
-EXCLUDE = (
-    "naver.com brunch.co.kr postype.com medium.com tumblr.com youtube.com instagram.com "
-    "facebook.com daum.net tripadvisor.co.kr tripadvisor.com yanolja.com yeogi.com goodchoice.kr "
-    "myrealtrip.com visitkorea.or.kr namu.wiki wikipedia.org klook.com agoda.com trip.com "
-    "interpark.com"
-).split()
+# 검색하고 받는 블로그 플랫폼(스토리 트랙 결정 130번). 한국 사람들이 여행 후기를 쓰고 AI 크롤러를
+# 막지 않는 블로그로 한정한다. 네이버 블로그, 브런치, 포스타입은 robots.txt가 AI 크롤러를 막는다.
+# 하위 도메인(<블로그>.tistory.com)을 포함하며, 자기 도메인을 쓰는 블로그는 찾지 못한다.
+BLOG_DOMAINS = ("tistory.com",)
 NO_FETCH = (
     "naver.com brunch.co.kr postype.com medium.com tumblr.com youtube.com instagram.com "
     "facebook.com"
@@ -71,7 +68,7 @@ SEARCHES = {
             "query": query,
             "search_depth": "basic",
             "max_results": 10,
-            "exclude_domains": EXCLUDE,
+            "include_domains": list(BLOG_DOMAINS),
         },
         lambda body: body.get("results"),
     ),
@@ -82,7 +79,7 @@ SEARCHES = {
             "limit": 10,
             "country": "KR",
             "sources": ["web"],
-            "excludeDomains": EXCLUDE,
+            "includeDomains": list(BLOG_DOMAINS),
             # 이쪽에서 기다리기를 그만둔 뒤에도 서버가 검색을 이어 가지 않게 한다(밀리초).
             "timeout": SEARCH_TIME_SEC * 1000,
         },
@@ -640,7 +637,8 @@ class BlogPlaceNotes:
             if len(sources) >= self.max_posts or tried >= self.max_tries:
                 break
             target = fetch_target(item.get("url") if isinstance(item, dict) else None)
-            if target is None or target in seen:
+            # 검색이 한정을 지키지 않고 다른 곳의 주소를 섞어 주어도 블로그 플랫폼의 글만 받는다.
+            if target is None or target in seen or not in_domains(target[0], BLOG_DOMAINS):
                 continue
             seen.add(target)
             try:

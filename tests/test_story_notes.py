@@ -171,7 +171,7 @@ async def test_notes_come_from_visited_reviews_and_are_cached_without_original_t
     assert found == {1: ["모노레일을 타고 올라감", "계단이 많아 힘들었음", "한 시간쯤 걸림"]}
     ((auth, body),) = queries
     assert auth == "Bearer test-key" and body["query"] == "화암동굴 후기"
-    assert "naver.com" in body["exclude_domains"]
+    assert body["include_domains"] == ["tistory.com"]
     system, user = vlm.chat.call_args.args[0]
     assert system["content"] == SUMMARY_SYSTEM and vlm.chat.call_args.args[1] == []
     assert vlm.chat.call_args.kwargs["response_format"] == SUMMARY_FORMAT
@@ -689,7 +689,7 @@ async def test_each_search_gets_its_own_key_and_never_asks_for_page_bodies():
             "query": "화암동굴 후기",
             "search_depth": "basic",
             "max_results": 10,
-            "exclude_domains": notes_module.EXCLUDE,
+            "include_domains": ["tistory.com"],
         },
     )
     # Firecrawl에 scrapeOptions를 주면 Firecrawl이 페이지를 대신 받으므로 주지 않는다.
@@ -700,7 +700,7 @@ async def test_each_search_gets_its_own_key_and_never_asks_for_page_bodies():
             "limit": 10,
             "country": "KR",
             "sources": ["web"],
-            "excludeDomains": notes_module.EXCLUDE,
+            "includeDomains": ["tistory.com"],
             "timeout": 15000,
         },
     )
@@ -953,6 +953,23 @@ async def test_firecrawl_answer_without_a_result_list_is_not_cached_as_empty(bod
 def test_searches_must_name_known_providers(searches):
     with pytest.raises(ValueError):
         BlogPlaceNotes(None, None, None, searches)
+
+
+@scenario
+async def test_only_blog_platform_posts_are_fetched_even_if_search_mixes_in_others():
+    # 검색이 한정을 지키지 않고 다른 곳의 주소를 섞어 주어도 블로그 플랫폼의 글만 받는다.
+    seen = []
+    others = [
+        "https://www.diningcode.com/p/1",
+        "https://tistory.com.evil.example/1",
+        "https://eviltistory.com/1",
+    ]
+    urls = [*others, URL]
+    http = web(urls, {u: page() for u in urls}, seen=seen)
+    notes = provider(http, summarizer(VISITED))
+    assert await notes.notes_for([(1, "화암동굴")]) == {1: VISITED["notes"]}
+    assert not any(other in seen for other in others)
+    assert not any("diningcode" in u or "evil" in u for u in seen)
 
 
 @scenario
