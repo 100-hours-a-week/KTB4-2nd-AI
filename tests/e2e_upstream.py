@@ -148,13 +148,22 @@ class Upstream:
                 facts = json.loads(
                     next(item["text"] for item in reversed(content) if item["type"] == "text")
                 )
-                if schema == "travel_story":
+                if schema == "photo_notes":
+                    self.calls["story_perceive"] += 1
+                    output = {
+                        "notes": [
+                            {"trip_attachment_id": photo["trip_attachment_id"], "shows": "풍경"}
+                            for photo in facts["photos"]
+                        ]
+                    }
+                elif schema == "travel_story":
                     self.calls["story"] += 1
                     output = {
                         "story_summary": "사진으로 남긴 여행",
                         "blocks": [
                             {
                                 "trip_attachment_id": photo["trip_attachment_id"],
+                                "about": "풍경을 본 일",
                                 "detail_summary": "사진 속 풍경",
                                 "memo": "사진에 여러 색이 담겨 있다.",
                             }
