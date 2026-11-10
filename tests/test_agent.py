@@ -608,7 +608,7 @@ def agent_settings(cfg, monkeypatch, vlm, kakao):
     monkeypatch.setattr(process_handler, "PlaceIndex", lambda path: places)
     monkeypatch.setattr(process_handler, "VllmClient", _Opened(vlm))
     monkeypatch.setattr(process_handler, "KakaoLocalClient", _Opened(kakao))
-    monkeypatch.setattr(process_handler, "RequestGate", lambda *args: None)
+    monkeypatch.setattr(process_handler, "generation_gate", lambda *args, **kwargs: None)
     monkeypatch.setattr(process_handler, "GatedVlm", lambda client, gate, timeout: client)
 
 

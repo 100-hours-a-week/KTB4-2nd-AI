@@ -62,7 +62,9 @@ async def run(request: dict, reporter) -> dict:
         resources.push_async_callback(vectors.aclose)
         urls = await S3ImageResolver.create(cfg)
         resources.push_async_callback(urls.aclose)
-        gated = generation_client(vlm, reporter.store.redis, cfg, timeout_sec=call_timeout)
+        gated = generation_client(
+            vlm, reporter.store.redis, cfg, kind="story", timeout_sec=call_timeout
+        )
         notes = None
         searches = place_searches(cfg)
         if cfg.STORY_PLACE_NOTES_ENABLED and searches:
