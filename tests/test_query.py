@@ -13,12 +13,20 @@ from pydantic import ValidationError
 
 from app.api.services.query_service import QueryService
 from app.core.config import Settings
+from app.core.tracing import end_trace, start_trace
 from app.infra.vlm import ChatTurn, VLMUnavailable
 from app.main import create_app
-from app.schemas.query import ParseRequest, ParseResponse, SearchHit, SearchResponse
+from app.schemas.query import (
+    ParseRequest,
+    ParseResponse,
+    SearchHit,
+    SearchRequest,
+    SearchResponse,
+)
 from app.search import dates, prompts, regions
 from app.search.context import InvalidModelOutput, ModelUnavailable, SearchOptions
 from app.search.mock import MockEmbedder, MockImages, MockVLM, create_mock_context
+from app.search.pipeline import search
 
 pytestmark = pytest.mark.anyio
 AUTH = {"Authorization": "Bearer test-key", "X-Request-ID": "search-test"}
@@ -473,6 +481,47 @@ async def test_time_word_compound_visual_query_keeps_embedding():
         assert vectors.candidate_ids == [1]
         returned = [item["trip_attachment_id"] for item in response.json()["attachments"]]
         assert returned == [1]
+
+
+async def traced_search(body, context):
+    """검색 하나를 Trace 안에서 실행하고 응답과 ai_query에 붙을 fields를 반환"""
+    trace, token = start_trace("search")
+    try:
+        response = await search(SearchRequest.model_validate(body), context, SearchOptions())
+    finally:
+        end_trace(token)
+    return response, trace.fields
+
+
+async def test_search_log_fields_keep_ranking_before_cutoff():
+    """기준값 max(0.25, 0.60 x 0.8) = 0.48, 0.30인 3번은 잘림"""
+    vectors = FixedVectors(
+        [
+            SearchHit(trip_attachment_id=3, score=0.30),
+            SearchHit(trip_attachment_id=2, score=0.60),
+            SearchHit(trip_attachment_id=1, score=0.50),
+        ]
+    )
+    body = search_body(count=3) | {"visual_query": "바다"}
+    response, fields = await traced_search(body, replace(create_mock_context(), vectors=vectors))
+
+    assert [hit.trip_attachment_id for hit in response.attachments] == [2, 1]
+    assert fields["order_mode"] == "vector"
+    assert fields["result_ids"] == [2, 1]
+    assert fields["ranked_scores"] == [[2, 0.6], [1, 0.5], [3, 0.3]]
+    assert fields["cutoff_threshold"] == 0.48
+    assert body["query"] not in json.dumps(fields, ensure_ascii=False)
+
+
+async def test_search_log_fields_mark_taken_at_order():
+    context = replace(create_mock_context(), embedder=UnexpectedEmbedder())
+    body = timed_body("아침에 찍은 사진", None, [19, 8, None, 7, 13])
+    response, fields = await traced_search(body, context)
+
+    assert fields["order_mode"] == "taken_at"
+    assert fields["result_ids"] == [4, 2]
+    assert [hit.trip_attachment_id for hit in response.attachments] == [4, 2]
+    assert "ranked_scores" not in fields and "cutoff_threshold" not in fields
 
 
 async def test_time_only_question_keeps_embedding_within_time_window():

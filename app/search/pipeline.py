@@ -49,6 +49,11 @@ async def parse(
         return parse_fallback(request)
 
 
+def cutoff_threshold(ranked: list[SearchHit], options: SearchOptions) -> float:
+    """절대 하한과 1위 점수 대비 비율 가운데 큰 값. ranked는 점수 내림차순이고 비어 있지 않음"""
+    return max(options.min_score, ranked[0].score * options.score_ratio)
+
+
 def apply_cutoff(ranked: list[SearchHit], options: SearchOptions) -> list[SearchHit]:
     """점수순 결과에서 절대 하한과 1위 점수 대비 비율을 모두 넘는 사진만
 
@@ -56,8 +61,21 @@ def apply_cutoff(ranked: list[SearchHit], options: SearchOptions) -> list[Search
     """
     if not ranked:
         return []
-    threshold = max(options.min_score, ranked[0].score * options.score_ratio)
+    threshold = cutoff_threshold(ranked, options)
     return [hit for hit in ranked if hit.score >= threshold]
+
+
+def record_result(order_mode: str, selected: list[SearchHit], **fields) -> None:
+    """ai_query 로그에 남길 정렬 경로와 반환 사진 ID. 사진 ID와 점수만, 질문 문장은 남기지 않음
+
+    BE DB와 trip_attachment_id로 조인해 어떤 사진이 나왔는지 확인하는 용도
+    """
+    if trace := current_trace():
+        trace.fields.update(
+            order_mode=order_mode,
+            result_ids=[hit.trip_attachment_id for hit in selected],
+            **fields,
+        )
 
 
 def has_visual_query(request: SearchRequest) -> bool:
@@ -108,7 +126,9 @@ async def search(
     limit = request.limit if request.intent == "SEARCH" else options.question_k
     # 시간대만 있는 질문은 원문 임베딩 점수가 정답 여부와 무관해 컷오프가 정답을 버림
     if words and request.intent == "SEARCH" and not has_visual_query(request):
-        return SearchResponse(attachments=order_by_taken_at(list(candidates.values()), limit))
+        ordered_by_time = order_by_taken_at(list(candidates.values()), limit)
+        record_result("taken_at", ordered_by_time)
+        return SearchResponse(attachments=ordered_by_time)
 
     async with asyncio.timeout(options.retrieval_timeout_sec):
         vector = await context.embedder.encode_text(
@@ -123,6 +143,13 @@ async def search(
     unique = {hit.trip_attachment_id: hit for hit in reversed(ranked)}
     ordered = sorted(unique.values(), key=lambda hit: (-hit.score, hit.trip_attachment_id))
     selected = apply_cutoff(ordered, options)[:limit]
+    # 컷오프 전 순위와 점수, 적용된 기준값. 정답 사진이 기준값 바로 아래에서 잘렸는지 확인
+    record_result(
+        "vector",
+        selected,
+        ranked_scores=[[hit.trip_attachment_id, round(hit.score, 4)] for hit in ordered],
+        cutoff_threshold=round(cutoff_threshold(ordered, options), 4) if ordered else None,
+    )
     if request.intent == "SEARCH":
         return SearchResponse(attachments=selected)
     # 컷오프를 통과한 근거가 없으면 VLM을 부르지 않음, 관련 없는 사진으로 답을 지어내지 않게
