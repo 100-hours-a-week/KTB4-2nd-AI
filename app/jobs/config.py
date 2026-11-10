@@ -62,6 +62,9 @@ class JobsSettings(Settings):
     STORY_PHASH_MAX_DIST: int = Field(default=4, ge=0, le=64)
     STORY_DEDUPE_Z: float = Field(default=1.0, ge=0, allow_inf_nan=False)
     STORY_MAX_TOKENS: int = Field(default=2048, ge=1)
+    # 스토리 생성 호출 하나의 제한 시간. 사진 확인과 글쓰기를 나눠 부르고 글이 길어져 글쓰기 호출이
+    # 45~57초 걸렸다(11/10 측정, 사진 10장). 검색과 함께 쓰는 VLM_TIMEOUT_SEC(60초)와 따로 둔다.
+    STORY_VLM_TIMEOUT_SEC: float = Field(default=90, gt=0, allow_inf_nan=False)
     # 분위기 변경 미리보기(동기 HTTP). 검색처럼 실제 VLM과 S3 URL 발급기를 연결한다.
     # 처리 상한 300초는 위키 계약 값이고, BE 읽기 상한은 320초 이상이다.
     STORY_REWRITE_ENABLED: bool = False
@@ -95,7 +98,7 @@ class JobsSettings(Settings):
     # 정리 작업이 동시에 보내는 생성 호출 수. GPU_GENERATION_INFLIGHT 슬롯을 검색, 스토리와 나눠 씀
     PROCESS_AGENT_CONCURRENCY: int = Field(default=4, ge=1)
     # 정리 작업의 생성 호출 제한 시간과 슬롯 대기
-    # 검색과 스토리의 VLM_TIMEOUT_SEC, GPU_WAIT_SEC와 별개
+    # 검색의 VLM_TIMEOUT_SEC, 스토리의 STORY_VLM_TIMEOUT_SEC, GPU_WAIT_SEC와 별개
     PROCESS_VLM_TIMEOUT_SEC: float = Field(default=180, gt=0, allow_inf_nan=False)
     PROCESS_VLM_WAIT_SEC: float = Field(default=60, gt=0, allow_inf_nan=False)
     # 전송 오류, HTTP 408, 429, 5xx, 호출 시간 초과를 다시 보내는 횟수(n번째는 5×n초 뒤).

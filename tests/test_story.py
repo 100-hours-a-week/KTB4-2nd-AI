@@ -671,6 +671,31 @@ async def test_invalid_photo_notes_are_skipped_without_failing_the_story(notes, 
 
 
 @scenario
+async def test_handler_uses_story_call_timeout(monkeypatch):
+    from app.jobs.config import JobsSettings
+    from app.story import handler
+
+    cfg = JobsSettings(
+        _env_file=None, API_KEY="test", IMAGE_SOURCE="local", STORY_VLM_TIMEOUT_SEC=77
+    )
+    seen, pipeline, reporter = [], AsyncMock(return_value={}), AsyncMock()
+
+    def client(settings):
+        seen.append(settings.VLM_TIMEOUT_SEC)
+        return AsyncMock()
+
+    monkeypatch.setattr(handler, "JobsSettings", lambda: cfg)
+    monkeypatch.setattr(handler.VllmClient, "from_settings", client)
+    monkeypatch.setattr(handler, "AsyncQdrantVectors", lambda *a, **k: AsyncMock())
+    monkeypatch.setattr(handler.S3ImageResolver, "create", AsyncMock(return_value=AsyncMock()))
+    monkeypatch.setattr(handler, "run_pipeline", pipeline)
+    await handler.run(story_request(), reporter)
+    ctx = pipeline.call_args.args[2]
+    # 스토리의 생성 호출은 검색과 다른 제한 시간을 쓴다.
+    assert seen == [77] and ctx.vlm.timeout_sec == 77
+
+
+@scenario
 async def test_missing_vectors_does_not_silently_skip_place():
     ctx = context()
     ctx.vectors.fetch.return_value = {101: np.array([1.0, 0.0])}

@@ -75,8 +75,8 @@ CALL_TIMEOUT_MARGIN_SEC = 10
 async def rewrite_service(settings, redis):
     """분위기 변경용 VLM 클라이언트와 S3 URL 발급기를 API별로 한 번 만든다.
 
-    호출 상한이 검색·스토리(VLM_TIMEOUT_SEC)보다 길어 클라이언트를 따로 두고,
-    GPU 호출 슬롯은 함께 쓴다.
+    호출 상한이 검색(VLM_TIMEOUT_SEC)과 스토리(STORY_VLM_TIMEOUT_SEC)보다 길어 클라이언트를 따로
+    두고, GPU 호출 슬롯은 함께 쓴다.
     """
     from app.jobs.gpu_requests import generation_client
     from app.story.rewrite import RewriteService
