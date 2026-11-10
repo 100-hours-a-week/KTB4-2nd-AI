@@ -40,6 +40,8 @@ log = get_logger(__name__)
 TAVILY_URL = "https://api.tavily.com/search"
 FIRECRAWL_URL = "https://api.firecrawl.dev/v2/search"
 SEARCH_TIME_SEC = 15
+# 보통 오래 기다린 뒤에 오는 실패. 한 실행에서 이런 실패를 낸 검색은 다시 부르지 않는다.
+SLOW_FAILURES = ("timeout", "http_408", "http_504")
 # robots.txt에서 이 크롤러를 가리키는 이름과, 요청에 붙이는 User-Agent
 ROBOT_NAME = "yeodam-story"
 USER_AGENT = f"Mozilla/5.0 (compatible; {ROBOT_NAME}/0.1)"
@@ -627,10 +629,13 @@ class BlogPlaceNotes:
         tried, settled = 0, True
         seen: set[tuple[str, str]] = set()
         try:
-            results = await self._search(name)
+            results, complete = await self._search(name)
         except Transient:
             self.stats["search_failed"] += 1
             return [], [], False
+        # 앞의 검색이 답하지 못한 채 다른 검색의 결과로 찾았으면 하루만 보관해, 그 검색이 돌아온
+        # 뒤에 다시 찾게 한다.
+        settled = complete
         for item in results:
             if len(sources) >= self.max_posts or tried >= self.max_tries:
                 break
@@ -665,15 +670,15 @@ class BlogPlaceNotes:
                 self._partial[name] = (notes[:MAX_NOTES], list(sources))
         return notes[:MAX_NOTES], sources, settled
 
-    async def _search(self, name: str) -> list:
-        """검색 제공자를 순서대로 불러 처음 받은 결과 목록을 돌려준다.
+    async def _search(self, name: str) -> tuple[list, bool]:
+        """검색 제공자를 순서대로 불러 (처음 받은 결과 목록, 앞의 검색이 모두 답했는지)를 돌려준다.
 
         답하지 못했거나 결과가 0건인 제공자 다음에는 다음 제공자를 부른다. 빈 목록(후기가 없는
         장소)은 모든 제공자가 0건이라고 답했을 때만 돌려주고, 결과가 없는데 답하지 못한 제공자가
         하나라도 있으면 Transient다.
 
-        이번 실행에서 시간 초과가 난 제공자는 이 실행에서 다시 부르지 않는다. 응답이 없는 검색을
-        장소마다 기다리지 않게 하려는 것이며, 빨리 끝나는 실패(상태 코드, 형식)에는 적용하지 않는다.
+        이번 실행에서 시간 초과(또는 408, 504)가 난 제공자는 이 실행에서 다시 부르지 않는다. 응답이
+        없는 검색을 장소마다 기다리지 않게 하려는 것이며, 빨리 끝나는 실패에는 적용하지 않는다.
         """
         failed = False
         for provider, key in self.searches:
@@ -686,7 +691,7 @@ class BlogPlaceNotes:
                 failed = True
                 reason = str(failure)
                 self.stats[f"{provider}_failed"] += 1
-                if reason == "timeout":
+                if reason in SLOW_FAILURES:
                     self._search_silent.add(provider)
                 if (provider, reason) not in self._search_logged:
                     self._search_logged.add((provider, reason))
@@ -704,10 +709,10 @@ class BlogPlaceNotes:
             if results:
                 if provider != self.searches[0][0]:
                     self.stats["search_backup"] += 1
-                return results
+                return results, not failed
         if failed:
             raise Transient
-        return []
+        return [], True
 
     async def _ask(self, provider: str, key: str, name: str) -> list:
         """검색 하나를 부른다. 답하지 못하면 실패의 종류를 적은 Transient다."""

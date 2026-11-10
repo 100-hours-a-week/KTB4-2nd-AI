@@ -647,9 +647,10 @@ async def test_backup_search_answers_when_the_main_search_fails(fault, caplog):
     assert await notes.notes_for([(1, "화암동굴")]) == {1: VISITED["notes"]}
     assert seen[:2] == [SEARCH_URL, FIRECRAWL_URL]
     assert notes.stats["search_backup"] == 1 and notes.stats["search_failed"] == 0
-    # 보조 검색으로 얻은 메모도 주 검색의 메모와 같이 오래 보관한다.
+    # 주 검색이 답하지 못한 채 보조 검색으로 얻은 메모는 하루만 보관해,
+    # 주 검색이 돌아온 뒤 다시 찾는다.
     (key,) = await redis.keys("*")
-    assert await redis.ttl(key) > NEGATIVE_TTL_SEC
+    assert 0 < await redis.ttl(key) <= NEGATIVE_TTL_SEC
     (failed,) = events(caplog, "ai_story_place_search_failed")
     reason = {
         "timeout": "timeout",
@@ -790,7 +791,8 @@ async def test_search_that_timed_out_is_not_asked_again_in_the_run(backup, caplo
     assert notes.stats["search_backup"] == (2 if backup == "results" else 0)
     # 주 검색에 묻지 못했으므로 보조 검색의 0건만으로 후기가 없는 장소라고 저장하지 않는다.
     assert notes.stats["search_failed"] == (0 if backup == "results" else 2)
-    assert len(await redis.keys("*")) == (2 if backup == "results" else 0)
+    # 보조 검색의 결과가 후기가 아니었어도 주 검색에 묻지 못했으므로 저장하지 않는다.
+    assert await redis.keys("*") == []
     # 같은 종류의 실패는 검색마다 한 실행에 한 번만 경고로 남긴다.
     failed = [(r.provider, r.reason) for r in events(caplog, "ai_story_place_search_failed")]
     more = {"down": [("firecrawl", "http_429")], "silent": [("firecrawl", "timeout")]}
@@ -801,6 +803,43 @@ async def test_search_that_timed_out_is_not_asked_again_in_the_run(backup, caplo
     await notes.notes_for([(3, "아리힐스")])
     assert seen[0] == SEARCH_URL
     assert [r.provider for r in events(caplog, "ai_story_place_search_failed")][:1] == ["tavily"]
+
+
+@pytest.mark.parametrize("backup", ["unusable", "not_reviews"])
+@scenario
+async def test_place_found_only_by_the_backup_without_notes_is_not_cached(backup):
+    # 주 검색이 답하지 못했는데 보조 검색의 결과에서 메모를 얻지 못했으면
+    # 후기가 없는 장소로 저장하지 않는다.
+    redis = FakeAsyncRedis()
+
+    def down(request):
+        return httpx.Response(500)
+
+    urls = (
+        ["http://a.tistory.com/1", "https://blog.naver.com/x/1"] if backup == "unusable" else [URL]
+    )
+    http = web([], {URL: page()}, search=down, backup=lambda request: fire(urls))
+    notes = provider(http, summarizer(NOT_REVIEW), redis, searches=BOTH)
+    assert await notes.notes_for([(1, "화암동굴")]) == {}
+    assert await redis.keys("*") == []
+
+
+@pytest.mark.parametrize("status", [408, 504])
+@scenario
+async def test_slow_status_failures_are_not_asked_again_in_the_run(status):
+    seen = []
+
+    def late(request):
+        return httpx.Response(status)
+
+    http = web([], {}, seen=seen, search=late)
+    notes = provider(http, summarizer(), searches=BOTH, concurrency=1)
+    await notes.notes_for([(1, "화암동굴"), (2, "나전역카페")])
+    assert [u for u in seen if u in (SEARCH_URL, FIRECRAWL_URL)] == [
+        SEARCH_URL,
+        FIRECRAWL_URL,
+        FIRECRAWL_URL,
+    ]
 
 
 @scenario

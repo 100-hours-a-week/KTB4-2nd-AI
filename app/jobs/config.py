@@ -71,7 +71,7 @@ class JobsSettings(Settings):
     STORY_PLACE_NOTES_TIMEOUT_SEC: float = Field(default=60, gt=0, allow_inf_nan=False)
     STORY_PLACE_NOTES_TTL_SEC: int = Field(default=30 * 86400, gt=0)
     # 장소 검색은 주 검색이 답하지 못하거나 결과가 없으면 다른 검색을 부른다. 키가 있는 검색만
-    # 쓰고, 둘 다 답하지 못하면 그 장소는 메모 없이 쓴다. 빈 값은 기본값으로 본다.
+    # 쓰고, 결과를 얻지 못하면 그 장소는 메모 없이 쓴다. 빈 값은 기본값으로 본다.
     STORY_SEARCH_PRIMARY: Literal["tavily", "firecrawl"] = "tavily"
     TAVILY_API_KEY: SecretStr | None = None
     FIRECRAWL_API_KEY: SecretStr | None = None
