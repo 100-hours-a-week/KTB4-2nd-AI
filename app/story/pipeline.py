@@ -38,6 +38,8 @@ class StoryContext:
     vectors: object
     urls: object
     vlm: object
+    # 장소별 경험 메모 제공자(app.story.notes). 없으면 메모 없이 쓴다.
+    notes: object | None = None
 
 
 PERCEIVE_TOKENS_PER_PHOTO = 150
@@ -102,6 +104,27 @@ async def perceive(vlm, message: StoryMessage, selected, urls, max_tokens: int) 
         )
         return None
     return shows
+
+
+async def place_notes(provider, message: StoryMessage) -> dict:
+    """장소별 경험 메모를 가져온다. 메모는 보조 자료이므로 실패해도 스토리 생성을 막지 않는다."""
+    if provider is None:
+        return {}
+    try:
+        found = await provider.notes_for(
+            [(place.trip_place_id, place.place_name) for place in message.places]
+        )
+    except Exception as exc:
+        log.warning(
+            "장소 경험 메모를 가져오지 못해 메모 없이 씁니다.",
+            extra={
+                "event": "ai_story_place_notes_failed",
+                "result": "skipped",
+                "error_type": type(exc).__name__,
+            },
+        )
+        return {}
+    return {place_id: notes for place_id, notes in found.items() if notes}
 
 
 def day_label(taken_at, start_date, place_name: str) -> str:
@@ -215,6 +238,10 @@ async def run(request: dict, reporter, ctx: StoryContext, options: StoryOptions)
                 urls.append(await ctx.urls.resolve(photo.analyze_storage_key))
         await reporter.report("WRITING", 2, 4)
         await reporter.check_cancel()
+        with stage("place_notes", parent="writing", places=len(message.places)) as fields:
+            notes = await place_notes(ctx.notes, message)
+            fields["places_with_notes"] = len(notes)
+        await reporter.check_cancel()
         # 출력이 상한에서 잘리면 스토리가 실패하므로, 사진이 많으면 상한을 사진 수에 맞춰 늘린다.
         # 사진 한 장에 사진 확인은 150토큰, 글은 200토큰까지 잡는다(11/10 측정: 평균 50, 100).
         perceive_tokens = max(options.perceive_max_tokens, PERCEIVE_TOKENS_PER_PHOTO * len(urls))
@@ -225,7 +252,7 @@ async def run(request: dict, reporter, ctx: StoryContext, options: StoryOptions)
         await reporter.check_cancel()
         with stage("generate", parent="writing", images=len(urls)):
             raw = await ctx.vlm.chat(
-                messages(message, selected, shows),
+                messages(message, selected, shows, notes),
                 urls,
                 write_tokens,
                 response_format=response_format(

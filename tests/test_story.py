@@ -670,13 +670,126 @@ async def test_invalid_photo_notes_are_skipped_without_failing_the_story(notes, 
     assert len(events(caplog, "ai_story_perceive_invalid")) == 1
 
 
+class Notes:
+    def __init__(self, found=None, fault=None):
+        self.found, self.fault, self.asked = found or {}, fault, None
+
+    async def notes_for(self, places):
+        self.asked = places
+        if self.fault:
+            raise self.fault
+        return self.found
+
+
 @scenario
-async def test_handler_uses_story_call_timeout(monkeypatch):
+async def test_place_notes_are_passed_to_the_writing_call_only():
+    original = context()
+    notes = Notes({5001: ["셔틀을 타고 올라감", "맛은 평범했음"], 5002: [], 9999: ["없는 장소"]})
+    ctx = StoryContext(original.images, original.vectors, original.urls, original.vlm, notes)
+    await run(request_two_places(), AsyncMock(), ctx, StoryOptions())
+    assert [name for _, name in notes.asked] == ["해변", "공원"]
+    first, second = ctx.vlm.chat.call_args_list
+    assert "place_notes" not in json.loads(first.args[0][-1]["content"][-1]["text"])
+    data = json.loads(second.args[0][-1]["content"][-1]["text"])
+    # 메모가 빈 장소와 요청에 없는 장소는 넣지 않는다.
+    assert data["place_notes"] == [
+        {
+            "trip_place_id": 5001,
+            "place_name": "해변",
+            "notes": ["셔틀을 타고 올라감", "맛은 평범했음"],
+        }
+    ]
+
+
+@scenario
+async def test_place_notes_failure_does_not_fail_the_story(caplog):
+    original = context()
+    notes = Notes(fault=RuntimeError("secret search key"))
+    ctx = StoryContext(original.images, original.vectors, original.urls, original.vlm, notes)
+    caplog.set_level(logging.WARNING)
+    result = await run(request_two_places(), AsyncMock(), ctx, StoryOptions())
+    assert len(result["blocks"]) == 2
+    failed = events(caplog, "ai_story_place_notes_failed")
+    # 예외의 문구는 로그의 어느 칸에도 남기지 않는다.
+    assert len(failed) == 1 and "secret" not in str(failed[0].__dict__)
+    assert failed[0].error_type == "RuntimeError"
+
+
+@pytest.mark.parametrize("after,calls", [("place_notes", 0), ("photo_notes", 1)])
+@scenario
+async def test_cancel_between_writing_steps_stops_before_the_next_call(after, calls):
+    original, reporter = context(), AsyncMock()
+
+    class Cancelling(Notes):
+        async def notes_for(self, places):
+            if after == "place_notes":
+                reporter.check_cancel.side_effect = PipelineCancelled()
+            return {}
+
+    normal = respond()
+
+    async def chat(messages, urls, max_tokens, response_format=None, **kwargs):
+        if response_format["json_schema"]["name"] == after:
+            reporter.check_cancel.side_effect = PipelineCancelled()
+        return await normal(messages, urls, max_tokens, response_format, **kwargs)
+
+    original.vlm.chat.side_effect = chat
+    ctx = StoryContext(original.images, original.vectors, original.urls, original.vlm, Cancelling())
+    with pytest.raises(PipelineCancelled):
+        await run(request_two_places(), reporter, ctx, StoryOptions())
+    assert original.vlm.chat.await_count == calls
+
+
+NOTES_ON = {"STORY_PLACE_NOTES_ENABLED": True}
+TAVILY, FIRECRAWL = ("tavily", "search-key"), ("firecrawl", "fire-key")
+TWO_KEYS = {"TAVILY_API_KEY": "search-key", "FIRECRAWL_API_KEY": "fire-key"}
+
+
+@pytest.mark.parametrize(
+    "changes,searches",
+    [
+        ({}, None),
+        (NOTES_ON, None),
+        ({**TWO_KEYS, "STORY_PLACE_NOTES_ENABLED": False}, None),
+        ({**NOTES_ON, "TAVILY_API_KEY": " ", "FIRECRAWL_API_KEY": ""}, None),
+        ({**NOTES_ON, "TAVILY_API_KEY": "search-key"}, [TAVILY]),
+        ({**NOTES_ON, "FIRECRAWL_API_KEY": " fire-key "}, [FIRECRAWL]),
+        ({**NOTES_ON, **TWO_KEYS}, [TAVILY, FIRECRAWL]),
+        ({**NOTES_ON, **TWO_KEYS, "STORY_SEARCH_PRIMARY": "firecrawl"}, [FIRECRAWL, TAVILY]),
+        # 주 검색으로 정한 쪽의 키가 비어 있으면 키가 있는 검색만 쓴다.
+        (
+            {**NOTES_ON, "TAVILY_API_KEY": "search-key", "STORY_SEARCH_PRIMARY": "firecrawl"},
+            [TAVILY],
+        ),
+    ],
+    ids=[
+        "default",
+        "no_key",
+        "disabled",
+        "blank_keys",
+        "tavily_only",
+        "firecrawl_only",
+        "both",
+        "firecrawl_first",
+        "primary_without_key",
+    ],
+)
+@scenario
+async def test_handler_builds_place_notes_only_with_setting_and_key(changes, searches, monkeypatch):
     from app.jobs.config import JobsSettings
     from app.story import handler
 
+    # 실행 환경에 검색 키나 설정이 있어도 이 테스트의 값만 쓰게 한다.
+    names = ("TAVILY_API_KEY", "FIRECRAWL_API_KEY", "STORY_SEARCH_PRIMARY")
+    for name in (*names, "STORY_PLACE_NOTES_ENABLED"):
+        monkeypatch.delenv(name, raising=False)
     cfg = JobsSettings(
-        _env_file=None, API_KEY="test", IMAGE_SOURCE="local", STORY_VLM_TIMEOUT_SEC=77
+        _env_file=None,
+        API_KEY="test",
+        IMAGE_SOURCE="local",
+        STORY_PLACE_NOTES_TIMEOUT_SEC=12,
+        STORY_VLM_TIMEOUT_SEC=77,
+        **changes,
     )
     seen, pipeline, reporter = [], AsyncMock(return_value={}), AsyncMock()
 
@@ -693,6 +806,81 @@ async def test_handler_uses_story_call_timeout(monkeypatch):
     ctx = pipeline.call_args.args[2]
     # 스토리의 생성 호출은 검색과 다른 제한 시간을 쓴다.
     assert seen == [77] and ctx.vlm.timeout_sec == 77
+    assert (ctx.notes is not None) == (searches is not None)
+    if searches:
+        notes = ctx.notes
+        # 주 검색이 앞에 오고, 키가 없는 검색은 빠진다.
+        assert notes.searches == searches and notes.timeout_sec == 12
+        assert notes.vlm is ctx.vlm and notes.redis is reporter.store.redis
+        assert (
+            notes.key_prefix == cfg.redis_prefix and notes.ttl_sec == cfg.STORY_PLACE_NOTES_TTL_SEC
+        )
+        # 블로그 글을 받는 클라이언트는 리디렉션을 따르지 않고, 실행이 끝나면 닫힌다.
+        assert notes.http.follow_redirects is False and notes.http.is_closed
+        # 환경 변수의 프록시 설정을 쓰지 않는다.
+        assert notes.http.trust_env is False
+
+
+@pytest.mark.parametrize(
+    "value,primary",
+    [
+        ("firecrawl", "firecrawl"),
+        (" Firecrawl ", "firecrawl"),
+        ("TAVILY", "tavily"),
+        ("", "tavily"),
+    ],
+)
+def test_story_search_primary_ignores_case_and_blank_means_the_default(value, primary):
+    from app.jobs.config import JobsSettings
+
+    cfg = JobsSettings(
+        _env_file=None, API_KEY="test", IMAGE_SOURCE="local", STORY_SEARCH_PRIMARY=value
+    )
+    assert cfg.STORY_SEARCH_PRIMARY == primary
+
+
+def test_story_search_primary_must_be_a_known_search():
+    from pydantic import ValidationError
+
+    from app.jobs.config import JobsSettings
+
+    with pytest.raises(ValidationError) as caught:
+        JobsSettings(
+            _env_file=None, API_KEY="test", IMAGE_SOURCE="local", STORY_SEARCH_PRIMARY="bing"
+        )
+    assert [error["loc"] for error in caught.value.errors()] == [("STORY_SEARCH_PRIMARY",)]
+
+
+def test_story_step_time_limits_must_fit_in_the_job_time_limit():
+    from pydantic import ValidationError
+
+    from app.jobs.config import JobsSettings
+
+    def settings(**changes):
+        # 검사는 장소 메모가 실제로 동작하는 설정(켜짐, 검색 키 있음)에서만 한다.
+        changes = {"TAVILY_API_KEY": "k", **changes}
+        return JobsSettings(_env_file=None, API_KEY="test", IMAGE_SOURCE="local", **changes)
+
+    assert settings(STORY_PLACE_NOTES_ENABLED=True).STORY_VLM_TIMEOUT_SEC == 90
+    with pytest.raises(ValidationError):
+        settings(STORY_PLACE_NOTES_ENABLED=True, STORY_PLACE_NOTES_TIMEOUT_SEC=150)
+    with pytest.raises(ValidationError):
+        settings(STORY_PLACE_NOTES_ENABLED=True, STORY_VLM_TIMEOUT_SEC=120)
+    # 생성 호출 하나의 상한은 제한 시간 + 슬롯 대기(2초) + 여유(5초)다.
+    # 60 + 2 × (113 + 7) = 300은 거부한다.
+    with pytest.raises(ValidationError):
+        settings(STORY_PLACE_NOTES_ENABLED=True, STORY_VLM_TIMEOUT_SEC=113)
+    assert settings(STORY_PLACE_NOTES_ENABLED=True, STORY_VLM_TIMEOUT_SEC=112.9)
+    with pytest.raises(ValidationError):
+        settings(STORY_PLACE_NOTES_ENABLED=True, STORY_VLM_TIMEOUT_SEC=110, GPU_WAIT_SEC=5)
+    # 장소 메모는 기본으로 켜져 있다. 끄거나 검색 키가 없는 배포는 이전처럼 짧은 작업 제한으로도
+    # 시작할 수 있다.
+    assert settings().STORY_PLACE_NOTES_ENABLED is True
+    assert settings(JOBS_TIMEOUT_SEC=10, TAVILY_API_KEY=None).JOBS_TIMEOUT_SEC == 10
+    assert settings(JOBS_TIMEOUT_SEC=10, TAVILY_API_KEY=" ").JOBS_TIMEOUT_SEC == 10
+    assert settings(JOBS_TIMEOUT_SEC=10, STORY_PLACE_NOTES_ENABLED=False, TAVILY_API_KEY="k")
+    with pytest.raises(ValidationError):
+        settings(JOBS_TIMEOUT_SEC=10, TAVILY_API_KEY=None, FIRECRAWL_API_KEY="k")
 
 
 @scenario
