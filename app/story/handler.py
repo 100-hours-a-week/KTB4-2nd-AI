@@ -46,6 +46,6 @@ async def run(request: dict, reporter) -> dict:
             images=lambda: image_source(cfg),
             vectors=vectors,
             urls=urls,
-            vlm=generation_client(vlm, reporter.store.redis, cfg),
+            vlm=generation_client(vlm, reporter.store.redis, cfg, kind="story"),
         )
         return await run_pipeline(request, reporter, ctx, options)

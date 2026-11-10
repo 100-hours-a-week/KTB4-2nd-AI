@@ -53,7 +53,7 @@ async def search_service(
         if redis is not None:
             from app.jobs.gpu_requests import embedding_client, generation_client
 
-            vlm = generation_client(vlm, redis, settings)
+            vlm = generation_client(vlm, redis, settings, kind="search")
             embedder = embedding_client(embedder, redis, settings)
         # 감싸기는 GPU 호출 한도 밖에 둔다. 단계 시간에는 슬롯 대기 시간도 포함된다.
         yield QueryService(
@@ -92,7 +92,8 @@ async def rewrite_service(settings, redis):
         images = await S3ImageResolver.create(settings)
         resources.push_async_callback(images.aclose)
         service = RewriteService(
-            generation_client(vlm, redis, settings, timeout_sec=call_timeout),
+            # 분위기 변경은 스토리 기능이므로 스토리 상한을 함께 쓴다(결정 222).
+            generation_client(vlm, redis, settings, kind="story", timeout_sec=call_timeout),
             images,
             redis,
             settings.redis_prefix,

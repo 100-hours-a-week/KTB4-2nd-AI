@@ -70,6 +70,12 @@ class JobsSettings(Settings):
     STORY_REWRITE_MAX_TOKENS: int = Field(default=6144, ge=1)
     # API 복제본과 스토리 프로세스가 공유하는 HTTP 호출 한도. GPU 성능 보장값은 아니다.
     GPU_GENERATION_INFLIGHT: int = Field(default=8, ge=1)
+    # 위 한도 안에서 정리와 스토리(분위기 변경 포함)가 각자 동시에 쓰는 생성 호출 상한(결정 222).
+    # 검색은 따로 상한이 없고, 슬롯을 기다리는 검색이 있으면 정리와 스토리가 양보한다.
+    # 복제본 전체에 걸친 상한이다. 작업 수 상한(JOBS_STORY_CONCURRENCY)과 구분한다.
+    # 전체 한도보다 크면 전체 한도가 먼저 걸린다(전체 한도를 낮춘 배포도 시작할 수 있게 둔다).
+    GPU_PROCESS_GENERATION_INFLIGHT: int = Field(default=4, ge=1)
+    GPU_STORY_GENERATION_INFLIGHT: int = Field(default=4, ge=1)
     GPU_SEARCH_EMBEDDING_INFLIGHT: int = Field(default=2, ge=1)
     GPU_WAIT_SEC: float = Field(default=2, gt=0, allow_inf_nan=False)
     # 정리 결과를 알려진 평가 데이터셋과 사진 지문으로 대조해 정확도를 자동 기록한다.
