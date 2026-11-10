@@ -73,6 +73,21 @@ async def test_generation_client_forwards_tool_calls_through_the_same_gate():
 
 
 @scenario
+async def test_generation_client_forwards_stream_and_uses_given_call_limit():
+    async with environment() as (cfg, a, _, _):
+        model = AsyncMock()
+        model.chat.return_value = "turn"
+        client = generation_client(model, a.redis, cfg, timeout_sec=300)
+        await client.chat([], [], 20, stream=True)
+        await client.chat([], [], 20)
+        first, second = model.chat.await_args_list
+        assert first.kwargs == {"stream": True}
+        assert second.kwargs == {}
+        assert client.timeout_sec == 300
+        assert generation_client(model, a.redis, cfg).timeout_sec == cfg.VLM_TIMEOUT_SEC
+
+
+@scenario
 async def test_busy_and_redis_failure_never_start_http_call():
     async with environment() as (cfg, a, _, _):
         cfg.GPU_GENERATION_INFLIGHT = 2

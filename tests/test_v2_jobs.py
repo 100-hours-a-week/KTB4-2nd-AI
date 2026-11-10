@@ -379,6 +379,18 @@ async def test_identifiable_invalid_body_returns_failed_in_result_topic():
         assert not p.sent
 
 
+@pytest.mark.parametrize("mood", ["EMOTIONAL", "CALM"])
+@scenario
+async def test_removed_story_mood_returns_failed_in_result_topic(mood):
+    # 스토리 생성도 세 분위기만 받는다(스토리 트랙 결정 80번).
+    async with environment() as (cfg, a, b, p):
+        body = {**story_request(), "mood": mood}
+        assert await RequestReceiver(a, p).accept(message(cfg, body)) == "accepted"
+        job = await b.latest(77, "story")
+        assert job.status == "FAILED" and job.event.error.code == "INVALID_REQUEST"
+        assert await a.claim("story", "worker") is None
+
+
 @scenario
 async def test_dlt_publish_failure_is_not_acknowledged():
     async with environment() as (cfg, a, b, p):

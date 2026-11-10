@@ -5,6 +5,7 @@ import json
 import logging
 from contextlib import nullcontext
 from datetime import datetime
+from typing import get_args
 from unittest.mock import AsyncMock
 
 import numpy as np
@@ -14,8 +15,9 @@ from PIL import Image
 from app.core.errors import ErrorCode, PipelineCancelled, PipelineError
 from app.core.tracing import end_trace, start_trace
 from app.infra.vlm import ChatTurn, VLMUnavailable
+from app.jobs.models import StoryMessage
 from app.story.pipeline import StoryContext, StoryOptions, finalize, run, validate_request
-from app.story.prompts import StoryDraft, response_format
+from app.story.prompts import MOOD_RULES, StoryDraft, response_format, system_prompt
 from app.story.selection import (
     allocate,
     duplicate_threshold,
@@ -292,6 +294,70 @@ async def test_each_image_is_labeled_and_precedes_photo_text():
     assert len(content) == 5
 
 
+@scenario
+async def test_pinned_photo_order_follows_image_order_when_place_and_time_order_differ():
+    # 뒤 장소의 사진이 더 이르면 이미지, 입력 photos, 고정한 사진 ID가 모두 촬영 시각순이어야 한다
+    # (결정 64번: 위치마다 ID를 고정하므로 이미지 순서와 어긋나면 다른 사진의 글이 붙는다).
+    request = request_two_places()
+    request["places"][0]["attachments"][0]["taken_at"] = "2026-10-13T15:00:00+09:00"
+    request["places"][1]["attachments"][0]["taken_at"] = "2026-10-12T09:00:00+09:00"
+    ctx = context()
+    await run(request, AsyncMock(), ctx, StoryOptions())
+    args, kwargs = ctx.vlm.chat.call_args
+    content = args[0][-1]["content"]
+    labels = [p["text"] for p in content if p["type"] == "text"][:-1]
+    assert labels == [
+        "image_number 1, trip_attachment_id 102:",
+        "image_number 2, trip_attachment_id 101:",
+    ]
+    assert args[1] == ["https://images.test/b.jpg", "https://images.test/a.jpg"]
+    photos = json.loads(content[-1]["text"])["photos"]
+    assert [p["trip_attachment_id"] for p in photos] == [102, 101]
+    pinned = kwargs["response_format"]["json_schema"]["schema"]["properties"]["blocks"]
+    assert [b["properties"]["trip_attachment_id"]["const"] for b in pinned["prefixItems"]] == [
+        102,
+        101,
+    ]
+
+
+@pytest.mark.parametrize("mood", ["PLAIN", "HUMOROUS", "LITERARY"])
+@scenario
+async def test_system_prompt_is_adopted_text_with_requested_mood_rule_only(mood):
+    ctx = context()
+    await run({**request_two_places(), "mood": mood}, AsyncMock(), ctx, StoryOptions())
+    system, user = ctx.vlm.chat.call_args.args[0]
+    assert system == {"role": "system", "content": system_prompt(mood)}
+    for other, rule in MOOD_RULES.items():
+        assert (rule in system["content"]) == (other == mood)
+    assert "1인칭 시점" in system["content"]
+    # 입력 JSON의 mood도 system의 규칙과 같은 값이다.
+    assert json.loads(user["content"][-1]["text"])["mood"] == mood
+
+
+def test_story_request_moods_match_prompt_rules():
+    # 요청이 받는 분위기와 프롬프트 규칙이 어긋나면 KeyError로 내부 오류가 난다.
+    assert set(get_args(StoryMessage.model_fields["mood"].annotation)) == set(MOOD_RULES)
+
+
+def test_only_humorous_rule_mentions_summary_and_bans_laughter_there():
+    # 요약을 쓰는 방식은 정하지 않고, 웃음 표현과 이모지만 막는다(결정 48·49·52번).
+    ban = "detail_summary와 story_summary에는 웃음 표현과 이모지를 쓰지 마세요."
+    for mood, rule in MOOD_RULES.items():
+        assert rule.replace(ban, "").count("story_summary") == 0
+        assert (ban in rule) == (mood == "HUMOROUS")
+
+
+@pytest.mark.parametrize("mood", ["EMOTIONAL", "CALM"])
+@scenario
+async def test_removed_moods_are_invalid_requests(mood):
+    # BE·FE가 세 값만 보내므로 대체 없이 거절한다(스토리 트랙 결정 80번).
+    ctx = context()
+    with pytest.raises(PipelineError) as error:
+        await run({**request_two_places(), "mood": mood}, AsyncMock(), ctx, StoryOptions())
+    assert error.value.code == ErrorCode.INVALID_REQUEST
+    ctx.vlm.chat.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "raw",
     ["not json", draft((101,)), draft((101, 999)), draft((101, 101, 102)), draft((True, 102))],
@@ -362,8 +428,11 @@ def test_response_schema_requires_actual_selected_photos(count):
     schema = response_format(ids)["json_schema"]["schema"]
     blocks = schema["properties"]["blocks"]
     assert blocks["minItems"] == blocks["maxItems"] == count
-    block = schema["$defs"]["DraftBlock"]["properties"]
-    assert block["trip_attachment_id"]["enum"] == ids
+    # 위치마다 그 자리의 사진 ID만 받는다(결정 64번).
+    assert blocks["items"] is False
+    assert [b["properties"]["trip_attachment_id"]["const"] for b in blocks["prefixItems"]] == ids
+    assert "$defs" not in schema
+    block = blocks["prefixItems"][0]["properties"]
     assert schema["properties"]["story_summary"]["maxLength"] == 40
     assert block["detail_summary"]["maxLength"] == 40
     assert block["memo"]["maxLength"] == 125
@@ -375,9 +444,11 @@ def test_response_schemas_do_not_share_mutable_state_between_requests():
     ids.append(103)
     second = response_format([201])["json_schema"]["schema"]
     first["properties"]["blocks"]["maxItems"] = 99
-    first["$defs"]["DraftBlock"]["properties"]["trip_attachment_id"]["enum"].append(999)
+    first["properties"]["blocks"]["prefixItems"][0]["properties"]["memo"]["maxLength"] = 1
+    pinned = second["properties"]["blocks"]["prefixItems"]
     assert second["properties"]["blocks"]["maxItems"] == 1
-    assert second["$defs"]["DraftBlock"]["properties"]["trip_attachment_id"]["enum"] == [201]
+    assert [b["properties"]["trip_attachment_id"]["const"] for b in pinned] == [201]
+    assert pinned[0]["properties"]["memo"]["maxLength"] == 125
     assert StoryDraft.model_json_schema()["properties"]["blocks"]["maxItems"] == 30
     assert response_format([101, 102])["json_schema"]["schema"] != first
 
@@ -498,10 +569,8 @@ async def test_actual_vlm_transport_and_job_result_outbox():
         schema = body["response_format"]["json_schema"]["schema"]
         assert schema["properties"]["blocks"]["minItems"] == 2
         assert schema["properties"]["blocks"]["maxItems"] == 2
-        assert schema["$defs"]["DraftBlock"]["properties"]["trip_attachment_id"]["enum"] == [
-            101,
-            102,
-        ]
+        pinned = schema["properties"]["blocks"]["prefixItems"]
+        assert [b["properties"]["trip_attachment_id"]["const"] for b in pinned] == [101, 102]
         assert body["max_tokens"] == 2048
         assert "40자 이내의 짧은 한 구절" in body["messages"][0]["content"]
         content = body["messages"][-1]["content"]

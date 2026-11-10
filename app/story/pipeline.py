@@ -69,6 +69,14 @@ def invalid_output(rule: str, **fields) -> Exception:
     )
 
 
+def day_label(taken_at, start_date, place_name: str) -> str:
+    """N일차는 한국 시각의 날짜로 센다. 여행 시작 전 사진은 날짜를 그대로 쓴다."""
+    local = taken_at.astimezone(ZoneInfo("Asia/Seoul")).date()
+    day = (local - start_date).days + 1
+    label = local.isoformat() if day < 1 else f"{day}일차"
+    return f"{label}, {place_name}"[:40]
+
+
 def finalize(raw: str, request: StoryMessage, selected) -> dict:
     try:
         draft = StoryDraft.model_validate_json(raw)
@@ -102,18 +110,13 @@ def finalize(raw: str, request: StoryMessage, selected) -> dict:
         blocks = []
         for order, block in enumerate(ordered, 1):
             place_id, photo = photos[block.trip_attachment_id]
-            day = (
-                photo.taken_at.astimezone(ZoneInfo("Asia/Seoul")).date() - request.period.start_date
-            ).days + 1
-            if day < 1:
-                label = photo.taken_at.astimezone(ZoneInfo("Asia/Seoul")).date().isoformat()
-            else:
-                label = f"{day}일차"
             blocks.append(
                 StoryBlock(
                     order_number=order,
                     trip_place_id=place_id,
-                    day_label=f"{label}, {places[place_id]}"[:40],
+                    day_label=day_label(
+                        photo.taken_at, request.period.start_date, places[place_id]
+                    ),
                     **block.model_dump(),
                 )
             )

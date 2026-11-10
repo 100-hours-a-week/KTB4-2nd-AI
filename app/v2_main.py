@@ -12,8 +12,8 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from app.api.deps import require_api_key
-from app.api.routers import query
-from app.api.search_bootstrap import search_service
+from app.api.routers import query, story_rewrite
+from app.api.search_bootstrap import rewrite_service, search_service
 from app.api.services.query_service import QueryService
 from app.api.services.runpod_status import RunpodStatus
 from app.core.http_errors import register_error_handlers
@@ -33,6 +33,7 @@ def create_app(
     store: RedisJobStore | None = None,
     query_service: QueryService | None = None,
     *,
+    rewrite: object | None = None,
     start_kafka: bool = True,
     query_service_factory: Callable[[JobsSettings], AbstractAsyncContextManager[QueryService]]
     | None = None,
@@ -62,6 +63,7 @@ def create_app(
         app.state.settings = cfg
         app.state.jobs = jobs
         app.state.query_service = query_service
+        app.state.rewrite_service = rewrite
         app.state.kafka = runtime
         story_runner = None
         story_stop = asyncio.Event()
@@ -76,6 +78,10 @@ def create_app(
                 factory = partial(search_service, redis=jobs.redis)
             if factory:
                 app.state.query_service = await search_resources.enter_async_context(factory(cfg))
+            if rewrite is None and cfg.STORY_REWRITE_ENABLED:
+                app.state.rewrite_service = await search_resources.enter_async_context(
+                    rewrite_service(cfg, jobs.redis)
+                )
             if runtime:
                 await runtime.start()
                 story_runner = asyncio.create_task(story_runners(jobs, story_stop))
@@ -87,10 +93,13 @@ def create_app(
                     await drain_story_runners(story_runner, story_stop, cfg.JOBS_SHUTDOWN_GRACE_SEC)
                 if runtime:
                     await runtime.stop()
-                if redis:
-                    await redis.aclose()
             finally:
-                await search_resources.aclose()
+                # 분위기 변경은 잠금과 GPU 슬롯을 Redis로 해제하므로 자원을 먼저 닫는다.
+                try:
+                    await search_resources.aclose()
+                finally:
+                    if redis:
+                        await redis.aclose()
 
     app = FastAPI(title="여담 AI v2", lifespan=lifespan)
     register_error_handlers(app)
@@ -186,6 +195,7 @@ def create_app(
         )
 
     app.include_router(query.router)
+    app.include_router(story_rewrite.router)
     return app
 
 

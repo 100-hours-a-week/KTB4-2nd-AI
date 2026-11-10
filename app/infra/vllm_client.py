@@ -1,6 +1,11 @@
-"""vLLM의 비스트리밍 chat 전송. 프롬프트와 기능별 출력 검증은 호출자가 담당한다."""
+"""vLLM의 chat 전송. 프롬프트와 기능별 출력 검증은 호출자가 담당한다.
+
+기본은 비스트리밍이다. stream=True는 응답 조각을 모아 같은 결과로 돌려준다. RunPod 프록시는
+응답 데이터가 오가지 않는 요청을 약 100초 뒤에 끊으므로, 오래 걸리는 호출만 스트리밍으로 보낸다.
+"""
 
 import asyncio
+import json
 import math
 import time
 from typing import Any, Self
@@ -80,11 +85,14 @@ class VllmClient:
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         temperature: float | None = None,
+        stream: bool = False,
     ) -> ChatTurn:
         if tools is None and tool_choice is not None:
             raise ValueError("도구 없이 tool_choice를 지정할 수 없습니다.")
         if tools is not None and (not isinstance(tools, list) or not tools):
             raise ValueError("도구 목록이 비어 있지 않은 목록이어야 합니다.")
+        if stream and tools is not None:
+            raise ValueError("도구 호출은 스트리밍으로 보내지 않습니다.")
         body, call = self._request(messages, image_urls, max_tokens, temperature)
         if response_format is not None:
             body["response_format"] = response_format
@@ -94,10 +102,20 @@ class VllmClient:
             body["tool_choice"] = "auto" if tool_choice is None else tool_choice
             call["tool_count"] = len(tools)
         started = time.monotonic()
-        response = await self._post(body, call, started)
+        if stream:
+            body["stream"] = True
+            body["stream_options"] = {"include_usage": True}
+            call["stream"] = True
+            status_code, data = await self._post_stream(body, call, started)
+        else:
+            response = await self._post(body, call, started)
+            status_code, data = response.status_code, None
         finish_reason, usage = None, None
         try:
-            data = response.json()
+            if data is None:
+                if stream:
+                    raise ValueError("해석할 수 없는 조각")
+                data = response.json()
             usage = data.get("usage") if isinstance(data, dict) else None
             choice = data["choices"][0]
             finish_reason = choice.get("finish_reason")
@@ -128,7 +146,7 @@ class VllmClient:
                 "vlm",
                 started,
                 "incomplete_output",
-                status_code=response.status_code,
+                status_code=status_code,
                 finish_reason=finish_reason if isinstance(finish_reason, str) else None,
                 **usage_fields(usage),
                 **call,
@@ -140,7 +158,7 @@ class VllmClient:
             "vlm",
             started,
             "success",
-            status_code=response.status_code,
+            status_code=status_code,
             finish_reason=finish_reason,
             output_chars=len(content),
             **usage_fields(usage),
@@ -211,6 +229,62 @@ class VllmClient:
             error = VLMTransientError if isinstance(exc, httpx.TransportError) else VLMUnavailable
             raise error("VLM 요청에 실패했습니다.") from None
         return response
+
+    async def _post_stream(
+        self, body: dict[str, Any], call: dict[str, Any], started: float
+    ) -> tuple[int, dict[str, Any] | None]:
+        """SSE 조각의 content를 이어 붙여 비스트리밍 응답과 같은 모양으로 만든다.
+
+        해석할 수 없는 조각이 있으면 None을 돌려주어 호출자가 불완전한 응답으로 처리한다.
+        """
+        text: list[str] = []
+        finish_reason, usage, broken = None, None, False
+        try:
+            # 조각이 계속 와도 응답을 모두 받기까지의 전체 시간은 비스트리밍과 같이 제한한다.
+            async with asyncio.timeout(self._timeout_sec):
+                async with self._client.stream("POST", "chat/completions", json=body) as response:
+                    response.raise_for_status()
+                    status_code = response.status_code
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        payload = line[5:].strip()
+                        if payload == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(payload)
+                            usage = chunk.get("usage") or usage
+                            for choice in chunk.get("choices") or []:
+                                piece = (choice.get("delta") or {}).get("content")
+                                if piece is not None and not isinstance(piece, str):
+                                    raise TypeError("텍스트가 아닌 조각")
+                                if piece:
+                                    text.append(piece)
+                                finish_reason = choice.get("finish_reason") or finish_reason
+                        except (ValueError, AttributeError, TypeError):
+                            broken = True
+        except (httpx.TimeoutException, TimeoutError):
+            log_model_call("vlm", started, "timeout", **call)
+            raise TimeoutError("VLM 요청 시간이 초과되었습니다.") from None
+        except asyncio.CancelledError:
+            log_model_call("vlm", started, "cancelled", **call)
+            raise
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            log_model_call("vlm", started, "http_error", status_code=status, **call)
+            error = VLMTransientError if status in (408, 429) or status >= 500 else VLMUnavailable
+            raise error("VLM 요청에 실패했습니다.") from None
+        except httpx.HTTPError as exc:
+            log_model_call("vlm", started, "connect_error", error_type=type(exc).__name__, **call)
+            error = VLMTransientError if isinstance(exc, httpx.TransportError) else VLMUnavailable
+            raise error("VLM 요청에 실패했습니다.") from None
+        if broken:
+            return status_code, None
+        message = {"role": "assistant", "content": "".join(text)}
+        return status_code, {
+            "choices": [{"message": message, "finish_reason": finish_reason}],
+            "usage": usage,
+        }
 
     async def aclose(self) -> None:
         await self._client.aclose()

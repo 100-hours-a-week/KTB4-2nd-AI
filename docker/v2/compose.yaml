@@ -8,6 +8,7 @@ x-app: &app
     JOBS_FAKE_PIPELINE: "false"
     FAKE_PIPELINE: "false"
     SEARCH_ENABLED: "true"
+    STORY_REWRITE_ENABLED: "true"
     JOBS_PROCESS_HANDLER: app.jobs.process_handler:run
     JOBS_STORY_HANDLER: app.story.handler:run
     EMBED_MODEL: qwen3-vl-embedding-2b

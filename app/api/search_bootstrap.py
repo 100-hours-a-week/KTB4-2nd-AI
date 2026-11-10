@@ -66,3 +66,40 @@ async def search_service(
             options,
             metrics=Metrics(redis, settings.redis_prefix) if redis is not None else None,
         )
+
+
+CALL_TIMEOUT_MARGIN_SEC = 10
+
+
+@asynccontextmanager
+async def rewrite_service(settings, redis):
+    """분위기 변경용 VLM 클라이언트와 S3 URL 발급기를 API별로 한 번 만든다.
+
+    호출 상한이 검색·스토리(VLM_TIMEOUT_SEC)보다 길어 클라이언트를 따로 두고,
+    GPU 호출 슬롯은 함께 쓴다.
+    """
+    from app.jobs.gpu_requests import generation_client
+    from app.story.rewrite import RewriteService
+
+    timeout = settings.STORY_REWRITE_TIMEOUT_SEC
+    # 호출 상한을 처리 상한보다 조금 짧게 두어, 생성이 늦을 때 원인이
+    # 호출 로그에 timeout으로 남게 한다.
+    call_timeout = max(timeout - CALL_TIMEOUT_MARGIN_SEC, timeout / 2)
+    async with AsyncExitStack() as resources:
+        vlm = await resources.enter_async_context(
+            VllmClient.from_settings(settings.model_copy(update={"VLM_TIMEOUT_SEC": call_timeout}))
+        )
+        images = await S3ImageResolver.create(settings)
+        resources.push_async_callback(images.aclose)
+        service = RewriteService(
+            generation_client(vlm, redis, settings, timeout_sec=call_timeout),
+            images,
+            redis,
+            settings.redis_prefix,
+            timeout_sec=timeout,
+            max_tokens=settings.STORY_REWRITE_MAX_TOKENS,
+        )
+        try:
+            yield service
+        finally:
+            await service.aclose()
