@@ -249,11 +249,10 @@ async def workflow_resources(cfg: JobsSettings, reporter: JobReporter) -> AsyncI
             ) from None
         remote = HttpRemoteImages()
         resources.push_async_callback(remote.aclose)
-        gate = RequestGate(
-            reporter.store.redis,
-            cfg.redis_prefix + "gpu:generation",
-            cfg.GPU_GENERATION_INFLIGHT,
-            cfg.PROCESS_VLM_WAIT_SEC,
+        # 워크플로우 정리도 GPU_PROCESS_GENERATION_INFLIGHT 안에서만 슬롯을 잡고
+        # 기다리는 검색에 양보한다.
+        gate = generation_gate(
+            reporter.store.redis, cfg, "process", wait_sec=cfg.PROCESS_VLM_WAIT_SEC
         )
         loop = asyncio.get_running_loop()
         yield WorkflowResources(

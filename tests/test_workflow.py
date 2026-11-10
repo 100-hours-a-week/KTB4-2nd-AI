@@ -629,9 +629,16 @@ async def test_process_handler_runs_workflow(configured, monkeypatch):  # noqa: 
     monkeypatch.setattr(process_handler, "load_tour_raw", lambda path: [])
     monkeypatch.setattr(process_handler, "VllmClient", opened)
     monkeypatch.setattr(process_handler, "KakaoLocalClient", _Opened(FakeKakao()))
-    monkeypatch.setattr(process_handler, "RequestGate", lambda *args: None)
+    gates = []
+
+    def gate(redis, cfg_, kind, wait_sec=None):
+        gates.append((kind, wait_sec))
+
+    monkeypatch.setattr(process_handler, "generation_gate", gate)
     monkeypatch.setattr(process_handler, "GatedVlm", lambda client, gate, timeout: client)
     result = await process_handler.run(process_request(), reporter())
+    # 워크플로우 정리도 정리 슬롯 게이트(기능별 상한, 검색 우선)를 쓴다(#183).
+    assert gates == [("process", cfg.PROCESS_VLM_WAIT_SEC)]
     assert result["places"] == []
     assert [u["trip_attachment_id"] for u in result["unclassified"]] == [101]
     assert opened.args[1]["timeout_sec"] == cfg.PROCESS_WORKFLOW_VLM_TIMEOUT_SEC
