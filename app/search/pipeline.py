@@ -81,7 +81,7 @@ def record_result(order_mode: str, selected: list[SearchHit], **fields) -> None:
 def has_visual_query(request: SearchRequest) -> bool:
     """사진 내용 조건 여부
 
-    BE는 해석 결과에 사진 내용이 없으면 원문 query로 바꿔 보내고, 채점 스크립트는 null을 그대로 보냄
+    BE는 해석 결과에 사진 내용이 없고 날짜와 지역도 없으면 원문 query로 바꿔 보냄
     질의 해석이 시간대 단어만 남긴 경우("저녁")도 내용 없음, 11/4 live T02, T06 대응
     """
     visual_query = (request.visual_query or "").strip()
@@ -90,12 +90,34 @@ def has_visual_query(request: SearchRequest) -> bool:
     return visual_query != request.query.strip()
 
 
+def orders_by_taken_at(request: SearchRequest, words: tuple[str, ...]) -> bool:
+    """임베딩과 컷오프 없이 촬영 시각순으로 반환할 질문 여부, SEARCH만
+
+    visual_query null은 BE가 날짜나 지역 조건만 있는 해석 결과를 그대로 보낸 경우(#173)
+    원문과 같은 visual_query는 해석 실패와 구분되지 않아 시간대 단어가 있을 때만 시각순
+    QUESTION은 근거 사진을 골라야 해서 임베딩 순위 유지
+    """
+    if request.intent != "SEARCH":
+        return False
+    if not (request.visual_query or "").strip():
+        return True
+    return bool(words) and not has_visual_query(request)
+
+
 def order_by_taken_at(candidates: list[SearchCandidate], limit: int) -> list[SearchHit]:
     """사진 내용 조건이 없는 질문의 촬영 시각순 결과
 
     BE가 score 내림차순으로 다시 정렬하므로 score는 순위에 따라 감소하는 값
+    촬영 시각이 없는 사진은 맨 뒤, 지역만 있는 질문은 BE 후보에 섞일 수 있음
     """
-    ordered = sorted(candidates, key=lambda item: (item.taken_at, item.trip_attachment_id))[:limit]
+    ordered = sorted(
+        candidates,
+        key=lambda item: (
+            item.taken_at is None,
+            item.taken_at.timestamp() if item.taken_at else 0.0,
+            item.trip_attachment_id,
+        ),
+    )[:limit]
     return [
         SearchHit(
             trip_attachment_id=item.trip_attachment_id, score=(len(ordered) - rank) / len(ordered)
@@ -124,8 +146,9 @@ async def search(
         )
 
     limit = request.limit if request.intent == "SEARCH" else options.question_k
-    # 시간대만 있는 질문은 원문 임베딩 점수가 정답 여부와 무관해 컷오프가 정답을 버림
-    if words and request.intent == "SEARCH" and not has_visual_query(request):
+    # 날짜, 지역, 시간대만 있는 질문은 BE와 시간대 필터로 좁힌 후보 전체가 정답
+    # 원문 임베딩 점수는 정답 여부와 무관해 컷오프가 정답을 버림
+    if orders_by_taken_at(request, words):
         ordered_by_time = order_by_taken_at(list(candidates.values()), limit)
         record_result("taken_at", ordered_by_time)
         return SearchResponse(attachments=ordered_by_time)

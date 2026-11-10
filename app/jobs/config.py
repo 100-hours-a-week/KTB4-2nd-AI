@@ -3,7 +3,7 @@
 import re
 from typing import Literal, Self
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 
 from app.core.config import Settings
 
@@ -62,6 +62,20 @@ class JobsSettings(Settings):
     STORY_PHASH_MAX_DIST: int = Field(default=4, ge=0, le=64)
     STORY_DEDUPE_Z: float = Field(default=1.0, ge=0, allow_inf_nan=False)
     STORY_MAX_TOKENS: int = Field(default=2048, ge=1)
+    # 스토리 생성 호출 하나의 제한 시간. 사진 확인과 글쓰기를 나눠 부르고 글이 길어져 글쓰기 호출이
+    # 45~57초 걸렸다(11/10 측정, 사진 10장). 검색과 함께 쓰는 VLM_TIMEOUT_SEC(60초)와 따로 둔다.
+    STORY_VLM_TIMEOUT_SEC: float = Field(default=90, gt=0, allow_inf_nan=False)
+    # 같은 장소 블로그 후기에서 경험 메모를 가져와 스토리에 쓴다(app.story.notes).
+    # 기본은 켜짐이고 검색 키가 없으면 메모 없이 쓴다. 제한 시간을 넘긴 장소는 그때까지 뽑은
+    # 메모만 쓴다.
+    STORY_PLACE_NOTES_ENABLED: bool = True
+    STORY_PLACE_NOTES_TIMEOUT_SEC: float = Field(default=60, gt=0, allow_inf_nan=False)
+    STORY_PLACE_NOTES_TTL_SEC: int = Field(default=30 * 86400, gt=0)
+    # 장소 검색은 주 검색이 답하지 못하거나 결과가 없으면 다른 검색을 부른다. 키가 있는 검색만
+    # 쓰고, 결과를 얻지 못하면 그 장소는 메모 없이 쓴다. 빈 값은 기본값으로 본다.
+    STORY_SEARCH_PRIMARY: Literal["tavily", "firecrawl"] = "tavily"
+    TAVILY_API_KEY: SecretStr | None = None
+    FIRECRAWL_API_KEY: SecretStr | None = None
     # 분위기 변경 미리보기(동기 HTTP). 검색처럼 실제 VLM과 S3 URL 발급기를 연결한다.
     # 처리 상한 300초는 위키 계약 값이고, BE 읽기 상한은 320초 이상이다.
     STORY_REWRITE_ENABLED: bool = False
@@ -95,7 +109,7 @@ class JobsSettings(Settings):
     # 정리 작업이 동시에 보내는 생성 호출 수. GPU_GENERATION_INFLIGHT 슬롯을 검색, 스토리와 나눠 씀
     PROCESS_AGENT_CONCURRENCY: int = Field(default=4, ge=1)
     # 정리 작업의 생성 호출 제한 시간과 슬롯 대기
-    # 검색과 스토리의 VLM_TIMEOUT_SEC, GPU_WAIT_SEC와 별개
+    # 검색의 VLM_TIMEOUT_SEC, 스토리의 STORY_VLM_TIMEOUT_SEC, GPU_WAIT_SEC와 별개
     PROCESS_VLM_TIMEOUT_SEC: float = Field(default=180, gt=0, allow_inf_nan=False)
     PROCESS_VLM_WAIT_SEC: float = Field(default=60, gt=0, allow_inf_nan=False)
     # 전송 오류, HTTP 408, 429, 5xx, 호출 시간 초과를 다시 보내는 횟수(n번째는 5×n초 뒤).
@@ -123,6 +137,14 @@ class JobsSettings(Settings):
     PROCESS_WORKFLOW_PHOTO_SEED: int = 61106
     # 격자 칸 번호 글꼴. 비우면 실험 글꼴(Arial Bold), DejaVu Sans Bold, Pillow 기본 글꼴 순
     PROCESS_WORKFLOW_FONT_PATH: str | None = None
+
+    @field_validator("STORY_SEARCH_PRIMARY", mode="before")
+    @classmethod
+    def _search_primary(cls, value):
+        # 예시 파일처럼 빈 값으로 두거나 대문자로 적어도 API와 다른 작업의 시작을 막지 않게 한다.
+        if isinstance(value, str):
+            return value.strip().lower() or "tavily"
+        return value
 
     @model_validator(mode="after")
     def check_jobs_settings(self) -> Self:
@@ -161,6 +183,19 @@ class JobsSettings(Settings):
                 raise ValueError("TOURAPI_RAW_SHA256은 소문자 16진수 64자여야 함")
             if not self.TOURAPI_RAW_PATH:
                 raise ValueError("TOURAPI_RAW_S3_URI를 쓰려면 TOURAPI_RAW_PATH가 필요함")
+        # 장소 메모를 켜면 스토리는 장소 메모, 사진 확인, 글쓰기를 차례로 한다. 셋의 상한을 더한
+        # 값이 작업 제한보다 짧아야 늦은 단계가 작업 강제 종료가 아니라 그 단계의 시간 초과로
+        # 남는다. 생성 호출 하나의 상한은 제한 시간에 슬롯 대기와 호출 여유(5초)를 더한 값이다.
+        # 사진 선별 시간은 넣지 않았다. 장소 메모를 끄거나 검색 키가 없는 배포는 검사하지 않는다.
+        # 장소 메모는 켜져 있고 검색 키가 있을 때만 동작하므로 그때만 검사한다.
+        keys = (self.TAVILY_API_KEY, self.FIRECRAWL_API_KEY)
+        if self.STORY_PLACE_NOTES_ENABLED and any(k and k.get_secret_value().strip() for k in keys):
+            call = self.STORY_VLM_TIMEOUT_SEC + self.GPU_WAIT_SEC + 5
+            if self.STORY_PLACE_NOTES_TIMEOUT_SEC + 2 * call >= self.JOBS_TIMEOUT_SEC:
+                raise ValueError(
+                    "STORY_PLACE_NOTES_TIMEOUT_SEC와 스토리 생성 호출 두 번의 상한을 더한 값은 "
+                    "JOBS_TIMEOUT_SEC보다 짧아야 함"
+                )
         # 에이전트를 끈 배포는 예전 제한 시간과 슬롯 수로도 시작할 수 있게 한다.
         if self.PROCESS_AGENT_ENABLED:
             if self.PROCESS_AGENT_BUDGET_SEC >= self.JOBS_PROCESS_TIMEOUT_SEC:

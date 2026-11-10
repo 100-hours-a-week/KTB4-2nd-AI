@@ -54,7 +54,8 @@ def search_body(intent="SEARCH", count=2):
     return {
         "query": "바다 사진 보여줘",
         "intent": intent,
-        "visual_query": None,
+        # null은 사진 내용 조건 없음이라 SEARCH가 촬영 시각순으로 바뀜(#173), 기본은 임베딩 경로
+        "visual_query": "바다",
         "candidates": [
             {
                 "trip_attachment_id": i + 1,
@@ -319,8 +320,10 @@ async def test_embedding_unavailable_and_query_fallback():
             raise ModelUnavailable("private endpoint")
 
     context = replace(create_mock_context(), embedder=Embedder())
+    # 해석 실패 시 BE가 원문을 visual_query로 보냄
+    body = search_body() | {"visual_query": "바다 사진 보여줘"}
     async with client_for(context) as client:
-        response = await client.post("/query/search", json=search_body())
+        response = await client.post("/query/search", json=body)
         assert response.status_code == 503
         assert response.json()["error"]["code"] == "MODEL_NOT_READY"
         assert "private endpoint" not in response.text
@@ -420,7 +423,7 @@ async def test_question_evidence_is_cutoff_then_top_k():
 
 class UnexpectedEmbedder:
     async def encode_text(self, text):
-        raise AssertionError("시간대만 있는 질문은 임베딩 호출 금지")
+        raise AssertionError("사진 내용 조건이 없는 질문은 임베딩 호출 금지")
 
 
 def timed_body(query, visual_query, hours, intent="SEARCH"):
@@ -431,7 +434,7 @@ def timed_body(query, visual_query, hours, intent="SEARCH"):
     return body
 
 
-# BE는 사진 내용이 없으면 원문을 보내고, 채점 스크립트는 null을 보냄
+# BE는 사진 내용과 날짜, 지역이 모두 없으면 원문을 보내고, 날짜나 지역이 있으면 null을 보냄
 # 질의 해석이 시간대 단어만 남긴 경우도 내용 없음(11/4 live T02 "저녁")
 @pytest.mark.parametrize("visual_query", [None, "아침에 찍은 사진", "아침", "아침에"])
 async def test_time_only_search_returns_time_window_by_taken_at(visual_query):
@@ -454,6 +457,58 @@ async def test_time_only_search_applies_limit_after_ordering():
         response = await client.post("/query/search", json=body)
         returned = [item["trip_attachment_id"] for item in response.json()["attachments"]]
         assert returned == [2, 3]
+
+
+# 날짜, 지역만 있는 질문은 BE가 해석 결과의 null을 그대로 보냄(#173), 시간대 단어 없음
+@pytest.mark.parametrize("visual_query", [None, " "])
+async def test_condition_only_search_returns_candidates_by_taken_at(visual_query):
+    context = replace(create_mock_context(), embedder=UnexpectedEmbedder())
+    body = timed_body("9월 11일 사진 보여줘", visual_query, [19, 8, 13, 7]) | {"limit": 3}
+    async with client_for(context) as client:
+        response = await client.post("/query/search", json=body)
+        assert response.status_code == 200
+        # 컷오프 없이 후보 전체를 이른 시각부터, limit 적용
+        assert response.json()["attachments"] == [
+            {"trip_attachment_id": 4, "score": 1.0},
+            {"trip_attachment_id": 2, "score": 2 / 3},
+            {"trip_attachment_id": 3, "score": 1 / 3},
+        ]
+
+
+async def test_condition_only_search_puts_missing_taken_at_last():
+    # 지역만 있는 질문은 BE 후보에 촬영 시각 없는 사진이 섞일 수 있음
+    context = replace(create_mock_context(), embedder=UnexpectedEmbedder())
+    body = timed_body("용인에서 찍은 사진", None, [None, 13, None, 9])
+    response, fields = await traced_search(body, context)
+
+    assert [hit.trip_attachment_id for hit in response.attachments] == [4, 2, 1, 3]
+    assert fields["order_mode"] == "taken_at"
+    assert "time_words" not in fields
+
+
+async def test_query_echo_without_time_word_keeps_embedding():
+    # 해석 실패, 또는 날짜와 지역도 없는 해석은 BE가 원문을 보냄. 원문 임베딩과 컷오프 유지
+    vectors = FixedVectors([SearchHit(trip_attachment_id=2, score=0.50)])
+    context = replace(create_mock_context(), vectors=vectors)
+    body = timed_body("아지트에서 찍은 사진", "아지트에서 찍은 사진", [19, 8])
+    async with client_for(context) as client:
+        response = await client.post("/query/search", json=body)
+        assert response.status_code == 200
+        assert vectors.candidate_ids == [1, 2]
+        returned = [item["trip_attachment_id"] for item in response.json()["attachments"]]
+        assert returned == [2]
+
+
+async def test_condition_only_question_keeps_embedding():
+    # QUESTION은 근거 사진을 골라야 해서 사진 내용 조건이 없어도 임베딩 순위
+    vectors = FixedVectors([SearchHit(trip_attachment_id=1, score=0.50)])
+    context = replace(create_mock_context(), vectors=vectors)
+    body = timed_body("9월 11일에 뭐 했지?", None, [8, 13], intent="QUESTION")
+    async with client_for(context) as client:
+        response = await client.post("/query/search", json=body)
+        assert response.status_code == 200
+        assert vectors.candidate_ids == [1, 2]
+        assert response.json()["answer"] is not None
 
 
 async def test_time_with_visual_query_embeds_only_time_window():
