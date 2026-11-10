@@ -277,6 +277,7 @@ def test_generation_share_defaults_and_kind_is_checked():
             IMAGE_SOURCE="local",
             GPU_GENERATION_INFLIGHT=1,
             PROCESS_AGENT_CONCURRENCY=1,
+            PROCESS_WORKFLOW_CONCURRENCY=1,
         ).GPU_PROCESS_GENERATION_INFLIGHT
         == 4
     )
