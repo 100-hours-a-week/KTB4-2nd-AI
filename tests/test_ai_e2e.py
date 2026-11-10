@@ -195,11 +195,16 @@ async def test_all_features_use_real_handlers_and_http_clients(tmp_path):
             assert upstream.calls["image_embedding"] == 2
             assert upstream.calls["text_embedding"] == 1
             assert (
-                upstream.calls["parse"] == upstream.calls["story"] == upstream.calls["answer"] == 1
+                upstream.calls["parse"]
+                == upstream.calls["story_perceive"]
+                == upstream.calls["story"]
+                == upstream.calls["answer"]
+                == 1
             )
             # 가짜 임베딩은 모든 사진에 같은 벡터를 주므로 스토리는 두 사진을 같은 장면으로 보고
-            # 한 장만 읽는다. 질문 답변은 두 장을 읽는다.
-            assert upstream.calls["vlm_image_read"] == 3
+            # 한 장만 고른다. 스토리는 사진 확인과 집필에서 그 한 장을 두 번 읽고, 질문 답변은
+            # 두 장을 읽는다.
+            assert upstream.calls["vlm_image_read"] == 4
             assert upstream.calls["upsert"] and upstream.calls["fetch_vectors"]
             report.update(
                 real_redis=True,
