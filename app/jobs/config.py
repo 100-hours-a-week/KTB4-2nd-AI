@@ -66,8 +66,9 @@ class JobsSettings(Settings):
     # 45~57초 걸렸다(11/10 측정, 사진 10장). 검색과 함께 쓰는 VLM_TIMEOUT_SEC(60초)와 따로 둔다.
     STORY_VLM_TIMEOUT_SEC: float = Field(default=90, gt=0, allow_inf_nan=False)
     # 같은 장소 블로그 후기에서 경험 메모를 가져와 스토리에 쓴다(app.story.notes).
-    # 검색 키가 없으면 켜도 메모 없이 쓴다. 제한 시간을 넘긴 장소는 그때까지 뽑은 메모만 쓴다.
-    STORY_PLACE_NOTES_ENABLED: bool = False
+    # 기본은 켜짐이고 검색 키가 없으면 메모 없이 쓴다. 제한 시간을 넘긴 장소는 그때까지 뽑은
+    # 메모만 쓴다.
+    STORY_PLACE_NOTES_ENABLED: bool = True
     STORY_PLACE_NOTES_TIMEOUT_SEC: float = Field(default=60, gt=0, allow_inf_nan=False)
     STORY_PLACE_NOTES_TTL_SEC: int = Field(default=30 * 86400, gt=0)
     # 장소 검색은 주 검색이 답하지 못하거나 결과가 없으면 다른 검색을 부른다. 키가 있는 검색만
@@ -156,8 +157,10 @@ class JobsSettings(Settings):
         # 장소 메모를 켜면 스토리는 장소 메모, 사진 확인, 글쓰기를 차례로 한다. 셋의 상한을 더한
         # 값이 작업 제한보다 짧아야 늦은 단계가 작업 강제 종료가 아니라 그 단계의 시간 초과로
         # 남는다. 생성 호출 하나의 상한은 제한 시간에 슬롯 대기와 호출 여유(5초)를 더한 값이다.
-        # 사진 선별 시간은 넣지 않았다. 장소 메모를 끈 배포는 이전처럼 검사하지 않는다.
-        if self.STORY_PLACE_NOTES_ENABLED:
+        # 사진 선별 시간은 넣지 않았다. 장소 메모를 끄거나 검색 키가 없는 배포는 검사하지 않는다.
+        # 장소 메모는 켜져 있고 검색 키가 있을 때만 동작하므로 그때만 검사한다.
+        keys = (self.TAVILY_API_KEY, self.FIRECRAWL_API_KEY)
+        if self.STORY_PLACE_NOTES_ENABLED and any(k and k.get_secret_value().strip() for k in keys):
             call = self.STORY_VLM_TIMEOUT_SEC + self.GPU_WAIT_SEC + 5
             if self.STORY_PLACE_NOTES_TIMEOUT_SEC + 2 * call >= self.JOBS_TIMEOUT_SEC:
                 raise ValueError(

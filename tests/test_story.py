@@ -750,7 +750,7 @@ TWO_KEYS = {"TAVILY_API_KEY": "search-key", "FIRECRAWL_API_KEY": "fire-key"}
     [
         ({}, None),
         (NOTES_ON, None),
-        (TWO_KEYS, None),
+        ({**TWO_KEYS, "STORY_PLACE_NOTES_ENABLED": False}, None),
         ({**NOTES_ON, "TAVILY_API_KEY": " ", "FIRECRAWL_API_KEY": ""}, None),
         ({**NOTES_ON, "TAVILY_API_KEY": "search-key"}, [TAVILY]),
         ({**NOTES_ON, "FIRECRAWL_API_KEY": " fire-key "}, [FIRECRAWL]),
@@ -857,6 +857,8 @@ def test_story_step_time_limits_must_fit_in_the_job_time_limit():
     from app.jobs.config import JobsSettings
 
     def settings(**changes):
+        # 검사는 장소 메모가 실제로 동작하는 설정(켜짐, 검색 키 있음)에서만 한다.
+        changes = {"TAVILY_API_KEY": "k", **changes}
         return JobsSettings(_env_file=None, API_KEY="test", IMAGE_SOURCE="local", **changes)
 
     assert settings(STORY_PLACE_NOTES_ENABLED=True).STORY_VLM_TIMEOUT_SEC == 90
@@ -871,8 +873,14 @@ def test_story_step_time_limits_must_fit_in_the_job_time_limit():
     assert settings(STORY_PLACE_NOTES_ENABLED=True, STORY_VLM_TIMEOUT_SEC=112.9)
     with pytest.raises(ValidationError):
         settings(STORY_PLACE_NOTES_ENABLED=True, STORY_VLM_TIMEOUT_SEC=110, GPU_WAIT_SEC=5)
-    # 장소 메모를 끈 배포는 이전처럼 짧은 작업 제한으로도 시작할 수 있다.
-    assert settings(JOBS_TIMEOUT_SEC=10).JOBS_TIMEOUT_SEC == 10
+    # 장소 메모는 기본으로 켜져 있다. 끄거나 검색 키가 없는 배포는 이전처럼 짧은 작업 제한으로도
+    # 시작할 수 있다.
+    assert settings().STORY_PLACE_NOTES_ENABLED is True
+    assert settings(JOBS_TIMEOUT_SEC=10, TAVILY_API_KEY=None).JOBS_TIMEOUT_SEC == 10
+    assert settings(JOBS_TIMEOUT_SEC=10, TAVILY_API_KEY=" ").JOBS_TIMEOUT_SEC == 10
+    assert settings(JOBS_TIMEOUT_SEC=10, STORY_PLACE_NOTES_ENABLED=False, TAVILY_API_KEY="k")
+    with pytest.raises(ValidationError):
+        settings(JOBS_TIMEOUT_SEC=10, TAVILY_API_KEY=None, FIRECRAWL_API_KEY="k")
 
 
 @scenario
