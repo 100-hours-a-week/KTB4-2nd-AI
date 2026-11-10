@@ -670,13 +670,99 @@ async def test_invalid_photo_notes_are_skipped_without_failing_the_story(notes, 
     assert len(events(caplog, "ai_story_perceive_invalid")) == 1
 
 
+class Notes:
+    def __init__(self, found=None, fault=None):
+        self.found, self.fault, self.asked = found or {}, fault, None
+
+    async def notes_for(self, places):
+        self.asked = places
+        if self.fault:
+            raise self.fault
+        return self.found
+
+
 @scenario
-async def test_handler_uses_story_call_timeout(monkeypatch):
+async def test_place_notes_are_passed_to_the_writing_call_only():
+    original = context()
+    notes = Notes({5001: ["셔틀을 타고 올라감", "맛은 평범했음"], 5002: [], 9999: ["없는 장소"]})
+    ctx = StoryContext(original.images, original.vectors, original.urls, original.vlm, notes)
+    await run(request_two_places(), AsyncMock(), ctx, StoryOptions())
+    assert [name for _, name in notes.asked] == ["해변", "공원"]
+    first, second = ctx.vlm.chat.call_args_list
+    assert "place_notes" not in json.loads(first.args[0][-1]["content"][-1]["text"])
+    data = json.loads(second.args[0][-1]["content"][-1]["text"])
+    # 메모가 빈 장소와 요청에 없는 장소는 넣지 않는다.
+    assert data["place_notes"] == [
+        {
+            "trip_place_id": 5001,
+            "place_name": "해변",
+            "notes": ["셔틀을 타고 올라감", "맛은 평범했음"],
+        }
+    ]
+
+
+@scenario
+async def test_place_notes_failure_does_not_fail_the_story(caplog):
+    original = context()
+    notes = Notes(fault=RuntimeError("secret search key"))
+    ctx = StoryContext(original.images, original.vectors, original.urls, original.vlm, notes)
+    caplog.set_level(logging.WARNING)
+    result = await run(request_two_places(), AsyncMock(), ctx, StoryOptions())
+    assert len(result["blocks"]) == 2
+    failed = events(caplog, "ai_story_place_notes_failed")
+    # 예외의 문구는 로그의 어느 칸에도 남기지 않는다.
+    assert len(failed) == 1 and "secret" not in str(failed[0].__dict__)
+    assert failed[0].error_type == "RuntimeError"
+
+
+@pytest.mark.parametrize("after,calls", [("place_notes", 0), ("photo_notes", 1)])
+@scenario
+async def test_cancel_between_writing_steps_stops_before_the_next_call(after, calls):
+    original, reporter = context(), AsyncMock()
+
+    class Cancelling(Notes):
+        async def notes_for(self, places):
+            if after == "place_notes":
+                reporter.check_cancel.side_effect = PipelineCancelled()
+            return {}
+
+    normal = respond()
+
+    async def chat(messages, urls, max_tokens, response_format=None, **kwargs):
+        if response_format["json_schema"]["name"] == after:
+            reporter.check_cancel.side_effect = PipelineCancelled()
+        return await normal(messages, urls, max_tokens, response_format, **kwargs)
+
+    original.vlm.chat.side_effect = chat
+    ctx = StoryContext(original.images, original.vectors, original.urls, original.vlm, Cancelling())
+    with pytest.raises(PipelineCancelled):
+        await run(request_two_places(), reporter, ctx, StoryOptions())
+    assert original.vlm.chat.await_count == calls
+
+
+@pytest.mark.parametrize(
+    "changes,built",
+    [
+        ({}, False),
+        ({"STORY_PLACE_NOTES_ENABLED": True}, False),
+        ({"TAVILY_API_KEY": "search-key"}, False),
+        ({"STORY_PLACE_NOTES_ENABLED": True, "TAVILY_API_KEY": " "}, False),
+        ({"STORY_PLACE_NOTES_ENABLED": True, "TAVILY_API_KEY": "search-key"}, True),
+    ],
+    ids=["default", "no_key", "disabled", "blank_key", "enabled"],
+)
+@scenario
+async def test_handler_builds_place_notes_only_with_setting_and_key(changes, built, monkeypatch):
     from app.jobs.config import JobsSettings
     from app.story import handler
 
     cfg = JobsSettings(
-        _env_file=None, API_KEY="test", IMAGE_SOURCE="local", STORY_VLM_TIMEOUT_SEC=77
+        _env_file=None,
+        API_KEY="test",
+        IMAGE_SOURCE="local",
+        STORY_PLACE_NOTES_TIMEOUT_SEC=12,
+        STORY_VLM_TIMEOUT_SEC=77,
+        **changes,
     )
     seen, pipeline, reporter = [], AsyncMock(return_value={}), AsyncMock()
 
@@ -693,6 +779,42 @@ async def test_handler_uses_story_call_timeout(monkeypatch):
     ctx = pipeline.call_args.args[2]
     # 스토리의 생성 호출은 검색과 다른 제한 시간을 쓴다.
     assert seen == [77] and ctx.vlm.timeout_sec == 77
+    assert (ctx.notes is not None) == built
+    if built:
+        notes = ctx.notes
+        assert notes.api_key == "search-key" and notes.timeout_sec == 12
+        assert notes.vlm is ctx.vlm and notes.redis is reporter.store.redis
+        assert (
+            notes.key_prefix == cfg.redis_prefix and notes.ttl_sec == cfg.STORY_PLACE_NOTES_TTL_SEC
+        )
+        # 블로그 글을 받는 클라이언트는 리디렉션을 따르지 않고, 실행이 끝나면 닫힌다.
+        assert notes.http.follow_redirects is False and notes.http.is_closed
+        # 환경 변수의 프록시 설정을 쓰지 않는다.
+        assert notes.http.trust_env is False
+
+
+def test_story_step_time_limits_must_fit_in_the_job_time_limit():
+    from pydantic import ValidationError
+
+    from app.jobs.config import JobsSettings
+
+    def settings(**changes):
+        return JobsSettings(_env_file=None, API_KEY="test", IMAGE_SOURCE="local", **changes)
+
+    assert settings(STORY_PLACE_NOTES_ENABLED=True).STORY_VLM_TIMEOUT_SEC == 90
+    with pytest.raises(ValidationError):
+        settings(STORY_PLACE_NOTES_ENABLED=True, STORY_PLACE_NOTES_TIMEOUT_SEC=150)
+    with pytest.raises(ValidationError):
+        settings(STORY_PLACE_NOTES_ENABLED=True, STORY_VLM_TIMEOUT_SEC=120)
+    # 생성 호출 하나의 상한은 제한 시간 + 슬롯 대기(2초) + 여유(5초)다.
+    # 60 + 2 × (113 + 7) = 300은 거부한다.
+    with pytest.raises(ValidationError):
+        settings(STORY_PLACE_NOTES_ENABLED=True, STORY_VLM_TIMEOUT_SEC=113)
+    assert settings(STORY_PLACE_NOTES_ENABLED=True, STORY_VLM_TIMEOUT_SEC=112.9)
+    with pytest.raises(ValidationError):
+        settings(STORY_PLACE_NOTES_ENABLED=True, STORY_VLM_TIMEOUT_SEC=110, GPU_WAIT_SEC=5)
+    # 장소 메모를 끈 배포는 이전처럼 짧은 작업 제한으로도 시작할 수 있다.
+    assert settings(JOBS_TIMEOUT_SEC=10).JOBS_TIMEOUT_SEC == 10
 
 
 @scenario

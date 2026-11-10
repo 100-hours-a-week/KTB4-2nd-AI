@@ -2,6 +2,8 @@
 
 from contextlib import AsyncExitStack, contextmanager
 
+import httpx
+
 from app.embedding.client import DIM, MODEL_VERSION
 from app.infra.image_resolver import S3ImageResolver
 from app.infra.qdrant import AsyncQdrantVectors
@@ -9,6 +11,7 @@ from app.infra.vllm_client import VllmClient
 from app.jobs.config import JobsSettings
 from app.jobs.gpu_requests import generation_client
 from app.pipeline.bootstrap import build_images
+from app.story.notes import BlogPlaceNotes
 from app.story.pipeline import StoryContext, StoryOptions, validate_request
 from app.story.pipeline import run as run_pipeline
 
@@ -46,10 +49,30 @@ async def run(request: dict, reporter) -> dict:
         resources.push_async_callback(vectors.aclose)
         urls = await S3ImageResolver.create(cfg)
         resources.push_async_callback(urls.aclose)
+        gated = generation_client(vlm, reporter.store.redis, cfg, timeout_sec=call_timeout)
+        notes = None
+        # 예시 파일처럼 빈 값으로 둔 키는 없는 것으로 본다.
+        search_key = cfg.TAVILY_API_KEY.get_secret_value().strip() if cfg.TAVILY_API_KEY else ""
+        if cfg.STORY_PLACE_NOTES_ENABLED and search_key:
+            # 블로그 글을 받는 클라이언트는 리디렉션을 따르지 않고, 환경 변수의 프록시 설정도
+            # 쓰지 않는다.
+            http = await resources.enter_async_context(
+                httpx.AsyncClient(follow_redirects=False, trust_env=False)
+            )
+            notes = BlogPlaceNotes(
+                http,
+                gated,
+                reporter.store.redis,
+                search_key,
+                key_prefix=cfg.redis_prefix,
+                timeout_sec=cfg.STORY_PLACE_NOTES_TIMEOUT_SEC,
+                ttl_sec=cfg.STORY_PLACE_NOTES_TTL_SEC,
+            )
         ctx = StoryContext(
             images=lambda: image_source(cfg),
             vectors=vectors,
             urls=urls,
-            vlm=generation_client(vlm, reporter.store.redis, cfg, timeout_sec=call_timeout),
+            vlm=gated,
+            notes=notes,
         )
         return await run_pipeline(request, reporter, ctx, options)

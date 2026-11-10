@@ -65,6 +65,12 @@ class JobsSettings(Settings):
     # 스토리 생성 호출 하나의 제한 시간. 사진 확인과 글쓰기를 나눠 부르고 글이 길어져 글쓰기 호출이
     # 45~57초 걸렸다(11/10 측정, 사진 10장). 검색과 함께 쓰는 VLM_TIMEOUT_SEC(60초)와 따로 둔다.
     STORY_VLM_TIMEOUT_SEC: float = Field(default=90, gt=0, allow_inf_nan=False)
+    # 같은 장소 블로그 후기에서 경험 메모를 가져와 스토리에 쓴다(app.story.notes).
+    # 검색 키가 없으면 켜도 메모 없이 쓴다. 제한 시간을 넘긴 장소는 그때까지 뽑은 메모만 쓴다.
+    STORY_PLACE_NOTES_ENABLED: bool = False
+    STORY_PLACE_NOTES_TIMEOUT_SEC: float = Field(default=60, gt=0, allow_inf_nan=False)
+    STORY_PLACE_NOTES_TTL_SEC: int = Field(default=30 * 86400, gt=0)
+    TAVILY_API_KEY: SecretStr | None = None
     # 분위기 변경 미리보기(동기 HTTP). 검색처럼 실제 VLM과 S3 URL 발급기를 연결한다.
     # 처리 상한 300초는 위키 계약 값이고, BE 읽기 상한은 320초 이상이다.
     STORY_REWRITE_ENABLED: bool = False
@@ -135,6 +141,17 @@ class JobsSettings(Settings):
                 raise ValueError("PLACE_INDEX_SHA256은 소문자 16진수 64자여야 함")
             if not self.PLACE_INDEX_PATH:
                 raise ValueError("PLACE_INDEX_S3_URI를 쓰려면 PLACE_INDEX_PATH가 필요함")
+        # 장소 메모를 켜면 스토리는 장소 메모, 사진 확인, 글쓰기를 차례로 한다. 셋의 상한을 더한
+        # 값이 작업 제한보다 짧아야 늦은 단계가 작업 강제 종료가 아니라 그 단계의 시간 초과로
+        # 남는다. 생성 호출 하나의 상한은 제한 시간에 슬롯 대기와 호출 여유(5초)를 더한 값이다.
+        # 사진 선별 시간은 넣지 않았다. 장소 메모를 끈 배포는 이전처럼 검사하지 않는다.
+        if self.STORY_PLACE_NOTES_ENABLED:
+            call = self.STORY_VLM_TIMEOUT_SEC + self.GPU_WAIT_SEC + 5
+            if self.STORY_PLACE_NOTES_TIMEOUT_SEC + 2 * call >= self.JOBS_TIMEOUT_SEC:
+                raise ValueError(
+                    "STORY_PLACE_NOTES_TIMEOUT_SEC와 스토리 생성 호출 두 번의 상한을 더한 값은 "
+                    "JOBS_TIMEOUT_SEC보다 짧아야 함"
+                )
         # 에이전트를 끈 배포는 예전 제한 시간과 슬롯 수로도 시작할 수 있게 한다.
         if self.PROCESS_AGENT_ENABLED:
             if self.PROCESS_AGENT_BUDGET_SEC >= self.JOBS_PROCESS_TIMEOUT_SEC:
