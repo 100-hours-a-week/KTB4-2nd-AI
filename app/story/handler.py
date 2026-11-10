@@ -26,6 +26,19 @@ def image_source(cfg):
             close()
 
 
+def place_searches(cfg) -> list[tuple[str, str]]:
+    """장소 검색 제공자와 키를 부를 순서대로 돌려준다. 주 검색이 앞이고 키가 없는 검색은 뺀다."""
+    keys = {"tavily": cfg.TAVILY_API_KEY, "firecrawl": cfg.FIRECRAWL_API_KEY}
+    order = sorted(keys, key=lambda provider: provider != cfg.STORY_SEARCH_PRIMARY)
+    # 예시 파일처럼 빈 값으로 둔 키는 없는 것으로 본다.
+    found = [
+        (provider, keys[provider].get_secret_value().strip())
+        for provider in order
+        if keys[provider]
+    ]
+    return [(provider, key) for provider, key in found if key]
+
+
 async def run(request: dict, reporter) -> dict:
     validate_request(request)
     cfg = JobsSettings()
@@ -51,9 +64,8 @@ async def run(request: dict, reporter) -> dict:
         resources.push_async_callback(urls.aclose)
         gated = generation_client(vlm, reporter.store.redis, cfg, timeout_sec=call_timeout)
         notes = None
-        # 예시 파일처럼 빈 값으로 둔 키는 없는 것으로 본다.
-        search_key = cfg.TAVILY_API_KEY.get_secret_value().strip() if cfg.TAVILY_API_KEY else ""
-        if cfg.STORY_PLACE_NOTES_ENABLED and search_key:
+        searches = place_searches(cfg)
+        if cfg.STORY_PLACE_NOTES_ENABLED and searches:
             # 블로그 글을 받는 클라이언트는 리디렉션을 따르지 않고, 환경 변수의 프록시 설정도
             # 쓰지 않는다.
             http = await resources.enter_async_context(
@@ -63,7 +75,7 @@ async def run(request: dict, reporter) -> dict:
                 http,
                 gated,
                 reporter.store.redis,
-                search_key,
+                searches,
                 key_prefix=cfg.redis_prefix,
                 timeout_sec=cfg.STORY_PLACE_NOTES_TIMEOUT_SEC,
                 ttl_sec=cfg.STORY_PLACE_NOTES_TTL_SEC,

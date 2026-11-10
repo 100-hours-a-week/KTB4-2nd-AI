@@ -4,6 +4,10 @@
 그 장소를 직접 다녀온 후기인지 판단하고, 후기이면 겪은 일을 짧은 메모로 뽑는다. 메모는 Redis에
 두어 같은 장소를 다시 찾지 않는다. 원문은 모델에 준 뒤 버리고 저장하지 않는다.
 
+검색은 주 검색이 답하지 못하거나(오류, 시간 초과, 호출 한도, 형식이 다른 답) 결과가 0건이면
+보조 검색을 부른다(스토리 트랙 결정 126번). 검색에서는 주소 목록만 받고 페이지 본문은 요청하지
+않는다.
+
 메모는 스토리의 보조 자료이므로 여기서 난 실패(검색, 받기, 요약, 저장)는 그 장소의 빈 결과가 된다.
 후기가 없어서 빈 결과이면 하루 동안 저장하고, 잠깐의 실패로 빈 결과이면 저장하지 않아 다음에 다시
 찾는다.
@@ -33,7 +37,9 @@ from app.core.logging import get_logger
 
 log = get_logger(__name__)
 
-SEARCH_URL = "https://api.tavily.com/search"
+TAVILY_URL = "https://api.tavily.com/search"
+FIRECRAWL_URL = "https://api.firecrawl.dev/v2/search"
+SEARCH_TIME_SEC = 15
 # robots.txt에서 이 크롤러를 가리키는 이름과, 요청에 붙이는 User-Agent
 ROBOT_NAME = "yeodam-story"
 USER_AGENT = f"Mozilla/5.0 (compatible; {ROBOT_NAME}/0.1)"
@@ -54,6 +60,33 @@ AI_BOTS = (
     "PerplexityBot Applebot-Extended cohere-ai Meta-ExternalAgent Amazonbot Diffbot omgili "
     "OAI-SearchBot Claude-SearchBot Claude-User Perplexity-User"
 ).split()
+# 검색 제공자: (주소, 검색어로 요청 본문을 만드는 함수, 답에서 결과 목록을 꺼내는 함수).
+# 결과에서는 url 칸만 쓴다. Firecrawl에는 scrapeOptions를 주지 않아 페이지 본문을 받지 않는다.
+SEARCHES = {
+    "tavily": (
+        TAVILY_URL,
+        lambda query: {
+            "query": query,
+            "search_depth": "basic",
+            "max_results": 10,
+            "exclude_domains": EXCLUDE,
+        },
+        lambda body: body.get("results"),
+    ),
+    "firecrawl": (
+        FIRECRAWL_URL,
+        lambda query: {
+            "query": query,
+            "limit": 10,
+            "country": "KR",
+            "sources": ["web"],
+            "excludeDomains": EXCLUDE,
+            # 이쪽에서 기다리기를 그만둔 뒤에도 서버가 검색을 이어 가지 않게 한다(밀리초).
+            "timeout": SEARCH_TIME_SEC * 1000,
+        },
+        lambda body: None if body.get("success") is False else body.get("data").get("web"),
+    ),
+}
 INTERNAL_SUFFIXES = (".local", ".localhost", ".internal", ".lan", ".home", ".corp", ".test")
 MIN_CHARS = 300
 WINDOW_CHARS = 1500
@@ -465,6 +498,9 @@ async def resolve_host(host: str) -> list[str]:
 class BlogPlaceNotes:
     """notes_for(places)로 장소 ID별 경험 메모를 돌려준다. 메모가 없는 장소는 결과에서 뺀다.
 
+    searches는 부를 순서대로 적은 (검색 제공자 이름, 키)의 목록이다. 첫째가 주 검색이고 나머지는
+    앞의 검색이 답하지 못하거나 결과가 0건일 때 부르는 보조 검색이다.
+
     한 번에 장소 concurrency곳을 찾고, 요약 호출은 model_concurrency개씩만 보낸다. 요약 호출은
     스토리와 검색, 정리 작업이 함께 쓰는 생성 호출 한도를 쓰므로 스토리 하나가 여러 개를 동시에
     보내면 다른 작업의 호출이 거절된다.
@@ -475,7 +511,7 @@ class BlogPlaceNotes:
         http: httpx.AsyncClient,
         vlm,
         redis,
-        api_key: str,
+        searches: list[tuple[str, str]],
         *,
         key_prefix: str = "",
         timeout_sec: float = 60.0,
@@ -487,7 +523,9 @@ class BlogPlaceNotes:
         max_tokens: int = 700,
         resolve=resolve_host,
     ):
-        self.http, self.vlm, self.redis, self.api_key = http, vlm, redis, api_key
+        if not searches or any(provider not in SEARCHES for provider, _ in searches):
+            raise ValueError("searches는 tavily나 firecrawl과 그 키를 하나 이상 적어야 합니다.")
+        self.http, self.vlm, self.redis, self.searches = http, vlm, redis, list(searches)
         self.key_prefix, self.timeout_sec, self.ttl_sec = key_prefix, timeout_sec, ttl_sec
         self.max_posts, self.max_tries, self.max_tokens = max_posts, max_tries, max_tokens
         self.resolve = resolve
@@ -495,6 +533,8 @@ class BlogPlaceNotes:
         self._model = asyncio.Semaphore(model_concurrency)
         self._hosts: dict[str, Robots | None] = {}
         self._down: set[str] = set()
+        self._search_silent: set[str] = set()
+        self._search_logged: set[tuple[str, str]] = set()
         self._locks: dict[str, asyncio.Lock] = {}
         self._partial: dict[str, tuple[list[str], list[str]]] = {}
         self.stats: Counter = Counter()
@@ -507,6 +547,8 @@ class BlogPlaceNotes:
             return {}
         self.stats = Counter()
         self._partial = {}
+        self._search_silent = set()
+        self._search_logged = set()
         started = time.monotonic()
         try:
             _, pending = await asyncio.wait(tasks.values(), timeout=self.timeout_sec)
@@ -536,6 +578,7 @@ class BlogPlaceNotes:
                 "places": len(tasks),
                 "places_with_notes": len(by_name),
                 "timed_out": len(pending),
+                "searches": ",".join(provider for provider, _ in self.searches),
                 # 실패의 종류별 횟수. 주소와 본문, 검색어는 남기지 않는다.
                 **{name: self.stats[name] for name in STAT_NAMES},
                 "elapsed_ms": round((time.monotonic() - started) * 1000),
@@ -623,26 +666,74 @@ class BlogPlaceNotes:
         return notes[:MAX_NOTES], sources, settled
 
     async def _search(self, name: str) -> list:
+        """검색 제공자를 순서대로 불러 처음 받은 결과 목록을 돌려준다.
+
+        답하지 못했거나 결과가 0건인 제공자 다음에는 다음 제공자를 부른다. 빈 목록(후기가 없는
+        장소)은 모든 제공자가 0건이라고 답했을 때만 돌려주고, 결과가 없는데 답하지 못한 제공자가
+        하나라도 있으면 Transient다.
+
+        이번 실행에서 시간 초과가 난 제공자는 이 실행에서 다시 부르지 않는다. 응답이 없는 검색을
+        장소마다 기다리지 않게 하려는 것이며, 빨리 끝나는 실패(상태 코드, 형식)에는 적용하지 않는다.
+        """
+        failed = False
+        for provider, key in self.searches:
+            if provider in self._search_silent:
+                failed = True
+                continue
+            try:
+                results = await self._ask(provider, key, name)
+            except Transient as failure:
+                failed = True
+                reason = str(failure)
+                self.stats[f"{provider}_failed"] += 1
+                if reason == "timeout":
+                    self._search_silent.add(provider)
+                if (provider, reason) not in self._search_logged:
+                    self._search_logged.add((provider, reason))
+                    # 호출 한도나 크레딧 소진을 알아볼 수 있게 제공자와 실패의 종류만 남긴다.
+                    # 한 실행에서 같은 종류는 한 번만 남기고, 검색어와 키는 남기지 않는다.
+                    log.warning(
+                        "장소 검색이 답하지 못했습니다.",
+                        extra={
+                            "event": "ai_story_place_search_failed",
+                            "provider": provider,
+                            "reason": reason,
+                        },
+                    )
+                continue
+            if results:
+                if provider != self.searches[0][0]:
+                    self.stats["search_backup"] += 1
+                return results
+        if failed:
+            raise Transient
+        return []
+
+    async def _ask(self, provider: str, key: str, name: str) -> list:
+        """검색 하나를 부른다. 답하지 못하면 실패의 종류를 적은 Transient다."""
+        url, request, results_of = SEARCHES[provider]
         try:
-            response = await self.http.post(
-                SEARCH_URL,
-                json={
-                    "query": f"{name} 후기",
-                    "search_depth": "basic",
-                    "max_results": 10,
-                    "exclude_domains": EXCLUDE,
-                },
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                timeout=15,
-            )
-            if response.status_code != 200:
-                raise Transient
-            results = response.json().get("results")
-        except (httpx.HTTPError, httpx.InvalidURL, ValueError, AttributeError):
-            raise Transient from None
+            # httpx의 제한 시간은 연결, 쓰기, 읽기 각각의 값이라 요청 전체의 상한을 따로 둔다.
+            async with asyncio.timeout(SEARCH_TIME_SEC):
+                response = await self.http.post(
+                    url,
+                    json=request(f"{name} 후기"),
+                    headers={"Authorization": f"Bearer {key}"},
+                    timeout=SEARCH_TIME_SEC,
+                )
+        except (TimeoutError, httpx.TimeoutException):
+            raise Transient("timeout") from None
+        except Exception as error:  # 예상하지 못한 오류도 이 검색의 실패로 보고 다음 검색을 부른다
+            raise Transient(type(error).__name__) from None
+        if response.status_code != 200:
+            raise Transient(f"http_{response.status_code}")
+        try:
+            results = results_of(response.json())
+        except Exception:
+            raise Transient("malformed") from None
         # 200으로 온 오류 본문처럼 결과 목록이 없는 답은 후기가 없다는 뜻이 아니다.
         if not isinstance(results, list):
-            raise Transient
+            raise Transient("malformed")
         return results
 
     async def _get(self, url: str, limit: int, html: bool = False) -> tuple[int, str, bytes] | None:
@@ -787,6 +878,9 @@ STAT_NAMES = (
     "cache_hit",
     "cache_failed",
     "search_failed",
+    "search_backup",
+    "tavily_failed",
+    "firecrawl_failed",
     "fetch_failed",
     "summary_failed",
     "summary_invalid",

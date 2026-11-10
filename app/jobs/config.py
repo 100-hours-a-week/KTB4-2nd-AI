@@ -3,7 +3,7 @@
 import re
 from typing import Literal, Self
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 
 from app.core.config import Settings
 
@@ -70,7 +70,11 @@ class JobsSettings(Settings):
     STORY_PLACE_NOTES_ENABLED: bool = False
     STORY_PLACE_NOTES_TIMEOUT_SEC: float = Field(default=60, gt=0, allow_inf_nan=False)
     STORY_PLACE_NOTES_TTL_SEC: int = Field(default=30 * 86400, gt=0)
+    # 장소 검색은 주 검색이 답하지 못하거나 결과가 없으면 다른 검색을 부른다. 키가 있는 검색만
+    # 쓰고, 둘 다 답하지 못하면 그 장소는 메모 없이 쓴다. 빈 값은 기본값으로 본다.
+    STORY_SEARCH_PRIMARY: Literal["tavily", "firecrawl"] = "tavily"
     TAVILY_API_KEY: SecretStr | None = None
+    FIRECRAWL_API_KEY: SecretStr | None = None
     # 분위기 변경 미리보기(동기 HTTP). 검색처럼 실제 VLM과 S3 URL 발급기를 연결한다.
     # 처리 상한 300초는 위키 계약 값이고, BE 읽기 상한은 320초 이상이다.
     STORY_REWRITE_ENABLED: bool = False
@@ -110,6 +114,14 @@ class JobsSettings(Settings):
     # 전송 오류, HTTP 408, 429, 5xx, 호출 시간 초과를 다시 보내는 횟수(n번째는 5×n초 뒤).
     # 넘으면 작업 실패. 불완전 응답과 슬롯 대기 초과는 다시 보내지 않음(결정 159)
     PROCESS_VLM_RETRIES: int = Field(default=3, ge=0, le=5)
+
+    @field_validator("STORY_SEARCH_PRIMARY", mode="before")
+    @classmethod
+    def _search_primary(cls, value):
+        # 예시 파일처럼 빈 값으로 두거나 대문자로 적어도 API와 다른 작업의 시작을 막지 않게 한다.
+        if isinstance(value, str):
+            return value.strip().lower() or "tavily"
+        return value
 
     @model_validator(mode="after")
     def check_jobs_settings(self) -> Self:

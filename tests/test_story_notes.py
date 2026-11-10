@@ -16,14 +16,15 @@ from app.infra.vlm import ChatTurn, VLMUnavailable
 from app.story import notes as notes_module
 from app.story.notes import (
     AI_BOTS,
+    FIRECRAWL_URL,
     MAX_NOTES,
     MAX_PAGE_BYTES,
     MAX_TITLE_CHARS,
     MAX_URL_CHARS,
     NEGATIVE_TTL_SEC,
-    SEARCH_URL,
     SUMMARY_FORMAT,
     SUMMARY_SYSTEM,
+    TAVILY_URL,
     WINDOW_CHARS,
     BlogPlaceNotes,
     PostNotes,
@@ -42,6 +43,9 @@ from app.story.notes import (
 from tests.test_v2_jobs import scenario
 
 ROBOT = notes_module.ROBOT_NAME
+# 따로 적지 않은 테스트는 Tavily 하나만 쓰는 설정이다.
+SEARCH_URL = TAVILY_URL
+BOTH = [("tavily", "t-key"), ("firecrawl", "f-key")]
 
 BODY = "화암동굴에 다녀왔다. " + "모노레일을 타고 입구까지 올라갔고 계단이 많았다. " * 20
 HTML = {"content-type": "text/html; charset=utf-8"}
@@ -79,8 +83,16 @@ class Reply:
         return httpx.Response(self.status, stream=self.stream or Raw([body]), headers=self.headers)
 
 
-def web(results, pages, robots=None, seen=None, search=None):
-    """검색 결과와 페이지를 돌려주는 가짜 웹. robots는 호스트별 robots.txt 본문이나 Reply다."""
+def fire(urls):
+    """Firecrawl 검색의 답 형식."""
+    return httpx.Response(200, json={"success": True, "data": {"web": [{"url": u} for u in urls]}})
+
+
+def web(results, pages, robots=None, seen=None, search=None, backup=None):
+    """검색 결과와 페이지를 돌려주는 가짜 웹. robots는 호스트별 robots.txt 본문이나 Reply다.
+
+    search는 Tavily, backup은 Firecrawl 검색의 답을 바꾼다. 주지 않으면 둘 다 results를 돌려준다.
+    """
 
     def handle(request):
         if seen is not None:
@@ -89,6 +101,8 @@ def web(results, pages, robots=None, seen=None, search=None):
             if search is not None:
                 return search(request)
             return httpx.Response(200, json={"results": [{"url": u} for u in results]})
+        if str(request.url) == FIRECRAWL_URL:
+            return backup(request) if backup is not None else fire(results)
         if request.url.path == "/robots.txt":
             found = robots.get(request.url.host) if robots is not None else None
             found = Reply(404) if found is None else found
@@ -130,7 +144,8 @@ async def public(host):
 
 def provider(http, vlm, redis=None, **options):
     options.setdefault("resolve", public)
-    return BlogPlaceNotes(http, vlm, redis or FakeAsyncRedis(), "test-key", **options)
+    searches = options.pop("searches", [("tavily", "test-key")])
+    return BlogPlaceNotes(http, vlm, redis or FakeAsyncRedis(), searches, **options)
 
 
 def events(caplog, name):
@@ -590,6 +605,317 @@ async def test_search_answer_without_results_is_not_cached_as_empty(body):
     assert await redis.keys("*") == [] and notes.stats["search_failed"] == 1
 
 
+def slow(request):
+    """답하지 않는 검색. 테스트는 SEARCH_TIME_SEC를 줄여 시간 초과가 나게 한다."""
+
+    async def wait(request):
+        await asyncio.sleep(5)
+        return httpx.Response(200, json={"results": []})
+
+    return wait(request)
+
+
+def leaked(caplog, *words):
+    """로그 기록의 모든 칸(메시지와 extra)에서 words 가운데 하나라도 보이면 참이다."""
+    return any(word in str(record.__dict__) for record in caplog.records for word in words)
+
+
+FAULTS = [500, 429, 432, 401, "timeout", "transport", "unexpected", "not_json", "no_results"]
+
+
+@pytest.mark.parametrize("fault", FAULTS)
+@scenario
+async def test_backup_search_answers_when_the_main_search_fails(fault, caplog):
+    caplog.set_level(logging.INFO)
+    seen, redis = [], FakeAsyncRedis()
+
+    def search(request):
+        if fault == "timeout":
+            raise httpx.ReadTimeout("slow", request=request)
+        if fault == "transport":
+            raise httpx.ConnectError("refused", request=request)
+        if fault == "unexpected":
+            raise RuntimeError("화암동굴 t-key")
+        if fault == "not_json":
+            return httpx.Response(200, content=b"<html>")
+        if fault == "no_results":
+            return httpx.Response(200, json={"error": "limit"})
+        return httpx.Response(fault, json={"detail": "x"})
+
+    http = web([URL], {URL: page()}, seen=seen, search=search)
+    notes = provider(http, summarizer(VISITED), redis, searches=BOTH)
+    assert await notes.notes_for([(1, "화암동굴")]) == {1: VISITED["notes"]}
+    assert seen[:2] == [SEARCH_URL, FIRECRAWL_URL]
+    assert notes.stats["search_backup"] == 1 and notes.stats["search_failed"] == 0
+    # 보조 검색으로 얻은 메모도 주 검색의 메모와 같이 오래 보관한다.
+    (key,) = await redis.keys("*")
+    assert await redis.ttl(key) > NEGATIVE_TTL_SEC
+    (failed,) = events(caplog, "ai_story_place_search_failed")
+    reason = {
+        "timeout": "timeout",
+        "transport": "ConnectError",
+        "unexpected": "RuntimeError",
+        "not_json": "malformed",
+        "no_results": "malformed",
+    }
+    assert failed.provider == "tavily" and failed.reason == reason.get(fault, f"http_{fault}")
+    (record,) = events(caplog, "ai_story_place_notes")
+    assert record.search_backup == 1 and record.search_failed == 0
+    assert record.tavily_failed == 1 and record.firecrawl_failed == 0
+    assert record.searches == "tavily,firecrawl"
+    # 로그의 어느 칸에도 검색어와 키를 남기지 않는다.
+    assert not leaked(caplog, "화암동굴", "t-key", "f-key")
+
+
+@scenario
+async def test_each_search_gets_its_own_key_and_never_asks_for_page_bodies():
+    sent = {}
+
+    def search(request):
+        sent["tavily"] = (request.headers["authorization"], json.loads(request.content))
+        return httpx.Response(503)
+
+    def backup(request):
+        sent["firecrawl"] = (request.headers["authorization"], json.loads(request.content))
+        return fire([URL])
+
+    http = web([], {URL: page()}, search=search, backup=backup)
+    notes = provider(http, summarizer(VISITED), searches=BOTH)
+    assert await notes.notes_for([(1, "화암동굴")]) == {1: VISITED["notes"]}
+    assert sent["tavily"] == (
+        "Bearer t-key",
+        {
+            "query": "화암동굴 후기",
+            "search_depth": "basic",
+            "max_results": 10,
+            "exclude_domains": notes_module.EXCLUDE,
+        },
+    )
+    # Firecrawl에 scrapeOptions를 주면 Firecrawl이 페이지를 대신 받으므로 주지 않는다.
+    assert sent["firecrawl"] == (
+        "Bearer f-key",
+        {
+            "query": "화암동굴 후기",
+            "limit": 10,
+            "country": "KR",
+            "sources": ["web"],
+            "excludeDomains": notes_module.EXCLUDE,
+            "timeout": 15000,
+        },
+    )
+
+
+@scenario
+async def test_backup_search_is_not_called_when_the_main_search_has_results():
+    seen = []
+    http = web([URL], {URL: page()}, seen=seen)
+    notes = provider(http, summarizer(VISITED), searches=BOTH)
+    assert await notes.notes_for([(1, "화암동굴")]) == {1: VISITED["notes"]}
+    assert FIRECRAWL_URL not in seen and notes.stats["search_backup"] == 0
+
+
+@pytest.mark.parametrize("backup", ["results", "empty", "down"])
+@scenario
+async def test_backup_search_is_asked_when_the_main_search_finds_nothing(backup):
+    seen, redis = [], FakeAsyncRedis()
+
+    def answer(request):
+        if backup == "down":
+            return httpx.Response(503)
+        return fire([URL] if backup == "results" else [])
+
+    def nothing(request):
+        return httpx.Response(200, json={"results": []})
+
+    http = web([], {URL: page()}, seen=seen, search=nothing, backup=answer)
+    notes = provider(http, summarizer(VISITED), redis, searches=BOTH)
+    found = await notes.notes_for([(1, "화암동굴")])
+    assert found == ({1: VISITED["notes"]} if backup == "results" else {})
+    assert seen[:2] == [SEARCH_URL, FIRECRAWL_URL]
+    assert notes.stats["search_backup"] == (1 if backup == "results" else 0)
+    assert notes.stats["firecrawl_failed"] == (1 if backup == "down" else 0)
+    keys = await redis.keys("*")
+    if backup == "results":
+        assert await redis.ttl(keys[0]) > NEGATIVE_TTL_SEC
+    elif backup == "empty":
+        # 두 검색이 모두 0건이라고 답했을 때만 후기가 없는 장소로 하루 저장한다.
+        assert 0 < await redis.ttl(keys[0]) <= NEGATIVE_TTL_SEC
+        assert notes.stats["search_failed"] == 0
+    else:
+        # 답하지 못한 검색이 있으면 다른 검색의 0건만으로 후기가 없는 장소라고 저장하지 않는다.
+        assert keys == [] and notes.stats["search_failed"] == 1
+
+
+@scenario
+async def test_place_gets_no_notes_and_is_not_cached_when_both_searches_fail(caplog):
+    caplog.set_level(logging.INFO)
+    seen, redis = [], FakeAsyncRedis()
+
+    def down(request):
+        return httpx.Response(503)
+
+    http = web([URL], {URL: page()}, seen=seen, search=down, backup=down)
+    notes = provider(http, summarizer(), redis, searches=BOTH)
+    assert await notes.notes_for([(1, "화암동굴")]) == {}
+    assert seen == [SEARCH_URL, FIRECRAWL_URL]
+    assert await redis.keys("*") == []
+    assert notes.stats["search_failed"] == 1 and notes.stats["search_backup"] == 0
+    (record,) = events(caplog, "ai_story_place_notes")
+    assert record.tavily_failed == 1 and record.firecrawl_failed == 1
+
+
+@pytest.mark.parametrize("backup", ["results", "empty", "down", "silent"])
+@scenario
+async def test_search_that_timed_out_is_not_asked_again_in_the_run(backup, caplog, monkeypatch):
+    monkeypatch.setattr(notes_module, "SEARCH_TIME_SEC", 0.05)
+    caplog.set_level(logging.INFO)
+    seen, redis = [], FakeAsyncRedis()
+
+    def down(request):
+        return httpx.Response(429)
+
+    answer = {"results": None, "empty": lambda request: fire([]), "down": down, "silent": slow}
+    http = web([URL], {URL: page()}, seen=seen, search=slow, backup=answer[backup])
+    vlm = summarizer(NOT_REVIEW, NOT_REVIEW, NOT_REVIEW)
+    notes = provider(http, vlm, redis, searches=BOTH, concurrency=1)
+    assert await notes.notes_for([(1, "화암동굴"), (2, "나전역카페")]) == {}
+    asked = [url for url in seen if url in (SEARCH_URL, FIRECRAWL_URL)]
+    if backup == "silent":
+        # 둘 다 응답이 없었으면 남은 장소에서는 어느 검색도 기다리지 않는다.
+        assert asked == [SEARCH_URL, FIRECRAWL_URL]
+    else:
+        # 둘째 장소는 응답이 없던 주 검색을 기다리지 않고 보조 검색만 부른다.
+        assert asked == [SEARCH_URL, FIRECRAWL_URL, FIRECRAWL_URL]
+    assert notes.stats["tavily_failed"] == 1
+    assert notes.stats["search_backup"] == (2 if backup == "results" else 0)
+    # 주 검색에 묻지 못했으므로 보조 검색의 0건만으로 후기가 없는 장소라고 저장하지 않는다.
+    assert notes.stats["search_failed"] == (0 if backup == "results" else 2)
+    assert len(await redis.keys("*")) == (2 if backup == "results" else 0)
+    # 같은 종류의 실패는 검색마다 한 실행에 한 번만 경고로 남긴다.
+    failed = [(r.provider, r.reason) for r in events(caplog, "ai_story_place_search_failed")]
+    more = {"down": [("firecrawl", "http_429")], "silent": [("firecrawl", "timeout")]}
+    assert failed == [("tavily", "timeout")] + more.get(backup, [])
+    # 다음 실행에서는 주 검색부터 다시 부르고, 같은 종류의 실패도 다시 경고로 남긴다.
+    seen.clear()
+    caplog.clear()
+    await notes.notes_for([(3, "아리힐스")])
+    assert seen[0] == SEARCH_URL
+    assert [r.provider for r in events(caplog, "ai_story_place_search_failed")][:1] == ["tavily"]
+
+
+@scenario
+async def test_quick_failures_do_not_stop_asking_the_main_search():
+    seen = []
+
+    def down(request):
+        return httpx.Response(500)
+
+    http = web([URL], {URL: page()}, seen=seen, search=down)
+    vlm = summarizer(NOT_REVIEW, NOT_REVIEW)
+    notes = provider(http, vlm, searches=BOTH, concurrency=1)
+    await notes.notes_for([(1, "화암동굴"), (2, "나전역카페")])
+    # 한 번의 500으로 남은 장소를 모두 보조 검색에 넘기지 않는다.
+    assert [u for u in seen if u in (SEARCH_URL, FIRECRAWL_URL)] == [SEARCH_URL, FIRECRAWL_URL] * 2
+    assert notes.stats["tavily_failed"] == 2 and notes.stats["search_backup"] == 2
+
+
+@scenario
+async def test_places_searched_together_wait_for_a_silent_search_only_once(caplog, monkeypatch):
+    monkeypatch.setattr(notes_module, "SEARCH_TIME_SEC", 0.2)
+    caplog.set_level(logging.INFO)
+    seen = []
+    names = ["화암동굴", "나전역카페", "아리힐스", "월정사", "로미지안가든"]
+    notes = provider(web([], {}, seen=seen, search=slow), summarizer(), searches=BOTH)
+    started = time.monotonic()
+    assert await notes.notes_for(list(enumerate(names))) == {}
+    # 함께 찾기 시작한 세 곳만 주 검색을 기다리고, 그 뒤의 장소는 보조 검색만 부른다.
+    # 본문을 다 받을 때까지가 아니라 요청 전체에 제한 시간이 걸린다.
+    assert seen[:3] == [SEARCH_URL] * 3 and seen[3:] == [FIRECRAWL_URL] * 5
+    assert time.monotonic() - started < 2
+    (failed,) = events(caplog, "ai_story_place_search_failed")
+    assert (failed.provider, failed.reason) == ("tavily", "timeout")
+
+
+@scenario
+async def test_search_cut_off_by_the_overall_time_limit_is_not_counted_as_failed(caplog):
+    caplog.set_level(logging.INFO)
+    redis = FakeAsyncRedis()
+    notes = provider(web([], {}, search=slow), summarizer(), redis, searches=BOTH, timeout_sec=0.1)
+    assert await notes.notes_for([(1, "화암동굴")]) == {}
+    # 전체 제한 시간에 걸려 취소된 검색은 검색의 실패가 아니다.
+    (record,) = events(caplog, "ai_story_place_notes")
+    assert record.timed_out == 1 and record.search_failed == 0 and record.tavily_failed == 0
+    assert events(caplog, "ai_story_place_search_failed") == [] and await redis.keys("*") == []
+
+
+@scenario
+async def test_search_request_carries_the_time_limit_and_is_cancelled_with_the_caller():
+    limits = []
+
+    async def search(request):
+        limits.append(request.extensions["timeout"])
+        await asyncio.sleep(5)
+
+    notes = provider(web([], {}, search=search), summarizer(), searches=BOTH)
+    task = asyncio.create_task(notes.notes_for([(1, "화암동굴")]))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert limits == [{"connect": 15, "read": 15, "write": 15, "pool": 15}]
+
+
+@scenario
+async def test_search_backup_is_counted_whichever_search_is_first():
+    seen = []
+
+    def down(request):
+        return httpx.Response(402)
+
+    http = web([URL], {URL: page()}, seen=seen, backup=down)
+    notes = provider(http, summarizer(VISITED), searches=BOTH[::-1])
+    assert await notes.notes_for([(1, "화암동굴")]) == {1: VISITED["notes"]}
+    assert seen[:2] == [FIRECRAWL_URL, SEARCH_URL]
+    assert notes.stats["search_backup"] == 1 and notes.stats["firecrawl_failed"] == 1
+
+
+@scenario
+async def test_firecrawl_alone_finds_notes():
+    seen = []
+    http = web([URL], {URL: page()}, seen=seen)
+    notes = provider(http, summarizer(VISITED), searches=[("firecrawl", "f-key")])
+    assert await notes.notes_for([(1, "화암동굴")]) == {1: VISITED["notes"]}
+    assert seen[0] == FIRECRAWL_URL and SEARCH_URL not in seen
+    assert notes.stats["search_backup"] == 0
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"success": False},
+        {"success": False, "data": {"web": []}},
+        {"data": None},
+        {"data": []},
+        {"data": {}},
+        {"data": {"web": None}},
+        ["x"],
+    ],
+)
+@scenario
+async def test_firecrawl_answer_without_a_result_list_is_not_cached_as_empty(body):
+    redis = FakeAsyncRedis()
+    http = web([], {}, backup=lambda request: httpx.Response(200, json=body))
+    notes = provider(http, summarizer(), redis, searches=[("firecrawl", "f-key")])
+    assert await notes.notes_for([(1, "화암동굴")]) == {}
+    assert await redis.keys("*") == [] and notes.stats["search_failed"] == 1
+
+
+@pytest.mark.parametrize("searches", [[], [("bing", "key")], [("tavily", "key"), ("bing", "key")]])
+def test_searches_must_name_known_providers(searches):
+    with pytest.raises(ValueError):
+        BlogPlaceNotes(None, None, None, searches)
+
+
 @scenario
 async def test_one_broken_result_or_unexpected_error_does_not_fail_the_place():
     urls = ["https://a.tistory.com/1", "https://b.tistory.com/2"]
@@ -609,14 +935,17 @@ async def test_one_broken_result_or_unexpected_error_does_not_fail_the_place():
 async def test_failure_of_one_place_is_counted_and_does_not_escape(caplog):
     caplog.set_level(logging.INFO)
 
-    def search(request):
-        if "나전역카페" in json.loads(request.content)["query"]:
-            raise RuntimeError("unexpected")
-        return httpx.Response(200, json={"results": [{"url": URL}]})
-
     body = "화암동굴과 나전역카페에 다녀왔다. " + "한참 걸었다. " * 60
-    http = web([], {URL: page(body=body)}, search=search)
-    notes = provider(http, summarizer(VISITED))
+    notes = provider(web([URL], {URL: page(body=body)}), summarizer(VISITED))
+    collect = notes._collect
+
+    async def broken(name):
+        # 검색의 오류는 다음 검색으로 넘기므로, 그 밖의 자리에서 난 예상하지 못한 오류를 흉내 낸다.
+        if name == "나전역카페":
+            raise RuntimeError("unexpected")
+        return await collect(name)
+
+    notes._collect = broken
     found = await notes.notes_for([(1, "화암동굴"), (2, "나전역카페")])
     assert found == {1: VISITED["notes"]}
     (record,) = events(caplog, "ai_story_place_notes")

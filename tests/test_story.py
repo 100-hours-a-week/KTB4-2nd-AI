@@ -740,22 +740,49 @@ async def test_cancel_between_writing_steps_stops_before_the_next_call(after, ca
     assert original.vlm.chat.await_count == calls
 
 
+NOTES_ON = {"STORY_PLACE_NOTES_ENABLED": True}
+TAVILY, FIRECRAWL = ("tavily", "search-key"), ("firecrawl", "fire-key")
+TWO_KEYS = {"TAVILY_API_KEY": "search-key", "FIRECRAWL_API_KEY": "fire-key"}
+
+
 @pytest.mark.parametrize(
-    "changes,built",
+    "changes,searches",
     [
-        ({}, False),
-        ({"STORY_PLACE_NOTES_ENABLED": True}, False),
-        ({"TAVILY_API_KEY": "search-key"}, False),
-        ({"STORY_PLACE_NOTES_ENABLED": True, "TAVILY_API_KEY": " "}, False),
-        ({"STORY_PLACE_NOTES_ENABLED": True, "TAVILY_API_KEY": "search-key"}, True),
+        ({}, None),
+        (NOTES_ON, None),
+        (TWO_KEYS, None),
+        ({**NOTES_ON, "TAVILY_API_KEY": " ", "FIRECRAWL_API_KEY": ""}, None),
+        ({**NOTES_ON, "TAVILY_API_KEY": "search-key"}, [TAVILY]),
+        ({**NOTES_ON, "FIRECRAWL_API_KEY": " fire-key "}, [FIRECRAWL]),
+        ({**NOTES_ON, **TWO_KEYS}, [TAVILY, FIRECRAWL]),
+        ({**NOTES_ON, **TWO_KEYS, "STORY_SEARCH_PRIMARY": "firecrawl"}, [FIRECRAWL, TAVILY]),
+        # 주 검색으로 정한 쪽의 키가 비어 있으면 키가 있는 검색만 쓴다.
+        (
+            {**NOTES_ON, "TAVILY_API_KEY": "search-key", "STORY_SEARCH_PRIMARY": "firecrawl"},
+            [TAVILY],
+        ),
     ],
-    ids=["default", "no_key", "disabled", "blank_key", "enabled"],
+    ids=[
+        "default",
+        "no_key",
+        "disabled",
+        "blank_keys",
+        "tavily_only",
+        "firecrawl_only",
+        "both",
+        "firecrawl_first",
+        "primary_without_key",
+    ],
 )
 @scenario
-async def test_handler_builds_place_notes_only_with_setting_and_key(changes, built, monkeypatch):
+async def test_handler_builds_place_notes_only_with_setting_and_key(changes, searches, monkeypatch):
     from app.jobs.config import JobsSettings
     from app.story import handler
 
+    # 실행 환경에 검색 키나 설정이 있어도 이 테스트의 값만 쓰게 한다.
+    names = ("TAVILY_API_KEY", "FIRECRAWL_API_KEY", "STORY_SEARCH_PRIMARY")
+    for name in (*names, "STORY_PLACE_NOTES_ENABLED"):
+        monkeypatch.delenv(name, raising=False)
     cfg = JobsSettings(
         _env_file=None,
         API_KEY="test",
@@ -779,10 +806,11 @@ async def test_handler_builds_place_notes_only_with_setting_and_key(changes, bui
     ctx = pipeline.call_args.args[2]
     # 스토리의 생성 호출은 검색과 다른 제한 시간을 쓴다.
     assert seen == [77] and ctx.vlm.timeout_sec == 77
-    assert (ctx.notes is not None) == built
-    if built:
+    assert (ctx.notes is not None) == (searches is not None)
+    if searches:
         notes = ctx.notes
-        assert notes.api_key == "search-key" and notes.timeout_sec == 12
+        # 주 검색이 앞에 오고, 키가 없는 검색은 빠진다.
+        assert notes.searches == searches and notes.timeout_sec == 12
         assert notes.vlm is ctx.vlm and notes.redis is reporter.store.redis
         assert (
             notes.key_prefix == cfg.redis_prefix and notes.ttl_sec == cfg.STORY_PLACE_NOTES_TTL_SEC
@@ -791,6 +819,36 @@ async def test_handler_builds_place_notes_only_with_setting_and_key(changes, bui
         assert notes.http.follow_redirects is False and notes.http.is_closed
         # 환경 변수의 프록시 설정을 쓰지 않는다.
         assert notes.http.trust_env is False
+
+
+@pytest.mark.parametrize(
+    "value,primary",
+    [
+        ("firecrawl", "firecrawl"),
+        (" Firecrawl ", "firecrawl"),
+        ("TAVILY", "tavily"),
+        ("", "tavily"),
+    ],
+)
+def test_story_search_primary_ignores_case_and_blank_means_the_default(value, primary):
+    from app.jobs.config import JobsSettings
+
+    cfg = JobsSettings(
+        _env_file=None, API_KEY="test", IMAGE_SOURCE="local", STORY_SEARCH_PRIMARY=value
+    )
+    assert cfg.STORY_SEARCH_PRIMARY == primary
+
+
+def test_story_search_primary_must_be_a_known_search():
+    from pydantic import ValidationError
+
+    from app.jobs.config import JobsSettings
+
+    with pytest.raises(ValidationError) as caught:
+        JobsSettings(
+            _env_file=None, API_KEY="test", IMAGE_SOURCE="local", STORY_SEARCH_PRIMARY="bing"
+        )
+    assert [error["loc"] for error in caught.value.errors()] == [("STORY_SEARCH_PRIMARY",)]
 
 
 def test_story_step_time_limits_must_fit_in_the_job_time_limit():
