@@ -323,7 +323,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--dry-run", action="store_true", help="만들 항목만 출력")
     args = parser.parse_args()
-    lf = Langfuse()
+    # 평가기 갱신 응답이 SDK 기본 시간 제한(5초)을 넘는 일이 있어 넉넉히 둔다.
+    lf = Langfuse(timeout=60)
     try:
         Setup(lf, args.dry_run).run()
     finally:
