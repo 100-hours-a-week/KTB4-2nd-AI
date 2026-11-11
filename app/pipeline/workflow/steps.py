@@ -38,6 +38,10 @@ ALL_TYPES = ["12", "14", "28", "32"]  # TourAPI 관광지·문화시설·레포�
 CAT_CODE = {"관광명소": "AT4", "문화시설": "CT1", "숙박": "AD5"}
 SAME_RECORD_M = 300
 VOTE_SEED, SECOND_SEED, SECOND_TOP = 2601, 2401, 8
+# 출력 토큰 상한(결정 224). 잘린 응답은 실패가 아니라 잘린 텍스트로 받는다.
+# 3단계 그룹 설명은 이전 400, 9단계 다수결은 이전 200이었다.
+DESCRIBE_MAX_TOKENS, VOTE_MAX_TOKENS = 1024, 512
+TRUNCATED_DESC_CHARS = 400  # 잘린 그룹 설명을 6단계 묶음 제안에 넣는 최대 글자 수
 
 
 def chunk(seq, k):
@@ -158,6 +162,10 @@ def summary_of(desc, pl, n_type=3, n_text=6):
 
 
 def desc_line(k, d):
+    if isinstance(d, dict) and isinstance(d.get("truncated"), str):
+        # 잘려서 JSON으로 읽지 못한 설명은 잘린 원문을 한 줄로 넣는다(결정 224).
+        raw = " ".join(d["truncated"].split())[:TRUNCATED_DESC_CHARS]
+        return f"[{k}] (잘림) {raw}"
     if not isinstance(d, dict) or "error" in d:
         return f"[{k}] (설명 없음)"
     text = ", ".join(t for t in (d.get("text") or []) if isinstance(t, str))[:80]
@@ -191,12 +199,13 @@ async def describe(pod: Pod, trip: Trip, k=2):
         chosen = trip.diverse(g, k)
         content = [text(prompts.DESCRIBE.format(k=len(chosen), trip=trip.trip_text()))]
         content += [image(u) for u in await photos(trip, chosen)]
-        r = await pod.chat(content, 400, budget=280, stage="describe")
-        return (
-            r.get("text")
-            and parse_json(r["text"])
-            or {"error": r.get("error"), "raw": r.get("text")}
-        )
+        r = await pod.chat(content, DESCRIBE_MAX_TOKENS, budget=280, stage="describe")
+        parsed = r.get("text") and parse_json(r["text"])
+        if parsed:
+            return parsed
+        if r.get("finish") == "length" and (r.get("text") or "").strip():
+            return {"truncated": r["text"]}
+        return {"error": r.get("error"), "raw": r.get("text")}
 
     return list(await asyncio.gather(*(one(g) for g in range(trip.G))))
 
@@ -731,7 +740,7 @@ async def vote_cl(pod: Pod, trip: Trip, folders, far, tveto, votes=3, seed=VOTE_
     async def one(g, v):
         order, letters, head = rounds[v]
         content = head + [image(u) for u in await photos(trip, trip.diverse(g, 2), side=640)]
-        r = await pod.chat(content, 200, budget=560, stage=f"vote{v}")
+        r = await pod.chat(content, VOTE_MAX_TOKENS, budget=560, stage=f"vote{v}")
         p = parse_json(r.get("text")) if r.get("text") else None
         k = parse_card(
             (p or {}).get("choice"), letters, [named[j]["record"]["name"] for j in order]

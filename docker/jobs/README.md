@@ -121,11 +121,11 @@ BE가 모든 사진의 업로드와 분석용 사본 생성을 마친 뒤 보내
 
 - `PROCESS_AGENT_ENABLED`가 true여도 워크플로우를 켜면 에이전트는 쓰지 않습니다. 에이전트나 규칙 단계로 돌리려면 `PROCESS_WORKFLOW_ENABLED=false`로 둡니다. 켜면 `VLM_BASE_URL`, `VLM_MODEL`, `PLACE_INDEX_PATH`, `KAKAO_REST_API_KEY`, `TOURAPI_RAW_PATH`가 모두 있어야 하며, 없으면 `MODEL_NOT_READY`로 실패합니다.
 - TourAPI 원자료는 색인과 같이 `TOURAPI_RAW_S3_URI`가 있으면 정리 실행기가 시작할 때 `TOURAPI_RAW_PATH`에 받아 `TOURAPI_RAW_SHA256`과 맞춰 봅니다.
-- 생성 호출은 `PROCESS_WORKFLOW_CONCURRENCY`(기본 4)건까지 동시에 보내고, 호출 제한 시간은 `PROCESS_WORKFLOW_VLM_TIMEOUT_SEC`(기본 300초)입니다. 실패 처리는 에이전트와 같습니다. 전송 오류, HTTP 408, 429, 5xx, 시간 초과만 `PROCESS_VLM_RETRIES`번 다시 보내고, 그래도 실패하거나 불완전 응답, 슬롯 대기 초과면 작업이 실패합니다(시간 초과는 `TIMEOUT`, 나머지는 `MODEL_NOT_READY`).
+- 생성 호출은 `PROCESS_WORKFLOW_CONCURRENCY`(기본 4)건까지 동시에 보내고, 호출 제한 시간은 `PROCESS_WORKFLOW_VLM_TIMEOUT_SEC`(기본 300초)입니다. 실패 처리는 에이전트와 같습니다. 전송 오류, HTTP 408, 429, 5xx, 시간 초과만 `PROCESS_VLM_RETRIES`번 다시 보내고, 그래도 실패하거나 불완전 응답, 슬롯 대기 초과면 작업이 실패합니다(시간 초과는 `TIMEOUT`, 나머지는 `MODEL_NOT_READY`). 다만 출력 토큰 상한에 걸려 잘린 응답(`finish_reason=length`)은 실패로 보지 않고 잘린 텍스트를 그대로 다음 처리에 넘깁니다. 잘린 그룹 설명은 묶음 제안 지시문에 `(잘림)` 표시와 함께 400자까지 들어가고, 다른 단계는 해석하지 못한 응답을 빈 결과로 다룹니다.
 - `PROCESS_WORKFLOW_BUDGET_SEC`(기본 60분)를 넘기면 `TIMEOUT`으로 실패하며, 작업 제한 `JOBS_PROCESS_TIMEOUT_SEC`(기본 65분)보다 짧아야 합니다. 카카오 호출은 작업당 `PROCESS_WORKFLOW_KAKAO_CALLS`(기본 1000)번까지입니다.
 - 지역 밖 사진: 요청 지역 좌표를 카카오 좌표-행정구역 변환으로 시·군으로 바꾸고, 대표 좌표가 그 시·군들 밖인 GPS 장소와, 이름 단계에서 고른 장소가 그 밖인 GPS 없는 묶음을 미분류로 보냅니다. "성남시 분당구"는 "성남시"로 비교합니다. 변환에 실패하면 빼지 않습니다.
 - 사진은 서명된 URL 대신 격자 그림을 만들어 data URL로 보냅니다. 저장 벡터를 재사용해 내려받지 않은 사진도 이 단계에서 내려받습니다.
-- 끝나면 `ai_workflow_summary`에 단계별 시간, 모델 호출 수, 카카오 호출 수, 지역 밖으로 뺀 수가 남습니다.
+- 끝나면 `ai_workflow_summary`에 단계별 시간, 모델 호출 수, 잘린 응답 수(`model_truncated`, 단계별 `model_truncated_by_stage`), 카카오 호출 수, 지역 밖으로 뺀 수가 남습니다.
 
 ## 통신과 실패 처리
 

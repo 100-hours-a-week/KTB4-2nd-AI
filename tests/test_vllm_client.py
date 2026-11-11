@@ -737,3 +737,46 @@ async def test_stream_cut_midway_is_transient():
     ) as client:
         with pytest.raises(VLMTransientError):
             await client.chat(MESSAGES, [], 64, stream=True)
+
+
+# ---------- 결정 224: 잘린 응답 허용
+@pytest.mark.parametrize("stream", [False, True])
+async def test_allowed_truncated_text_is_returned_and_logged(stream, caplog):
+    def handler(request):
+        if stream:
+            return sse(delta('{"place_type": "카'), delta(finish="length"))
+        return httpx.Response(200, json=completion('{"place_type": "카', "length"))
+
+    caplog.set_level(logging.INFO, logger="app.observability.calls")
+    async with client_for(handler) as client:
+        turn = await client.chat(MESSAGES, [], 64, stream=stream, allow_truncated=True)
+    assert (turn.content, turn.finish_reason) == ('{"place_type": "카', "length")
+    record = next(r for r in caplog.records if getattr(r, "event", None) == "ai_model_call")
+    assert (record.result, record.finish_reason, record.output_chars) == (
+        "truncated_output",
+        "length",
+        len('{"place_type": "카'),
+    )
+
+
+async def test_allowed_truncation_still_rejects_other_incomplete_endings():
+    for response in (
+        lambda: sse(delta("끝 없음"), done=False),
+        lambda: sse({"choices": [{"delta": {"content": 5}, "finish_reason": "length"}]}),
+        lambda: sse(delta("내용 필터"), delta(finish="content_filter")),
+    ):
+        async with client_for(lambda request, response=response: response()) as client:
+            with pytest.raises(VLMUnavailable):
+                await client.chat(MESSAGES, [], 64, stream=True, allow_truncated=True)
+    async with client_for(lambda _: httpx.Response(200, json=completion(" "))) as client:
+        with pytest.raises(VLMUnavailable):
+            await client.chat(MESSAGES, [], 64, allow_truncated=True)
+
+
+async def test_truncation_is_not_allowed_by_default_or_with_tools():
+    payload = completion("partial", "length")
+    async with client_for(lambda _: httpx.Response(200, json=payload)) as client:
+        with pytest.raises(VLMUnavailable):
+            await client.chat(MESSAGES, [], 64)
+        with pytest.raises(ValueError, match="잘린 응답 허용"):
+            await client.chat(MESSAGES, [], 64, tools=TOOLS, allow_truncated=True)

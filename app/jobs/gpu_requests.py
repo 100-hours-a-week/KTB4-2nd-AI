@@ -181,8 +181,9 @@ class GatedVlm:
         temperature=None,
         stream=False,
         extra_body=None,
+        allow_truncated=False,
     ):
-        # 값이 있을 때만 넘겨, 도구나 temperature, 스트리밍을 받지 않는 구현도
+        # 값이 있을 때만 넘겨, 도구나 temperature, 스트리밍, 잘린 응답 허용을 받지 않는 구현도
         # 그대로 감쌀 수 있게 한다.
         options = _given(
             tools=tools,
@@ -190,6 +191,7 @@ class GatedVlm:
             temperature=temperature,
             stream=stream or None,
             extra_body=extra_body or None,
+            allow_truncated=allow_truncated or None,
         )
         try:
             return await self.gate.run(
