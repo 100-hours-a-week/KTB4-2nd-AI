@@ -32,9 +32,34 @@ def parse_fallback(request: ParseRequest) -> ParseResponse:
     )
 
 
+# 형식 오류일 때 ai_query에 남길 모델 원출력 길이. 해석 출력은 수백 자라 원인 확인에 충분
+MODEL_OUTPUT_LOG_CHARS = 500
+
+
+def record_fields(**fields) -> None:
+    """ai_query 한 줄에 붙일 값. 검색 요청 밖에서 부르면 기록하지 않음"""
+    if trace := current_trace():
+        trace.fields.update(fields)
+
+
+def record_parse_result(response: ParseResponse) -> None:
+    """LLM 해석 결과. BE가 search에 보내는 visual_query와 비교하는 기준
+
+    intent는 query_service가 ai_query의 intent로 이미 남김
+    """
+    record_fields(
+        date_from=response.date_from.isoformat() if response.date_from else None,
+        date_to=response.date_to.isoformat() if response.date_to else None,
+        region_names=response.region_names,
+        visual_query=response.visual_query,
+    )
+
+
 async def parse(
     request: ParseRequest, context: SearchContext, options: SearchOptions
 ) -> ParseResponse:
+    record_fields(query=request.query, reference_date=request.reference_date.isoformat())
+    content = None
     try:
         async with asyncio.timeout(options.parse_timeout_sec):
             output = await context.vlm.chat(
@@ -44,9 +69,22 @@ async def parse(
                 response_format=prompts.PARSE_RESPONSE_FORMAT,
                 temperature=prompts.PARSE_TEMPERATURE,
             )
-            return prompts.parse_output(output.content, request)
-    except (VLMUnavailable, InvalidModelOutput, TimeoutError):
+            content = output.content
+            response = prompts.parse_output(content, request)
+    except VLMUnavailable:
+        record_fields(parse_fallback_reason="vlm_unavailable")
         return parse_fallback(request)
+    except InvalidModelOutput:
+        record_fields(
+            parse_fallback_reason="invalid_output",
+            model_output=(content or "")[:MODEL_OUTPUT_LOG_CHARS],
+        )
+        return parse_fallback(request)
+    except TimeoutError:
+        record_fields(parse_fallback_reason="timeout")
+        return parse_fallback(request)
+    record_parse_result(response)
+    return response
 
 
 def cutoff_threshold(ranked: list[SearchHit], options: SearchOptions) -> float:
@@ -66,16 +104,16 @@ def apply_cutoff(ranked: list[SearchHit], options: SearchOptions) -> list[Search
 
 
 def record_result(order_mode: str, selected: list[SearchHit], **fields) -> None:
-    """ai_query 로그에 남길 정렬 경로와 반환 사진 ID. 사진 ID와 점수만, 질문 문장은 남기지 않음
+    """ai_query 로그에 남길 정렬 경로와 반환 사진 ID
 
     BE DB와 trip_attachment_id로 조인해 어떤 사진이 나왔는지 확인하는 용도
+    QUESTION은 반환 사진이 곧 답변 근거 사진이라 근거 ID를 따로 남기지 않음
     """
-    if trace := current_trace():
-        trace.fields.update(
-            order_mode=order_mode,
-            result_ids=[hit.trip_attachment_id for hit in selected],
-            **fields,
-        )
+    record_fields(
+        order_mode=order_mode,
+        result_ids=[hit.trip_attachment_id for hit in selected],
+        **fields,
+    )
 
 
 def has_visual_query(request: SearchRequest) -> bool:
@@ -129,6 +167,20 @@ def order_by_taken_at(candidates: list[SearchCandidate], limit: int) -> list[Sea
 async def search(
     request: SearchRequest, context: SearchContext, options: SearchOptions
 ) -> SearchResponse:
+    """질문 원문, BE가 보낸 visual_query, 답변 문장을 ai_query에 남김
+
+    answer_error는 query_service가 응답에서 따로 기록함
+    """
+    record_fields(query=request.query, visual_query=request.visual_query, limit=request.limit)
+    response = await _search(request, context, options)
+    if response.answer is not None:
+        record_fields(answer=response.answer)
+    return response
+
+
+async def _search(
+    request: SearchRequest, context: SearchContext, options: SearchOptions
+) -> SearchResponse:
     candidates = {item.trip_attachment_id: item for item in request.candidates}
     words = times.time_words(request.query)
     if words:
@@ -179,6 +231,7 @@ async def search(
     if not selected:
         return SearchResponse(attachments=[], answer_error="NO_EVIDENCE")
 
+    content = None
     try:
         async with asyncio.timeout(options.answer_timeout_sec):
             evidence = [
@@ -197,7 +250,8 @@ async def search(
                 response_format=prompts.ANSWER_RESPONSE_FORMAT,
                 temperature=prompts.ANSWER_TEMPERATURE,
             )
-            answer = prompts.parse_answer(output.content)
+            content = output.content
+            answer = prompts.parse_answer(content)
         # 컷오프로 근거가 없을 때와 같은 NO_EVIDENCE라 로그에서는 answerable로 구분한다.
         if trace := current_trace():
             trace.fields["answerable"] = answer is not None
@@ -206,5 +260,8 @@ async def search(
         return SearchResponse(attachments=selected, answer=answer)
     except TimeoutError:
         return SearchResponse(attachments=selected, answer_error="TIMEOUT")
-    except (VLMUnavailable, InvalidModelOutput):
+    except InvalidModelOutput:
+        record_fields(model_output=(content or "")[:MODEL_OUTPUT_LOG_CHARS])
+        return SearchResponse(attachments=selected, answer_error="VLM_UNAVAILABLE")
+    except VLMUnavailable:
         return SearchResponse(attachments=selected, answer_error="VLM_UNAVAILABLE")
