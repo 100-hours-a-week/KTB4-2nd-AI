@@ -90,10 +90,13 @@ class VllmClient:
         temperature: float | None = None,
         stream: bool = False,
         extra_body: dict[str, Any] | None = None,
+        allow_truncated: bool = False,
     ) -> ChatTurn:
         """extra_body는 요청 본문에 더할 vLLM 전용 값(예: mm_processor_kwargs)이다.
 
         본문이 이미 가진 키(model, messages, max_tokens, stream 등)는 덮어쓰지 않는다.
+        allow_truncated가 참이면 max_tokens에 걸려 잘린 텍스트 응답(finish_reason=length)을
+        실패로 다루지 않고 finish_reason="length"인 ChatTurn으로 돌려준다(도구 호출에는 쓰지 않음).
         Langfuse 트레이스 안에서 부르면 호출 1건을 generation으로 남긴다.
         """
         options = {
@@ -107,7 +110,14 @@ class VllmClient:
             self._model, messages, image_urls, max_tokens, response_format, options
         )
         if generation is None:
-            return await self._chat(messages, image_urls, max_tokens, response_format, **options)
+            return await self._chat(
+                messages,
+                image_urls,
+                max_tokens,
+                response_format,
+                allow_truncated=allow_truncated,
+                **options,
+            )
         try:
             turn = await self._chat(
                 messages,
@@ -115,6 +125,7 @@ class VllmClient:
                 max_tokens,
                 response_format,
                 usage_out=generation.usage,
+                allow_truncated=allow_truncated,
                 **options,
             )
         except BaseException as exc:
@@ -138,6 +149,7 @@ class VllmClient:
         stream: bool = False,
         extra_body: dict[str, Any] | None = None,
         usage_out: dict[str, Any] | None = None,
+        allow_truncated: bool = False,
     ) -> ChatTurn:
         if tools is None and tool_choice is not None:
             raise ValueError("도구 없이 tool_choice를 지정할 수 없습니다.")
@@ -145,6 +157,8 @@ class VllmClient:
             raise ValueError("도구 목록이 비어 있지 않은 목록이어야 합니다.")
         if stream and tools is not None:
             raise ValueError("도구 호출은 스트리밍으로 보내지 않습니다.")
+        if allow_truncated and tools is not None:
+            raise ValueError("도구 호출에는 잘린 응답 허용을 쓰지 않습니다.")
         body, call = self._request(messages, image_urls, max_tokens, temperature)
         if extra_body:
             if clash := set(extra_body) & set(body):
@@ -166,7 +180,7 @@ class VllmClient:
         else:
             response = await self._post(body, call, started)
             status_code, data = response.status_code, None
-        finish_reason, usage = None, None
+        finish_reason, usage, truncated = None, None, False
         try:
             if data is None:
                 if stream:
@@ -193,13 +207,16 @@ class VllmClient:
                     for item in message.get("tool_calls") or []
                 ]
             )
+            # finish_reason=length는 max_tokens에 도달해 출력이 잘린 경우다. 허용하면 잘린 텍스트를
+            # 그대로 돌려주고, 해석은 호출자가 한다(결정 224).
+            truncated = allow_truncated and finish_reason == "length"
             # 도구 호출이 있으면 vLLM은 tool_calls나 stop으로 끝낸다. 없으면 텍스트가 답이다.
-            if finish_reason not in {"stop", "tool_calls"} or (
-                not tool_calls and (finish_reason != "stop" or not content.strip())
+            if not truncated and (
+                finish_reason not in {"stop", "tool_calls"}
+                or (not tool_calls and (finish_reason != "stop" or not content.strip()))
             ):
                 raise ValueError("완성된 응답이 아님")
         except (ValueError, KeyError, IndexError, TypeError, AttributeError):
-            # finish_reason=length는 max_tokens에 도달해 출력이 잘린 경우다.
             log_model_call(
                 "vlm",
                 started,
@@ -215,7 +232,7 @@ class VllmClient:
         log_model_call(
             "vlm",
             started,
-            "success",
+            "truncated_output" if truncated else "success",
             status_code=status_code,
             finish_reason=finish_reason,
             output_chars=len(content),

@@ -626,6 +626,10 @@ def run_workflow(
         model_errors_by_stage={
             k.split(":", 1)[1]: v for k, v in pod.stats.items() if k.startswith("errors:")
         },
+        model_truncated=pod.stats["truncated"],
+        model_truncated_by_stage={
+            k.split(":", 1)[1]: v for k, v in pod.stats.items() if k.startswith("truncated:")
+        },
         kakao_calls=places.budget.used,
         kakao_errors=places.stats["kakao_errors"],
         kakao_over_budget=places.stats["kakao_over_budget"],

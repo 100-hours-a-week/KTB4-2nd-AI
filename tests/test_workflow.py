@@ -295,7 +295,9 @@ def test_workflow_places_gps_inserted_and_named_photos_and_result_passes_contrac
     }
     assert budgets["describe"] == 280 and budgets["propose"] == 1120
     assert budgets["query"] == 1120 and budgets["choose"] == 1120
-    assert {s: m for s, _, m, _ in vlm.calls}["describe"] == 400
+    # 출력 상한: 그룹 설명 1024, 다수결 512(결정 224, 이전 400·200)
+    max_tokens = {s: m for s, _, m, _ in vlm.calls}
+    assert max_tokens["describe"] == 1024 and max_tokens["vote"] == 512
     # 진행률: CLUSTERING 시작 0, 호출마다 오르되 total 직전에서 멈추고, 끝에 total
     clustering = [done for step, done in progress if step is ProcessStep.CLUSTERING]
     assert clustering[0] == 0 and clustering[-1] == 6
@@ -703,6 +705,8 @@ def test_gated_vlm_passes_extra_body():
     extra = {"mm_processor_kwargs": {"max_soft_tokens": 560}}
     options = asyncio.run(vlm.chat([], [], 1, temperature=0, stream=True, extra_body=extra))
     assert options == {"temperature": 0, "stream": True, "extra_body": extra}
+    options = asyncio.run(vlm.chat([], [], 1, allow_truncated=True))
+    assert options == {"allow_truncated": True}
     assert asyncio.run(vlm.chat([], [], 1)) == {}
 
 
@@ -766,6 +770,104 @@ def test_model_failure_fails_the_job(tmp_path, loop, monkeypatch):
         run_scene(tmp_path, loop, vlm, vlm_retries=1)
     assert caught.value.code is ErrorCode.MODEL_NOT_READY
     assert len(vlm.calls) <= 2 * 3  # 첫 실패 뒤에는 새 호출을 보내지 않는다
+
+
+# ---------- 결정 224: 잘린 응답은 실패가 아니라 잘린 텍스트로 받는다
+TRUNCATED = '{"place_type": "카페",\n  "distinctive": "창가 자리 창가 자리 창가'
+
+
+def test_pod_returns_truncated_text_without_failing():
+    class Truncating:
+        def __init__(self):
+            self.calls = []
+
+        async def chat(self, messages, urls, max_tokens, **options):
+            self.calls.append(options)
+            return ChatTurn(content=TRUNCATED, finish_reason="length")
+
+    vlm = Truncating()
+    pod = Pod(vlm, 1, 3)
+    text = [{"type": "text", "text": "t"}]
+    assert asyncio.run(pod.chat(text, 10, stage="vote0")) == {"text": TRUNCATED, "finish": "length"}
+    assert asyncio.run(pod.chat(text, 10, stage="describe"))["finish"] == "length"
+    assert len(vlm.calls) == 2 and all(c["allow_truncated"] is True for c in vlm.calls)
+    assert pod.failed is None and pod.stats["errors"] == 0
+    assert pod.stats["truncated"] == 2
+    assert pod.stats["truncated:vote0"] == pod.stats["truncated:describe"] == 1
+
+
+def test_truncated_description_goes_into_propose_as_one_line():
+    line = steps.desc_line(3, {"truncated": TRUNCATED})
+    assert line == '[3] (잘림) {"place_type": "카페", "distinctive": "창가 자리 창가 자리 창가'
+    long = steps.desc_line(1, {"truncated": "가" * 1000})
+    assert long == "[1] (잘림) " + "가" * steps.TRUNCATED_DESC_CHARS
+    # 잘리지 않았는데 읽지 못한 설명은 이전처럼 설명 없음
+    assert steps.desc_line(2, {"error": None, "raw": "깨짐"}) == "[2] (설명 없음)"
+
+
+def test_unreadable_but_finished_description_stays_without_description():
+    """stop으로 끝났는데 JSON이 아니면 잘린 설명이 아니라 이전처럼 설명 없음으로 둔다."""
+
+    class Pod_:
+        def __init__(self, turn):
+            self.turn = turn
+
+        async def chat(self, content, max_tokens, budget=None, stage=""):
+            return self.turn
+
+    class Trip_:
+        G = 1
+
+        def diverse(self, g, k):
+            return [0]
+
+        def trip_text(self):
+            return ""
+
+        def photo_uri(self, i, side):
+            return "data:image/png;base64,"
+
+    stop = asyncio.run(steps.describe(Pod_({"text": "설명 문장", "finish": "stop"}), Trip_()))
+    assert stop == [{"error": None, "raw": "설명 문장"}]
+    assert steps.desc_line(1, stop[0]) == "[1] (설명 없음)"
+    cut = asyncio.run(steps.describe(Pod_({"text": "설명 문", "finish": "length"}), Trip_()))
+    assert cut == [{"truncated": "설명 문"}]
+
+
+def test_truncated_describe_and_vote_do_not_fail_the_job(tmp_path, loop, caplog):
+    class TruncatingVlm(ScriptedVlm):
+        def __init__(self):
+            super().__init__({"choose": NAME_ONLY})
+            self.prompts = {}
+
+        async def chat(self, messages, image_urls, max_tokens, response_format=None, **options):
+            assert options["allow_truncated"] is True
+            turn = await super().chat(messages, image_urls, max_tokens, response_format, **options)
+            stage = self.calls[-1][0]
+            self.prompts.setdefault(stage, messages[0]["content"][0]["text"])
+            if stage in ("describe", "vote"):
+                return ChatTurn(content=TRUNCATED, finish_reason="length")
+            return turn
+
+    caplog.set_level("INFO")
+    vlm = TruncatingVlm()
+    result, _ = run_scene(tmp_path, loop, vlm, kakao=FakeKakao(found=[CAFE, OTHER]))
+    placed = sorted(a.trip_attachment_id for p in result.places for a in p.attachments)
+    assert placed  # 작업이 실패하지 않고 결과를 낸다
+    n_describe = len([c for c in vlm.calls if c[0] == "describe"])
+    n_vote = len([c for c in vlm.calls if c[0] == "vote"])
+    assert n_describe and n_vote
+    # 잘린 설명이 묶음 제안 지시문에 그룹마다 한 줄로 들어간다
+    lines = [x for x in vlm.prompts["propose"].splitlines() if "(잘림)" in x]
+    assert len(lines) == n_describe
+    assert all(x.endswith('"distinctive": "창가 자리 창가 자리 창가') for x in lines)
+    (summary,) = [r for r in caplog.records if getattr(r, "event", None) == "ai_workflow_summary"]
+    assert summary.model_errors == 0
+    assert summary.model_truncated == n_describe + n_vote
+    assert summary.model_truncated_by_stage["describe"] == n_describe
+    assert sum(v for k, v in summary.model_truncated_by_stage.items() if k.startswith("vote")) == (
+        n_vote
+    )
 
 
 def test_out_of_period_photos_are_unclassified_before_workflow(tmp_path, loop):

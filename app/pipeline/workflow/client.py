@@ -42,6 +42,8 @@ class Pod:
     retries번 다시 보내고(n번째는 RETRY_WAIT_SEC×n초 뒤), 그래도 실패하거나 다시 보낼 만하지 않은
     실패(불완전 응답, GPU 슬롯 대기 초과)면 작업을 실패시킨다(결정 221). 한 호출이 실패하면 그 뒤의
     호출은 보내지 않고 같은 실패를 올린다. 실험 코드는 실패한 호출을 답이 없는 것으로 다뤘다.
+    max_tokens에 걸려 잘린 응답은 실패가 아니며, 잘린 텍스트를 finish="length"로 돌려준다(결정
+    224). 해석은 단계마다 하고, 해석하지 못하면 각 단계의 빈 결과 처리를 따른다.
     """
 
     def __init__(self, vlm, concurrency: int, retries: int) -> None:
@@ -83,6 +85,7 @@ class Pod:
                                 temperature=0,
                                 stream=True,
                                 extra_body=extra,
+                                allow_truncated=True,
                             )
                     except (VLMTransientError, TimeoutError) as exc:
                         if attempt == self.retries:
@@ -91,6 +94,9 @@ class Pod:
                     except VLMUnavailable as exc:
                         self._fail(exc, stage)
                     self.stats["calls"] += 1
+                    if turn.finish_reason == "length":
+                        self.stats["truncated"] += 1
+                        self.stats[f"truncated:{stage.split('-')[0]}"] += 1
                     return {"text": turn.content, "finish": turn.finish_reason}
         finally:
             self.done += 1

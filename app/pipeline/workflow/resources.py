@@ -93,6 +93,9 @@ class WorkflowTimeout(PipelineError):
 
 
 class WorkflowUnavailable(PipelineError):
-    """생성 서버 호출 실패(다시 보낸 뒤에도 실패, 불완전 응답, 슬롯 대기 초과). 작업을 실패시킨다"""
+    """생성 서버 호출 실패(다시 보낸 뒤에도 실패, 불완전 응답, 슬롯 대기 초과). 작업을 실패시킨다.
+
+    출력 토큰 상한에 걸려 잘린 응답은 불완전 응답에 넣지 않는다(결정 224).
+    """
 
     code = ErrorCode.MODEL_NOT_READY

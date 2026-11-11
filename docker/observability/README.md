@@ -49,7 +49,7 @@ Cloud는 Prometheus에 두 API 인스턴스의 사설 주소를 등록하고 Gra
 | `ai_job_received` | Kafka 요청을 접수하거나 거절할 때 | `operation`, `result`, `attachment_count`, 형식 오류의 `invalid_fields` |
 | `ai_job_invalid_retry` | 처리할 수 없는 요청을 다시 시도할 때(3회째에는 `kafka_dlt_published`로 DLT에 보관) | `result`(오류 분류), `attempts`, `partition`, `offset` |
 | `ai_stage` | 정리와 스토리의 단계 하나가 끝날 때 | `stage`, `parent_stage`, `result`, `duration_ms`, 처리 수와 `items_per_sec` |
-| `ai_model_call` | VLM을 호출하거나 S3 URL을 발급할 때 | `target`, `result`, `status_code`, `finish_reason`, 토큰 수, `tokens_per_sec`. `result=cancelled`는 호출자의 더 짧은 시간 제한(검색 단계별 제한 등)이나 작업 취소로 중단된 경우다 |
+| `ai_model_call` | VLM을 호출하거나 S3 URL을 발급할 때 | `target`, `result`, `status_code`, `finish_reason`, 토큰 수, `tokens_per_sec`. `result=cancelled`는 호출자의 더 짧은 시간 제한(검색 단계별 제한 등)이나 작업 취소로 중단된 경우다. `result=truncated_output`은 출력 토큰 상한에 걸려 잘린 응답을 호출자가 받아들인 경우(워크플로우 정리)이고, 받아들이지 않으면 `incomplete_output`이다 |
 | `ai_process_dependency_failed` | 정리 작업의 사진 임베딩 호출이 실패했을 때 | `target`, `status_code`, 예외 종류 |
 | `ai_gpu_gate_unavailable` | GPU 호출 슬롯을 확보하지 못했을 때 | `gate`, `limit`, `wait_ms` |
 | `ai_story_output_invalid` | 생성된 스토리가 출력 규칙을 어겼을 때 | `rule`, 검증 오류 위치 |

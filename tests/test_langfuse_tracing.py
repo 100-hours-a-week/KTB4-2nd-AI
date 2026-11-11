@@ -13,7 +13,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from app.core.tracing import end_trace, stage, start_trace
 from app.infra.vllm_client import VllmClient
-from app.infra.vlm import VLMTransientError
+from app.infra.vlm import VLMTransientError, VLMUnavailable
 from app.observability import langfuse_tracing as lt
 
 SIGNED = "https://bucket.s3.amazonaws.com/trips/1/a.jpg?X-Amz-Signature=secret"
@@ -152,6 +152,42 @@ def test_failed_call_is_marked_and_still_raises(exporter):
     assert spans["gen:vlm"].attributes[ATTR + "level"] == "ERROR"
     assert spans["gen:vlm"].attributes[ATTR + "status_message"] == "VLMTransientError"
     assert spans["story"].attributes[ATTR + "level"] == "ERROR"
+
+
+def test_allowed_truncation_is_returned_inside_a_trace(exporter):
+    """Langfuse 기록 중에도 잘린 응답 허용이 전달된다(결정 224). 허용하지 않으면 그대로 실패."""
+    cut = '{"place_type": "카페", "distinctive": "창가'
+
+    def client():
+        body = {"choices": [{"message": {"content": cut}, "finish_reason": "length"}]}
+        return VllmClient(
+            "http://vlm/v1",
+            "gemma",
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body)),
+        )
+
+    messages = [{"role": "user", "content": "어디인가요?"}]
+
+    async def run():
+        root = lt.start_root("process", trip_id=3)
+        async with client() as vlm:
+            turn = await vlm.chat(messages, [], 32, stream=False, allow_truncated=True)
+            with pytest.raises(VLMUnavailable):
+                await vlm.chat(messages, [], 32)
+        root.end(status="COMPLETED")
+        return turn
+
+    turn = asyncio.run(run())
+    assert (turn.content, turn.finish_reason) == (cut, "length")
+    lt.flush()
+    calls = [
+        span
+        for span in exporter.get_finished_spans()
+        if span.attributes.get(ATTR + "type") == "generation"
+    ]
+    assert len(calls) == 2
+    ok = next(c for c in calls if c.attributes.get(ATTR + "level") != "ERROR")
+    assert cut in ok.attributes[ATTR + "output"]
 
 
 def test_tool_calls_are_recorded_as_output(exporter):

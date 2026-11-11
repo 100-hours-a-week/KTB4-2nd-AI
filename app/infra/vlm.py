@@ -75,6 +75,8 @@ class VlmClient(Protocol):
         값이 있으면 /v1/chat/completions 요청 본문에 그대로 전달하고 None이면 생략한다.
         tools는 OpenAI 호환 function 도구 정의 목록이며 그대로 전달한다. None이면 도구 없이
         요청하고, 응답은 stop으로 끝난 비어 있지 않은 텍스트여야 한다(tool_calls는 빈 목록).
+        VllmClient와 GatedVlm은 allow_truncated=True를 받으면 max_tokens에 걸려 잘린 텍스트
+        (finish_reason=length)도 돌려준다. 워크플로우 정리만 쓴다(결정 224).
         tool_choice는 auto, none, required 또는 특정 function 지정이며 tools가 있을 때만 쓰고
         None이면 auto다. 도구 실행과 arguments 해석, 대화 반복은 호출자가 담당한다.
         temperature는 0 이상 2 이하의 샘플링 온도다. None이면 요청에서 생략해 생성 서버의
