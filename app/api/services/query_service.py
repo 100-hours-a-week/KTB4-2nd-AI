@@ -4,8 +4,9 @@ import asyncio
 import time
 
 from app.core.errors import AppError, ErrorCode
-from app.core.logging import error_fields, get_logger
+from app.core.logging import current_request, error_fields, get_logger
 from app.core.tracing import end_trace, start_trace
+from app.observability import langfuse_tracing
 from app.schemas.query import ParseRequest, ParseResponse, SearchRequest, SearchResponse
 from app.search import pipeline
 from app.search.context import ModelUnavailable, SearchContext, SearchOptions
@@ -32,6 +33,10 @@ class QueryService:
     ) -> ParseResponse | SearchResponse:
         started = time.monotonic()
         trace, token = start_trace(operation)
+        root = langfuse_tracing.start_root(
+            operation, input=request, metadata={"request_id": current_request()}
+        )
+        output = None
         outcome = "error"
         error_code = None
         answer_error = None
@@ -53,6 +58,7 @@ class QueryService:
                     )
                     self._validate_result(request, result)
                 outcome = "success"
+                output = result
                 if isinstance(result, ParseResponse):
                     intent = result.intent
                     parsed = result.parsed
@@ -88,6 +94,11 @@ class QueryService:
             raise AppError(ErrorCode.INTERNAL_ERROR) from exc
         finally:
             end_trace(token)
+            root.end(
+                output=output,
+                status="cancelled" if cancelled else outcome,
+                metadata={"request_id": current_request(), "error_code": error_code},
+            )
             if not cancelled:
                 # 요청이 끝났는데 중단된 단계는 검색 파이프라인의 단계별 시간 제한에 걸린 것이다.
                 for record in trace.stages:

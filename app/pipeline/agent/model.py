@@ -15,6 +15,7 @@ from typing import Any
 from app.infra.kakao_local import KakaoBudget, KakaoUnavailable
 from app.infra.place_index import normalize
 from app.infra.vlm import ChatMessage, ChatTurn, ImagePart, TextPart, VLMTransientError
+from app.observability.langfuse_tracing import call_name
 from app.pipeline.agent import prompts
 from app.pipeline.agent.resources import AgentResources
 from app.pipeline.agent.trip import TripView, photo_ref, region_key
@@ -64,9 +65,10 @@ class Session:
                 urls = await asyncio.gather(*(self.resources.urls.resolve(key) for key in keys))
                 self.stats["model_calls"] += 1
                 try:
-                    return await self.resources.vlm.chat(
-                        messages, list(urls), max_tokens, tools=tools, temperature=0
-                    )
+                    with call_name("agent"):
+                        return await self.resources.vlm.chat(
+                            messages, list(urls), max_tokens, tools=tools, temperature=0
+                        )
                 except (VLMTransientError, TimeoutError):
                     if attempt == retries:
                         raise

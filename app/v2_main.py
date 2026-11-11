@@ -24,6 +24,7 @@ from app.jobs.kafka import KafkaRuntime
 from app.jobs.models import JobStatusResponse
 from app.jobs.redis_store import RedisJobStore
 from app.jobs.runner import drain_story_runners, story_runners
+from app.observability import langfuse_tracing
 from app.schemas.runpod import RunpodStatusResponse
 from app.schemas.task import CancelResponse, TaskStatus
 
@@ -98,8 +99,12 @@ def create_app(
                 try:
                     await search_resources.aclose()
                 finally:
-                    if redis:
-                        await redis.aclose()
+                    try:
+                        if redis:
+                            await redis.aclose()
+                    finally:
+                        # 남은 Langfuse 기록을 보내고 전송 스레드를 멈춘다.
+                        await langfuse_tracing.ashutdown()
 
     app = FastAPI(title="여담 AI v2", lifespan=lifespan)
     register_error_handlers(app)
