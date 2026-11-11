@@ -26,7 +26,7 @@ from app.schemas.query import (
 from app.search import dates, prompts, regions
 from app.search.context import InvalidModelOutput, ModelUnavailable, SearchOptions
 from app.search.mock import MockEmbedder, MockImages, MockVLM, create_mock_context
-from app.search.pipeline import search
+from app.search.pipeline import parse, search
 
 pytestmark = pytest.mark.anyio
 AUTH = {"Authorization": "Bearer test-key", "X-Request-ID": "search-test"}
@@ -565,7 +565,115 @@ async def test_search_log_fields_keep_ranking_before_cutoff():
     assert fields["result_ids"] == [2, 1]
     assert fields["ranked_scores"] == [[2, 0.6], [1, 0.5], [3, 0.3]]
     assert fields["cutoff_threshold"] == 0.48
-    assert body["query"] not in json.dumps(fields, ensure_ascii=False)
+    assert fields["query"] == body["query"]
+    assert fields["visual_query"] == "바다"
+    assert fields["limit"] == 30
+    assert "answer" not in fields
+
+
+async def traced_parse(body, context):
+    """질의 해석 하나를 Trace 안에서 실행하고 응답과 ai_query에 붙을 fields를 반환"""
+    trace, token = start_trace("parse")
+    try:
+        response = await parse(ParseRequest.model_validate(body), context, SearchOptions())
+    finally:
+        end_trace(token)
+    return response, trace.fields
+
+
+class RawVLM(MockVLM):
+    """해석 호출에 정해진 원출력을 돌려줌"""
+
+    def __init__(self, content):
+        self.content = content
+
+    async def chat(
+        self, messages, image_urls, max_tokens, response_format=None, *, temperature=None
+    ):
+        return ChatTurn(self.content)
+
+
+async def test_parse_log_fields_keep_query_and_parse_result():
+    body = {"query": "작년 강릉 바다", "reference_date": "2026-10-11"}
+    output = {
+        "intent": "SEARCH",
+        "date_from": "2025-01-01",
+        "date_to": "2025-12-31",
+        "relative_date": {"unit": "none", "offset": None, "weekday": None, "season": None},
+        "region_names": ["강릉시"],
+        "visual_query": "바다",
+    }
+    context = replace(create_mock_context(), vlm=RawVLM(json.dumps(output, ensure_ascii=False)))
+    response, fields = await traced_parse(body, context)
+
+    assert response.parsed is True
+    assert response.date_from is not None and response.region_names
+    assert fields["query"] == "작년 강릉 바다"
+    assert fields["reference_date"] == "2026-10-11"
+    assert fields["date_from"] == response.date_from.isoformat()
+    assert fields["date_to"] == response.date_to.isoformat()
+    assert fields["region_names"] == response.region_names
+    assert fields["visual_query"] == "바다"
+    assert "parse_fallback_reason" not in fields and "model_output" not in fields
+
+
+@pytest.mark.parametrize(
+    "vlm,reason",
+    [
+        (FailingVLM(VLMUnavailable("private URL")), "vlm_unavailable"),
+        (SlowVLM(), "timeout"),
+    ],
+)
+async def test_parse_log_fields_mark_fallback_reason(vlm, reason):
+    body = {"query": "작년 바다", "reference_date": "2026-10-11"}
+    trace, token = start_trace("parse")
+    try:
+        response = await parse(
+            ParseRequest.model_validate(body),
+            replace(create_mock_context(), vlm=vlm),
+            SearchOptions(parse_timeout_sec=0.01),
+        )
+    finally:
+        end_trace(token)
+
+    assert response.parsed is False
+    assert trace.fields["query"] == "작년 바다"
+    assert trace.fields["parse_fallback_reason"] == reason
+    assert "model_output" not in trace.fields and "visual_query" not in trace.fields
+    assert "private URL" not in json.dumps(trace.fields, ensure_ascii=False)
+
+
+async def test_parse_log_fields_keep_truncated_output_on_invalid_format():
+    raw = "형식이 아닌 출력" * 100
+    context = replace(create_mock_context(), vlm=RawVLM(raw))
+    response, fields = await traced_parse(
+        {"query": "작년 바다", "reference_date": "2026-10-11"}, context
+    )
+
+    assert response.parsed is False
+    assert fields["parse_fallback_reason"] == "invalid_output"
+    assert fields["model_output"] == raw[:500]
+
+
+async def test_question_log_fields_keep_answer():
+    output = '{"answerable": true, "answer": "사진 속에는 다섯 명이 있습니다."}'
+    context = replace(create_mock_context(), vlm=ScriptedVLM(output))
+    response, fields = await traced_search(search_body("QUESTION"), context)
+
+    assert response.answer == "사진 속에는 다섯 명이 있습니다."
+    assert fields["query"] == "바다 사진 보여줘"
+    assert fields["answer"] == response.answer
+    assert fields["result_ids"] == [item.trip_attachment_id for item in response.attachments]
+    assert "model_output" not in fields
+
+
+async def test_question_log_fields_keep_output_on_invalid_answer():
+    context = replace(create_mock_context(), vlm=ScriptedVLM('{"answerable": true}'))
+    response, fields = await traced_search(search_body("QUESTION"), context)
+
+    assert response.answer_error == "VLM_UNAVAILABLE"
+    assert "answer" not in fields
+    assert fields["model_output"] == '{"answerable": true}'
 
 
 async def test_search_log_fields_mark_taken_at_order():
@@ -1186,6 +1294,8 @@ async def test_query_logs_distinguish_empty_results_failures_and_parse_outcomes(
         ("error", "SEARCH", 2, None, None),
     ]
     assert all(e["event"] == "ai_query" and e["duration_ms"] >= 0 for e in events)
+    # 질문 원문은 남기고(#185) 외부 예외 본문과 사진 키는 남기지 않음
+    assert events[0]["query"] == "사진?"
     serialized = json.dumps(events, ensure_ascii=False)
-    assert "사진?" not in serialized and "private URL" not in serialized
+    assert "private URL" not in serialized
     assert "trips/1/" not in serialized
