@@ -597,3 +597,19 @@ def test_langfuse_root_and_stage_leave_global_context_alone(langfuse_spans):  # 
     recorded = langfuse_finished(langfuse_spans)
     assert recorded["embed"].parent.span_id == recorded["search"].context.span_id
     assert recorded["search"].parent is None
+
+
+def test_root_ended_in_another_task_stops_recording(langfuse_spans):  # noqa: F811
+    async def run():
+        root = langfuse_tracing.start_root("search")
+        await asyncio.create_task(asyncio.to_thread(lambda: None))
+        await asyncio.gather(asyncio.create_task(_end(root)))
+        # 끝난 루트의 맥락이 남아도 그 아래에 단계를 기록하지 않는다.
+        with stage("late"):
+            return langfuse_tracing.active()
+
+    async def _end(root):
+        root.end(status="success")
+
+    assert asyncio.run(run()) is False
+    assert "late" not in langfuse_finished(langfuse_spans)

@@ -134,8 +134,14 @@ def active() -> bool:
 
 
 def _recording() -> bool:
-    """이 모듈이 연 트레이스 안인지. 다른 계측의 span 아래에서는 기록하지 않는다."""
-    return _lf_context.get() is not None
+    """이 모듈이 연 트레이스 안인지. 다른 계측의 span 아래에서는 기록하지 않는다.
+
+    다른 태스크에서 끝낸 루트처럼 이미 끝난 관측이 남아 있으면 기록하지 않는다.
+    """
+    from opentelemetry import trace as otel_trace
+
+    current = _lf_context.get()
+    return current is not None and otel_trace.get_current_span(current).is_recording()
 
 
 def _start_child(lf: Any, **fields: Any) -> Any:
@@ -150,10 +156,20 @@ def _start_child(lf: Any, **fields: Any) -> Any:
 
 
 def _enter(observation: Any, base: Any) -> Any:
-    """observation을 현재 Langfuse 관측으로 삼는다. 반환한 token으로 되돌린다."""
+    """observation을 현재 Langfuse 관측으로 삼는다. 반환한 token으로 되돌린다.
+
+    실패하면 만든 관측을 바로 끝내 내보내지 못한 채 남지 않게 한다.
+    """
     from opentelemetry import trace as otel_trace
 
-    return _lf_context.set(otel_trace.set_span_in_context(observation._otel_span, base))
+    try:
+        return _lf_context.set(otel_trace.set_span_in_context(observation._otel_span, base))
+    except Exception:
+        try:
+            observation.end()
+        except Exception:
+            pass
+        raise
 
 
 def _leave(token: Any) -> None:
