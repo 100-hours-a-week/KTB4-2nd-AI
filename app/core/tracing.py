@@ -18,6 +18,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.observability import otel_context
 from app.observability.langfuse_tracing import Span
 
 log = logging.getLogger("app.core.tracing")
@@ -58,6 +59,8 @@ class Trace:
         with self._lock:
             self.stages.append(record)
         if self.emit_stage_logs:
+            # 정리와 스토리 작업만. 이미 잰 시간으로 현재 ai.execute 아래 단계 Span을 남긴다.
+            otel_context.stage_span(self.operation, record.full_name, record.result, record.seconds)
             log.info(
                 "처리 단계 종료",
                 extra={

@@ -11,16 +11,21 @@ from pydantic import (
     Field,
     TypeAdapter,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
 from app.core.errors import DEFAULT_MESSAGE, ErrorCode
+from app.observability.otel_context import valid_carrier
 from app.schemas.process import Period, ProcessRequest, ProcessResult, RequestModel
 from app.schemas.task import ErrorBody, Progress, TaskStatus
 
 JobKind = Literal["process", "story"]
 TerminalStatus = Literal["COMPLETED", "FAILED", "CANCELED"]
 RESULT_MAX_BYTES = 512 * 1024
+# 값이 없으면 JSON 키 자체를 쓰지 않는 선택 필드. 이 필드를 모르는 이전 이미지(extra=forbid)도
+# 쓰기를 켜기 전의 기록을 읽을 수 있어야 한다.
+TRACE_FIELDS = ("trace_context", "result_trace_context")
 PHOTOS_READY_MAX_BYTES = 2 * 1024 * 1024
 
 
@@ -200,6 +205,25 @@ class JobRecord(StrictModel):
     publish_owner: str | None = None
     publish_until: float = 0
     published: bool = False
+    # OpenTelemetry carrier(traceparent, 선택적 tracestate). 업무 본문(request)과 분리한다.
+    # 접수 Span의 Context, JOBS_TRACE_CONTEXT_WRITE가 켜졌을 때만 기록
+    trace_context: dict[str, str] | None = None
+    # 실행 Span의 Context, 결과 저장과 같은 트랜잭션으로 기록. 실행 자식이 없던 실패는 None
+    result_trace_context: dict[str, str] | None = None
+
+    @field_validator(*TRACE_FIELDS, mode="before")
+    @classmethod
+    def drop_invalid_carrier(cls, value: Any) -> dict[str, str] | None:
+        # 관측 값이 잘못돼도 작업 기록을 읽지 못하게 만들지 않는다.
+        return valid_carrier(value)
+
+    @model_serializer(mode="wrap")
+    def omit_empty_trace_fields(self, handler) -> dict[str, Any]:
+        data = handler(self)
+        for name in TRACE_FIELDS:
+            if data.get(name) is None:
+                data.pop(name, None)
+        return data
 
     @property
     def identity(self) -> str:

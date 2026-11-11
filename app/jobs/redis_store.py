@@ -512,10 +512,14 @@ class RedisJobStore:
         status: TerminalStatus,
         result: dict | None = None,
         error: ErrorBody | None = None,
+        trace_context: dict[str, str] | None = None,
     ) -> bool:
         def update(record: JobRecord, now: float) -> bool:
             if not self.owns(record, owner, now):
                 return False
+            if trace_context is not None:
+                # 결과 event가 pending으로 공개되는 같은 트랜잭션에 저장한다.
+                record.result_trace_context = trace_context
             if record.cancel_requested:
                 self.terminate(record, "CANCELED")
             else:
