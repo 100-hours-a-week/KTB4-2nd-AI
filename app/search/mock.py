@@ -3,6 +3,8 @@
 import json
 from typing import Any
 
+import numpy as np
+
 from app.infra.vlm import ChatMessage, ChatTurn
 from app.schemas.query import SearchHit
 from app.search.context import SearchContext
@@ -59,6 +61,10 @@ class MockVectors:
             SearchHit(trip_attachment_id=photo_id, score=0.9 - 0.002 * index)
             for index, photo_id in enumerate(candidate_ids[:limit])
         ]
+
+    async def fetch(self, ids: list[int]) -> dict[int, np.ndarray]:
+        # 벡터가 없으면 중복 제거를 건너뜀, mock 결과 장수를 그대로 유지
+        return {}
 
 
 class MockImages:

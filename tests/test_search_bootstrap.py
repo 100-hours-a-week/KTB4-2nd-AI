@@ -317,7 +317,10 @@ async def test_owned_qwen_client_search_http_and_failure_contract(monkeypatch, o
     monkeypatch.setattr(VllmClient, "from_settings", lambda cfg: vlm)
     images = Mock(resolve=AsyncMock(), aclose=AsyncMock())
     monkeypatch.setattr(S3ImageResolver, "from_settings", lambda cfg: images)
-    vectors = Mock(search=AsyncMock(side_effect=MockVectors().search))
+    vectors = Mock(
+        search=AsyncMock(side_effect=MockVectors().search),
+        fetch=AsyncMock(side_effect=MockVectors().fetch),
+    )
 
     async with environment() as (cfg, store, _, _producer):
         app = create_app(

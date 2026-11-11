@@ -8,6 +8,7 @@ from dataclasses import replace
 from datetime import date
 
 import httpx
+import numpy as np
 import pytest
 from pydantic import ValidationError
 
@@ -26,7 +27,7 @@ from app.schemas.query import (
 from app.search import dates, prompts, regions
 from app.search.context import InvalidModelOutput, ModelUnavailable, SearchOptions
 from app.search.mock import MockEmbedder, MockImages, MockVLM, create_mock_context
-from app.search.pipeline import parse, search
+from app.search.pipeline import drop_duplicates, parse, search
 
 pytestmark = pytest.mark.anyio
 AUTH = {"Authorization": "Bearer test-key", "X-Request-ID": "search-test"}
@@ -88,13 +89,22 @@ class SlowVLM(MockVLM):
 
 
 class FixedVectors:
-    def __init__(self, hits):
+    def __init__(self, hits, vectors=None, fetch_error=None):
         self.hits = hits
+        self.vectors = vectors or {}
+        self.fetch_error = fetch_error
         self.candidate_ids = None
+        self.fetched = None
 
     async def search(self, vector, *, candidate_ids, limit):
         self.candidate_ids = candidate_ids
         return self.hits
+
+    async def fetch(self, ids):
+        self.fetched = ids
+        if self.fetch_error:
+            raise self.fetch_error
+        return {i: self.vectors[i] for i in ids if i in self.vectors}
 
 
 class SpyImages(MockImages):
@@ -1299,3 +1309,95 @@ async def test_query_logs_distinguish_empty_results_failures_and_parse_outcomes(
     serialized = json.dumps(events, ensure_ascii=False)
     assert "private URL" not in serialized
     assert "trips/1/" not in serialized
+
+
+def unit(*values):
+    vector = np.asarray(values, dtype=np.float32)
+    return vector / np.linalg.norm(vector)
+
+
+# 1과 2는 같은 장면(코사인 약 0.995), 3은 다른 사진(1과 코사인 0.6)
+SCENE = {1: unit(1, 0), 2: unit(1, 0.1), 3: unit(0.6, 0.8)}
+
+
+def test_drop_duplicates_keeps_first_of_similar_photos():
+    kept, removed = drop_duplicates([1, 2, 3], SCENE, 0.97)
+
+    assert kept == [1, 3]
+    assert removed == [[2, 1, 0.995]]
+
+
+def test_drop_duplicates_keeps_photos_below_threshold_or_without_vector():
+    # 코사인 0.995는 0.999 미만이라 유지, 벡터가 없거나 노름이 0이면 비교 없이 유지
+    vectors = SCENE | {5: np.zeros(2, dtype=np.float32)}
+    kept, removed = drop_duplicates([1, 2, 4, 5], vectors, 0.999)
+
+    assert kept == [1, 2, 4, 5]
+    assert removed == []
+
+
+async def test_vector_search_removes_similar_photo_and_logs_it():
+    vectors = FixedVectors(hits(0.60, 0.58, 0.55), vectors=SCENE)
+    context = replace(create_mock_context(), vectors=vectors)
+    response, fields = await traced_search(search_body(count=3), context)
+
+    assert [hit.trip_attachment_id for hit in response.attachments] == [1, 3]
+    assert vectors.fetched == [1, 2, 3]
+    assert fields["result_ids"] == [1, 3]
+    assert fields["dedup_result"] == "applied"
+    assert fields["dedup_threshold"] == 0.97
+    assert fields["dedup_removed"] == [[2, 1, 0.995]]
+
+
+async def test_taken_at_search_fills_removed_slot_with_next_photo():
+    # limit 2, 이른 시각 순서 2, 1, 3에서 1이 2와 같은 장면이라 빠지고 3이 채움
+    vectors = FixedVectors([], vectors=SCENE)
+    context = replace(create_mock_context(), vectors=vectors, embedder=UnexpectedEmbedder())
+    body = timed_body("9월 11일 사진 보여줘", None, [9, 8, 10]) | {"limit": 2}
+    response, fields = await traced_search(body, context)
+
+    assert vectors.fetched == [2, 1, 3]
+    assert [(hit.trip_attachment_id, hit.score) for hit in response.attachments] == [
+        (2, 1.0),
+        (3, 0.5),
+    ]
+    assert fields["result_ids"] == [2, 3]
+    assert fields["dedup_removed"] == [[1, 2, 0.995]]
+
+
+@pytest.mark.parametrize("error", [ModelUnavailable("down"), TimeoutError()])
+async def test_dedup_fetch_failure_keeps_results(error):
+    vectors = FixedVectors(hits(0.60, 0.58, 0.55), vectors=SCENE, fetch_error=error)
+    context = replace(create_mock_context(), vectors=vectors)
+    response, fields = await traced_search(search_body(count=3), context)
+
+    assert [hit.trip_attachment_id for hit in response.attachments] == [1, 2, 3]
+    assert fields["dedup_result"] == "fallback"
+    assert "dedup_removed" not in fields
+
+
+async def test_single_result_skips_vector_fetch():
+    vectors = FixedVectors(hits(0.60), vectors=SCENE)
+    context = replace(create_mock_context(), vectors=vectors)
+    response, fields = await traced_search(search_body(count=1), context)
+
+    assert [hit.trip_attachment_id for hit in response.attachments] == [1]
+    assert vectors.fetched is None
+    assert "dedup_result" not in fields
+
+
+async def test_question_evidence_excludes_similar_photo():
+    images = SpyImages()
+    vectors = FixedVectors(hits(0.60, 0.58, 0.55), vectors=SCENE)
+    context = replace(create_mock_context(), images=images, vectors=vectors)
+    async with client_for(context) as client:
+        response = await client.post("/query/search", json=search_body("QUESTION", 3))
+        assert response.status_code == 200
+        returned = [item["trip_attachment_id"] for item in response.json()["attachments"]]
+        assert returned == [1, 3]
+        assert images.keys == ["trips/1/0.jpg", "trips/1/2.jpg"]
+
+
+def test_dedup_threshold_must_be_in_range():
+    with pytest.raises(ValueError, match="dedup_threshold"):
+        SearchOptions(dedup_threshold=0)

@@ -155,9 +155,15 @@ async def test_search_pipeline_uses_async_vectors_as_candidate_searcher(vectors)
         limit=2,
     )
 
-    response = await pipeline.search(request, context, SearchOptions())
+    # 1과 3은 코사인 0.994라 기본 중복 제거에서 3이 빠짐, 후보 범위만 보려고 중복 제거를 끔
+    response = await pipeline.search(request, context, SearchOptions(dedup_threshold=1.0))
 
     assert [hit.trip_attachment_id for hit in response.attachments] == [1, 3]
+
+    # 실제 Qdrant 벡터 조회로 같은 장면(1과 3) 제거
+    response = await pipeline.search(request, context, SearchOptions())
+
+    assert [hit.trip_attachment_id for hit in response.attachments] == [1]
 
 
 @pytest.mark.parametrize("operation", ["search", "fetch", "collection_exists"])

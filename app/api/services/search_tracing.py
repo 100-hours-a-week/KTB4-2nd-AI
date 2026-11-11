@@ -2,7 +2,8 @@
 
 검색 알고리즘(app.search)은 그대로 두고, 구성 단계에서 의존성만 감싼다.
 단계 이름은 interpret(질의 해석 VLM), embed(질의 임베딩), retrieve(후보 범위 벡터 검색),
-sign_url(답변용 사진 URL 발급), answer(답변 VLM)이다. 같은 단계를 여러 번 부르면 합산된다.
+dedup_fetch(결과 안 중복 제거용 벡터 조회), sign_url(답변용 사진 URL 발급), answer(답변 VLM)이다.
+같은 단계를 여러 번 부르면 합산된다.
 """
 
 from app.core.tracing import current_trace, stage
@@ -66,6 +67,11 @@ class TracedVectors:
                 min_score=round(min(scores), 4) if scores else None,
             )
         return hits
+
+    async def fetch(self, ids):
+        # 결과 안 중복 제거용 사진 벡터 조회
+        with stage("dedup_fetch"):
+            return await self.inner.fetch(ids)
 
 
 class TracedImages:
