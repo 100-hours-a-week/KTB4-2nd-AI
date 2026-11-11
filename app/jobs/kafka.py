@@ -23,6 +23,7 @@ from app.core.logging import get_logger, validation_fields
 from app.jobs.config import JobsSettings
 from app.jobs.models import MESSAGE, JobRecord, PhotosReadyMessage
 from app.jobs.redis_store import RedisJobStore
+from app.observability import otel_context
 from app.schemas.task import ErrorBody, Progress
 
 log = get_logger(__name__)
@@ -46,6 +47,8 @@ class Incoming:
     offset: int
     key: bytes | None
     value: bytes | None
+    # Kafka Header. 구형 생성 코드와 Header 없는 메시지를 위해 선택 필드로 둔다.
+    headers: tuple[tuple[str, bytes], ...] = ()
 
 
 def connection_options(cfg: JobsSettings) -> dict[str, Any]:
@@ -79,6 +82,18 @@ class RequestReceiver:
         self.producer = producer
 
     async def accept(self, message: Incoming) -> str:
+        """수신 1회마다 ai.receive Span 하나. 재전달과 재시도도 새 Span ID로 남는다."""
+        route = self.store.cfg.topics.get(message.topic)
+        with otel_context.span(
+            "ai.receive",
+            parent=otel_context.carrier_from_headers(message.headers),
+            kind="consumer",
+            operation=route[0] if route else None,
+        ) as span:
+            span.result = await self.handle(message)
+            return span.result
+
+    async def handle(self, message: Incoming) -> str:
         route = self.store.cfg.topics.get(message.topic)
         if route is None:
             raise ValueError("허용하지 않은 요청 토픽")
@@ -145,6 +160,10 @@ class RequestReceiver:
             result_topic=result_topic,
             created_at=0,
             progress=Progress(done=0, total=total),
+            # photos_ready는 이 경로에 오지 않으므로 최종 process의 Context만 저장한다.
+            trace_context=otel_context.current_carrier()
+            if self.store.cfg.JOBS_TRACE_CONTEXT_WRITE
+            else None,
         )
         if error:
             self.store.terminate(record, "FAILED", error=error)
@@ -233,7 +252,12 @@ async def consume_requests(consumer: AIOKafkaConsumer, receiver: RequestReceiver
     while True:
         message = await consumer.getone()
         incoming = Incoming(
-            message.topic, message.partition, message.offset, message.key, message.value
+            message.topic,
+            message.partition,
+            message.offset,
+            message.key,
+            message.value,
+            tuple(message.headers or ()),
         )
         while True:
             try:
@@ -301,50 +325,70 @@ async def publish_results(store: RedisJobStore, producer: Producer) -> None:
                 if record is None:
                     continue
                 payload = record.event.model_dump_json().encode()
-                try:
-                    await asyncio.wait_for(
-                        producer.send_and_wait(
-                            record.result_topic,
-                            payload,
-                            key=str(record.trip_id).encode(),
-                        ),
-                        timeout=store.cfg.JOBS_PUBLISH_LEASE_SEC / 2,
-                    )
-                    # 브로커 확인 뒤에만 전송 완료. 여기서 장애가 나면 결과는 재전달될 수 있다.
-                    await store.acknowledge_result(identity, publisher)
-                    log.info(
-                        "결과 발행 완료",
-                        extra={
-                            **result_fields(record),
-                            "event": "ai_job_result_published",
-                            "result": "success",
-                            "payload_bytes": len(payload),
-                        },
-                    )
-                except MessageSizeTooLargeError:
-                    # 압축 전 제한도 존재한다. 결과를 버리거나 분석을 다시 실행하지 않는다.
-                    log.error(
-                        "Kafka 메시지 크기 제한 초과, 결과 보관 유지",
-                        extra={
-                            **result_fields(record),
-                            "event": "ai_job_result_too_large",
-                            "result": "too_large",
-                            "payload_bytes": len(payload),
-                        },
-                    )
-                except (KafkaError, RedisError, OSError) as exc:
-                    log.warning(
-                        "결과 전달 대기 유지",
-                        extra={
-                            **result_fields(record),
-                            "event": "ai_job_result_retry",
-                            "result": "retry",
-                            "error_type": type(exc).__name__,
-                        },
-                    )
+                # 발행 시도마다 새 Span. 실행 자식이 결과를 못 남겼으면 접수 Context로 잇는다.
+                with otel_context.span(
+                    "ai.publish",
+                    parent=record.result_trace_context or record.trace_context,
+                    kind="producer",
+                    operation=record.kind,
+                ) as span:
+                    span.result = await publish_one(store, producer, record, payload, publisher)
         except (RedisError, OSError):
             log.warning("작업 저장소 재연결 대기", extra={"event": "ai_job_store_retry"})
         await asyncio.sleep(store.cfg.JOBS_POLL_SEC)
+
+
+async def publish_one(
+    store: RedisJobStore, producer: Producer, record: JobRecord, payload: bytes, publisher: str
+) -> str:
+    """결과 1건 발행. 결과 body, key, topic은 그대로 두고 Trace Header만 더한다."""
+    identity = record.identity
+    try:
+        await asyncio.wait_for(
+            producer.send_and_wait(
+                record.result_topic,
+                payload,
+                key=str(record.trip_id).encode(),
+                # 이 발행 시도 Span의 Context. 계측이 없거나 부모가 없으면 Header를 붙이지 않는다.
+                headers=otel_context.kafka_headers(otel_context.current_carrier()),
+            ),
+            timeout=store.cfg.JOBS_PUBLISH_LEASE_SEC / 2,
+        )
+        # 브로커 확인 뒤에만 전송 완료. 여기서 장애가 나면 결과는 재전달될 수 있다.
+        await store.acknowledge_result(identity, publisher)
+        log.info(
+            "결과 발행 완료",
+            extra={
+                **result_fields(record),
+                "event": "ai_job_result_published",
+                "result": "success",
+                "payload_bytes": len(payload),
+            },
+        )
+        return "success"
+    except MessageSizeTooLargeError:
+        # 압축 전 제한도 존재한다. 결과를 버리거나 분석을 다시 실행하지 않는다.
+        log.error(
+            "Kafka 메시지 크기 제한 초과, 결과 보관 유지",
+            extra={
+                **result_fields(record),
+                "event": "ai_job_result_too_large",
+                "result": "too_large",
+                "payload_bytes": len(payload),
+            },
+        )
+        return "too_large"
+    except (KafkaError, RedisError, OSError) as exc:
+        log.warning(
+            "결과 전달 대기 유지",
+            extra={
+                **result_fields(record),
+                "event": "ai_job_result_retry",
+                "result": "retry",
+                "error_type": type(exc).__name__,
+            },
+        )
+        return "retry"
 
 
 async def recover_jobs(store: RedisJobStore) -> None:

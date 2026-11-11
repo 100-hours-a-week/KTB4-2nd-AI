@@ -50,6 +50,9 @@ class JobsSettings(Settings):
     # 업로드 묶음에서 계산한 사진 지표의 보관 기간, 만료된 사진은 정리가 다시 다운로드해 계산
     JOBS_PHOTO_METRICS_TTL_SEC: int = Field(default=7 * 86400, gt=0)
     JOBS_FAKE_PIPELINE: bool = False
+    # Redis 작업 기록에 OTel carrier(trace_context, result_trace_context)를 쓸지. 읽기는 항상 한다.
+    # 모든 API, 실행기, 실행 자식이 이 필드를 읽는 이미지가 된 뒤에 켠다. 끄면 새 쓰기만 멈춘다.
+    JOBS_TRACE_CONTEXT_WRITE: bool = False
     # async def handler(request: dict, reporter: JobReporter) -> dict
     JOBS_PROCESS_HANDLER: str | None = None
     JOBS_STORY_HANDLER: str | None = None

@@ -31,7 +31,7 @@ from app.jobs.config import JobsSettings
 from app.jobs.models import JobKind, PhotoMetricsRecord
 from app.jobs.process_guard import parent_guard
 from app.jobs.redis_store import RedisJobStore
-from app.observability import langfuse_tracing
+from app.observability import langfuse_tracing, otel_context
 from app.schemas.task import TERMINAL_STATUSES, ErrorBody
 
 log = get_logger(__name__)
@@ -104,10 +104,11 @@ def handler_for(cfg: JobsSettings, kind: JobKind):
     return handler
 
 
-async def execute(store: RedisJobStore, identity: str, owner: str, handler) -> None:
+async def execute(store: RedisJobStore, identity: str, owner: str, handler) -> str | None:
+    """작업 1건 실행 후 요약에 쓴 상태를 반환. 실행하지 않았으면 None"""
     record = await store.get(identity)
     if record is None or not store.owns(record, owner, await store.now()):
-        return
+        return None
     reporter = JobReporter(store, identity, owner, record.kind)
 
     def failure(exc: BaseException, code: ErrorCode) -> dict:
@@ -131,6 +132,8 @@ async def execute(store: RedisJobStore, identity: str, owner: str, handler) -> N
             fields["error_type"] = type(exc).__name__
         return fields
 
+    # 결과 발행이 이어받을 실행 Span의 Context. 결과 저장과 같은 트랜잭션으로 기록한다.
+    result_trace = otel_context.current_carrier() if store.cfg.JOBS_TRACE_CONTEXT_WRITE else None
     trace, token = start_trace(record.kind, emit_stage_logs=True)
     root = langfuse_tracing.start_root(
         record.kind,
@@ -145,11 +148,11 @@ async def execute(store: RedisJobStore, identity: str, owner: str, handler) -> N
         result = await handler(record.request, reporter)
         status = "COMPLETED"
         reporter.close_step("success")
-        await store.finish(identity, owner, "COMPLETED", result=result)
+        await store.finish(identity, owner, "COMPLETED", result=result, trace_context=result_trace)
     except PipelineCancelled:
         status = "CANCELED"
         reporter.close_step("cancelled")
-        await store.finish(identity, owner, "CANCELED")
+        await store.finish(identity, owner, "CANCELED", trace_context=result_trace)
     except PipelineError as exc:
         status = "FAILED"
         log.warning("작업 실패", extra=failure(exc, exc.code))
@@ -159,6 +162,7 @@ async def execute(store: RedisJobStore, identity: str, owner: str, handler) -> N
             owner,
             "FAILED",
             error=ErrorBody(code=exc.code, message=exc.message, detail=exc.detail),
+            trace_context=result_trace,
         )
     except Exception as exc:
         status = "FAILED"
@@ -170,6 +174,7 @@ async def execute(store: RedisJobStore, identity: str, owner: str, handler) -> N
             owner,
             "FAILED",
             error=ErrorBody(code=ErrorCode.INTERNAL_ERROR, message="작업 실행에 실패했습니다."),
+            trace_context=result_trace,
         )
     finally:
         # 소유권 상실로 태스크가 취소되면 status는 ABORTED로 남고 아래 지표 기록은 실행되지 않는다.
@@ -199,6 +204,8 @@ async def execute(store: RedisJobStore, identity: str, owner: str, handler) -> N
             await record_evaluations(store, status, trace.evaluations)
             if status == "COMPLETED":
                 langfuse_tracing.score_evaluations(root.trace_id, trace.evaluations)
+                if record.kind == "story":
+                    langfuse_tracing.enqueue_review(root.trace_id)
     except Exception as exc:
         # 관측 실패가 이미 저장한 작업 결과를 바꾸지 않는다. 취소(CancelledError)는 그대로 전파된다.
         log.warning(
@@ -206,6 +213,7 @@ async def execute(store: RedisJobStore, identity: str, owner: str, handler) -> N
         )
         if not trace.summarized:
             log_summary(record.kind, status, trace)
+    return status
 
 
 async def record_evaluations(store: RedisJobStore, status: str, reports: list[dict]) -> None:
@@ -369,6 +377,40 @@ async def run_job(
 
     bind_trip(record.trip_id)
     bind_job(record.execution_id)
+    try:
+        # 부모 프로세스의 Context가 아니라 Redis 작업 기록의 carrier로 복원한다.
+        # 미리 기동한 대기 자식도 작업을 받은 뒤 이 기록을 읽는다.
+        with otel_context.span(
+            "ai.execute", parent=record.trace_context, operation=record.kind
+        ) as span:
+            span.result = await supervise_execution(
+                cfg, store, record, identity, owner, handler, handoff_wait_ms
+            )
+    finally:
+        try:
+            await redis.aclose()
+        finally:
+            # 작업마다 프로세스가 끝나므로 남은 Langfuse 기록과 OTel Span을 여기서 보낸다.
+            await langfuse_tracing.ashutdown()
+            await otel_context.flush()
+
+
+EXECUTION_RESULTS = {"COMPLETED": "success", "FAILED": "error", "CANCELED": "cancelled"}
+
+
+async def supervise_execution(
+    cfg: JobsSettings,
+    store: RedisJobStore,
+    record,
+    identity: str,
+    owner: str,
+    handler: Callable | None,
+    handoff_wait_ms: float | None,
+) -> str:
+    """handler 실행과 소유권 감시. ai.execute Span의 결과를 반환
+
+    success, error, cancelled 외에 소유권을 잃으면 lease_lost, 실행하지 못했으면 aborted
+    """
     if handoff_wait_ms is not None:
         # 0에 가까우면 인계 시점에 준비 완료, 크면 그만큼 남은 준비를 기다린 것
         log.info(
@@ -399,6 +441,7 @@ async def run_job(
                 )
                 raise RuntimeError("실행 소유권 만료")
 
+    # 두 태스크는 ai.execute가 활성인 Context를 복사해 handler와 종료 로그까지 같은 Trace에 남긴다.
     task = asyncio.create_task(
         execute(store, identity, owner, handler or handler_for(cfg, record.kind))
     )
@@ -409,11 +452,12 @@ async def run_job(
         task.cancel()
         monitor.cancel()
         await asyncio.gather(task, monitor, return_exceptions=True)
-        try:
-            await redis.aclose()
-        finally:
-            # 작업마다 프로세스가 끝나므로 남은 Langfuse 기록을 여기서 보낸다.
-            await langfuse_tracing.ashutdown()
+    if monitor.done() and not monitor.cancelled() and monitor.exception() is not None:
+        return "lease_lost"
+    if task.cancelled() or task.exception() is not None:
+        return "aborted"
+    status = task.result()
+    return EXECUTION_RESULTS.get(status, "aborted") if status else "aborted"
 
 
 async def main(identity: str, owner: str) -> None:
