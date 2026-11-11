@@ -16,13 +16,17 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from pydantic import create_model
 
-from app.core.logging import JsonFormatter
+from app.core.logging import JsonFormatter, otel_ids
+from app.core.tracing import stage
 from app.jobs import execution
 from app.jobs.kafka import RequestReceiver, publish_results
+from app.jobs.mock import run as mock_run
 from app.jobs.models import TRACE_FIELDS, JobRecord, StrictModel, identity
 from app.jobs.runner import StandbyChildren, run_claimed
-from app.observability import otel_context
+from app.observability import langfuse_tracing, otel_context
 from app.schemas.task import Progress
+from tests.test_langfuse_tracing import exporter as langfuse_spans  # noqa: F401
+from tests.test_langfuse_tracing import finished as langfuse_finished
 from tests.test_v2_jobs import environment, message, process_request, scenario, story_request
 
 TRACE_ID = "0af7651916cd43dd8448eb211c80319c"
@@ -504,3 +508,108 @@ async def test_real_child_process_restores_context_from_redis(path, tmp_path, mo
         assert dict(sent_headers)["traceparent"].decode() == (
             f"00-{TRACE_ID}-{hex_span(publish)}-01"
         )
+
+
+def capture_logs():
+    """운영 형식으로 바로 직렬화해 로그 당시의 trace_id를 남긴다."""
+    lines = []
+    handler = logging.Handler()
+    handler.emit = lambda record: lines.append(json.loads(JsonFormatter().format(record)))
+    root = logging.getLogger()
+    level = root.level
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+
+    def stop():
+        root.removeHandler(handler)
+        root.setLevel(level)
+
+    return lines, stop
+
+
+@scenario
+async def test_langfuse_on_does_not_take_over_cloud_context(langfuse_spans, monkeypatch):  # noqa: F811
+    async with environment(JOBS_TRACE_CONTEXT_WRITE=True) as (cfg, a, b, producer):
+        fake_redis_for(a, monkeypatch)
+        await RequestReceiver(a, producer).accept(
+            replace(message(cfg, process_request()), headers=headers())
+        )
+        job = await a.claim("process", "worker")
+        seen = {}
+
+        async def handler(request, reporter):
+            await reporter.report("DOWNLOADING", 0, 1)
+            with stage("probe", parent="download"):
+                assert langfuse_tracing.active()
+                # HTTPX 자동 계측처럼 다른 계측이 현재 Context 아래에 만드는 Span
+                with trace.get_tracer("httpx").start_as_current_span("GET") as http:
+                    seen["http"] = http
+                seen["ids"] = otel_ids()
+            return await mock_run(request, reporter)
+
+        lines, stop = capture_logs()
+        try:
+            await execution.run_job(cfg, job.identity, job.owner, handler)
+        finally:
+            stop()
+
+        run = only("ai.execute")
+        assert format(run.context.trace_id, "032x") == TRACE_ID
+        cloud = [span for span in EXPORTER.get_finished_spans() if span.name != "ai.receive"]
+        # Cloud가 받는 Span은 모두 같은 Trace이고 부모가 Cloud Span이다.
+        assert {format(span.context.trace_id, "032x") for span in cloud} == {TRACE_ID}
+        assert only("GET").parent.span_id == run.context.span_id
+        stages = [span for span in cloud if span.name.startswith("ai.stage.")]
+        assert stages and all(span.parent.span_id == run.context.span_id for span in stages)
+        assert "ai.stage.download.probe" in {span.name for span in stages}
+        assert seen["ids"] == (TRACE_ID, hex_span(run))
+        logged = [line for line in lines if line.get("event") in {"ai_stage", "ai_job_summary"}]
+        assert logged and {line["trace_id"] for line in logged} == {TRACE_ID}
+
+        # Langfuse 트레이스는 별도 Trace로 작업, 단계 구조를 그대로 유지한다.
+        recorded = langfuse_finished(langfuse_spans)
+        root = recorded["process"]
+        assert root.parent is None
+        assert format(root.context.trace_id, "032x") != TRACE_ID
+        assert recorded["download.probe"].parent.span_id == root.context.span_id
+        assert root.attributes["session.id"] == "trip-77"
+        assert not trace.get_current_span().get_span_context().is_valid
+
+
+def test_langfuse_root_and_stage_leave_global_context_alone(langfuse_spans):  # noqa: F811
+    """API 요청(FastAPI Span) 안에서 Langfuse 트레이스를 열어도 다른 계측의 부모는 그대로"""
+
+    async def run():
+        tracer = trace.get_tracer("fastapi")
+        with tracer.start_as_current_span("POST /search") as request:
+            root = langfuse_tracing.start_root("search", trip_id=3)
+            with stage("embed"):
+                inner = trace.get_current_span()
+                with tracer.start_as_current_span("GET embedding") as call:
+                    pass
+            root.end(status="success")
+            after = trace.get_current_span()
+        return request, inner, call, after
+
+    request, inner, call, after = asyncio.run(run())
+    assert inner is request and after is request
+    assert call.parent.span_id == request.get_span_context().span_id
+    recorded = langfuse_finished(langfuse_spans)
+    assert recorded["embed"].parent.span_id == recorded["search"].context.span_id
+    assert recorded["search"].parent is None
+
+
+def test_root_ended_in_another_task_stops_recording(langfuse_spans):  # noqa: F811
+    async def run():
+        root = langfuse_tracing.start_root("search")
+        await asyncio.create_task(asyncio.to_thread(lambda: None))
+        await asyncio.gather(asyncio.create_task(_end(root)))
+        # 끝난 루트의 맥락이 남아도 그 아래에 단계를 기록하지 않는다.
+        with stage("late"):
+            return langfuse_tracing.active()
+
+    async def _end(root):
+        root.end(status="success")
+
+    assert asyncio.run(run()) is False
+    assert "late" not in langfuse_finished(langfuse_spans)

@@ -7,8 +7,12 @@
 
 단계와 생성 호출은 기록 중인 트레이스 안에서만 남긴다. 트레이스 밖의 호출(사진 묶음 임베딩 등)이
 각자 새 트레이스를 만들지 않게 하기 위해서다. 기록 실패는 경고 로그만 남기고 처리 결과를 바꾸지
-않는다. OpenTelemetry 전역 provider를 쓰지 않고 별도 provider를 두어, 나중에 다른 계측이
-들어와도 그 span이 Langfuse로 섞여 나가지 않게 한다.
+않는다.
+
+OpenTelemetry 전역 provider를 쓰지 않고 별도 provider를 둔다. 또 Langfuse 관측을 전역 OTel
+Context의 현재 span으로 올리지 않는다. 현재 관측은 이 모듈의 ContextVar(_lf_context)에만 두고,
+하위 관측을 만드는 순간에만 그 Context를 잠깐 붙인다. 그래서 Cloud의 OTel span, HTTPX 자동 계측,
+로그의 trace_id는 Langfuse가 켜져도 Cloud Context만 본다.
 """
 
 import asyncio
@@ -17,7 +21,7 @@ import logging
 import threading
 import time
 from collections.abc import Iterator
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
@@ -68,6 +72,9 @@ _review_queue_id: str | None = None
 # GPU 호출 슬롯을 얻기까지 기다린 시간. RequestGate가 호출 직전에 정하고 generation이 읽는다.
 _slot_wait: ContextVar[float | None] = ContextVar("langfuse_slot_wait", default=None)
 _call_name: ContextVar[str | None] = ContextVar("langfuse_call_name", default=None)
+# 이 모듈이 연 현재 Langfuse 관측과 트레이스 속성(세션, 트레이스 이름)을 담은 OTel Context.
+# 전역 OTel Context에는 올리지 않는다. 기록 중인 트레이스 밖이면 None
+_lf_context: ContextVar[Any] = ContextVar("langfuse_context", default=None)
 
 
 def client() -> Any:
@@ -127,12 +134,50 @@ def active() -> bool:
 
 
 def _recording() -> bool:
-    """현재 span이 이 모듈이 연 Langfuse span인지. 다른 계측의 span 아래에서는 기록하지 않는다."""
+    """이 모듈이 연 트레이스 안인지. 다른 계측의 span 아래에서는 기록하지 않는다.
+
+    다른 태스크에서 끝낸 루트처럼 이미 끝난 관측이 남아 있으면 기록하지 않는다.
+    """
     from opentelemetry import trace as otel_trace
 
-    span = otel_trace.get_current_span()
-    scope = getattr(span, "instrumentation_scope", None)
-    return span.is_recording() and getattr(scope, "name", "") == "langfuse-sdk"
+    current = _lf_context.get()
+    return current is not None and otel_trace.get_current_span(current).is_recording()
+
+
+def _start_child(lf: Any, **fields: Any) -> Any:
+    """현재 Langfuse 관측 아래에 새 관측을 만든다. 전역 Context는 이 호출 동안만 바꾼다."""
+    from opentelemetry import context as otel_context
+
+    token = otel_context.attach(_lf_context.get() or otel_context.Context())
+    try:
+        return lf.start_observation(**fields)
+    finally:
+        otel_context.detach(token)
+
+
+def _enter(observation: Any, base: Any) -> Any:
+    """observation을 현재 Langfuse 관측으로 삼는다. 반환한 token으로 되돌린다.
+
+    실패하면 만든 관측을 바로 끝내 내보내지 못한 채 남지 않게 한다.
+    """
+    from opentelemetry import trace as otel_trace
+
+    try:
+        return _lf_context.set(otel_trace.set_span_in_context(observation._otel_span, base))
+    except Exception:
+        try:
+            observation.end()
+        except Exception:
+            pass
+        raise
+
+
+def _leave(token: Any) -> None:
+    try:
+        _lf_context.reset(token)
+    except ValueError:
+        # 다른 맥락에서 끝낸 경우. 그 맥락의 값은 그 맥락이 끝나면 사라진다.
+        pass
 
 
 @contextmanager
@@ -180,10 +225,10 @@ PARTIAL_STATUSES = {"partial", "cancelled", "CANCELED", "ABORTED"}
 
 
 class Root:
-    """트레이스 하나의 최상위 span. 만든 맥락에서 end()까지 현재 span으로 둔다."""
+    """트레이스 하나의 최상위 span. 만든 맥락에서 end()까지 현재 Langfuse 관측으로 둔다."""
 
-    def __init__(self, stack: ExitStack, span: Any) -> None:
-        self._stack, self._span = stack, span
+    def __init__(self, span: Any, token: Any) -> None:
+        self._span, self._token = span, token
         self.trace_id: str | None = getattr(span, "trace_id", None)
 
     def update(self, **fields: Any) -> None:
@@ -199,7 +244,7 @@ class Root:
         status: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        if self._stack is None:
+        if self._token is None:
             return
         try:
             fields: dict[str, Any] = {}
@@ -217,9 +262,10 @@ class Root:
         except Exception as exc:
             _warn("root_end", exc)
         finally:
-            stack, self._stack = self._stack, None
+            token, self._token = self._token, None
+            _leave(token)
             try:
-                stack.close()
+                self._span.end()
             except Exception as exc:
                 _warn("root_close", exc)
 
@@ -238,34 +284,29 @@ def start_root(
     lf = client()
     if lf is None:
         return NOOP
-    stack = ExitStack()
     try:
         from langfuse import propagate_attributes
         from opentelemetry import context as otel_context
 
         # 다른 계측의 span 아래에 Langfuse 트레이스가 붙지 않게 빈 맥락에서 시작한다.
+        # 트레이스 속성을 담은 맥락만 보관하고 전역 Context는 바로 되돌린다.
         token = otel_context.attach(otel_context.Context())
-        stack.callback(otel_context.detach, token)
-        stack.enter_context(
-            propagate_attributes(
+        try:
+            with propagate_attributes(
                 trace_name=name,
                 session_id=f"trip-{trip_id}" if trip_id is not None else None,
-            )
-        )
-        span = stack.enter_context(
-            lf.start_as_current_observation(
-                name=name,
-                as_type="span",
-                input=_jsonable(input),
-                metadata={k: v for k, v in (metadata or {}).items() if v is not None},
-            )
-        )
-        return Root(stack, span)
+            ):
+                span = lf.start_observation(
+                    name=name,
+                    as_type="span",
+                    input=_jsonable(input),
+                    metadata={k: v for k, v in (metadata or {}).items() if v is not None},
+                )
+                base = otel_context.get_current()
+        finally:
+            otel_context.detach(token)
+        return Root(span, _enter(span, base))
     except Exception as exc:
-        try:
-            stack.close()
-        except Exception:
-            pass
         _warn("root_start", exc)
         return NOOP
 
@@ -274,7 +315,7 @@ class Span:
     """stage() 단계 하나. 기록 중인 트레이스가 없으면 아무것도 하지 않는다."""
 
     def __init__(self, name: str) -> None:
-        self._stack: ExitStack | None = None
+        self._token: Any = None
         self._span: Any = None
         lf = client()
         if lf is None:
@@ -282,16 +323,14 @@ class Span:
         try:
             if not _recording():
                 return
-            stack = ExitStack()
-            self._span = stack.enter_context(
-                lf.start_as_current_observation(name=name, as_type="span")
-            )
-            self._stack = stack
+            base = _lf_context.get()
+            self._span = _start_child(lf, name=name, as_type="span")
+            self._token = _enter(self._span, base)
         except Exception as exc:
             _warn("span_start", exc)
 
     def end(self, result: str, fields: dict[str, Any]) -> None:
-        if self._stack is None:
+        if self._token is None:
             return
         try:
             update: dict[str, Any] = {
@@ -304,9 +343,10 @@ class Span:
         except Exception as exc:
             _warn("span_end", exc)
         finally:
-            stack, self._stack = self._stack, None
+            token, self._token = self._token, None
+            _leave(token)
             try:
-                stack.close()
+                self._span.end()
             except Exception as exc:
                 _warn("span_close", exc)
 
@@ -331,7 +371,8 @@ class Generation:
         if self._skip_images:
             meta = {**meta, "images_omitted": "upload_backlog"}
         self._wire = _without_inline_images(wire) if self._skip_images else wire
-        self._obs = lf.start_observation(
+        self._obs = _start_child(
+            lf,
             name=name,
             as_type="generation",
             model=model,
