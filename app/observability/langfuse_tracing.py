@@ -3,6 +3,7 @@
 - 트레이스: 정리와 스토리 작업 1건, 질의 해석·검색·분위기 변경 요청 1건(start_root)
 - span: stage()로 잰 단계
 - generation: VllmClient.chat 호출 1건의 입력 메시지와 사진, 출력, 토큰, 슬롯 대기 시간
+- 사람 평가: 끝난 스토리 작업의 트레이스를 대기열 REVIEW_QUEUE에 넣는다(enqueue_review)
 
 단계와 생성 호출은 기록 중인 트레이스 안에서만 남긴다. 트레이스 밖의 호출(사진 묶음 임베딩 등)이
 각자 새 트레이스를 만들지 않게 하기 위해서다. 기록 실패는 경고 로그만 남기고 처리 결과를 바꾸지
@@ -34,6 +35,10 @@ IMAGE_FETCH_CONCURRENCY = 8
 FLUSH_TIMEOUT_SEC = 5.0
 # SDK 사진 업로드 큐에 이만큼 쌓이면 새 호출의 사진은 붙이지 않는다.
 MEDIA_BACKLOG_LIMIT = 50
+# 사람 평가 대기열 이름. 대기열과 점수 항목은 scripts/story_eval/setup_langfuse.py가 만든다.
+REVIEW_QUEUE = "스토리 평가"
+# ashutdown()이 마무리 작업을 기다리는 시간(FLUSH_TIMEOUT_SEC의 절반)보다 짧게 둔다.
+REVIEW_TIMEOUT_SEC = 2.0
 
 
 class LangfuseSettings(BaseSettings):
@@ -57,6 +62,8 @@ class LangfuseSettings(BaseSettings):
 _lock = threading.Lock()
 _client: Any = None
 _ready = False
+# REVIEW_QUEUE의 ID. 처음 넣을 때 이름으로 찾아 둔다.
+_review_queue_id: str | None = None
 
 # GPU 호출 슬롯을 얻기까지 기다린 시간. RequestGate가 호출 직전에 정하고 generation이 읽는다.
 _slot_wait: ContextVar[float | None] = ContextVar("langfuse_slot_wait", default=None)
@@ -98,9 +105,9 @@ def client() -> Any:
 
 def reset() -> None:
     """테스트용. 다음 client() 호출이 설정을 다시 읽게 한다."""
-    global _client, _ready
+    global _client, _ready, _review_queue_id
     with _lock:
-        _client, _ready = None, False
+        _client, _ready, _review_queue_id = None, False, None
 
 
 def _warn(action: str, exc: BaseException) -> None:
@@ -507,6 +514,46 @@ def score_evaluations(trace_id: str | None, reports: list[dict]) -> None:
                     )
         except Exception as exc:
             _warn("score", exc)
+
+
+def enqueue_review(trace_id: str | None) -> None:
+    """끝난 스토리 작업의 트레이스를 사람 평가 대기열에 넣는다. 기다리지 않고 바로 돌아온다.
+
+    대기열이 없거나 요청이 실패하면 경고 로그만 남긴다. 작업 프로세스 종료 때 ashutdown()이
+    다른 마무리 작업과 함께 기다린다.
+    """
+    lf = client()
+    if lf is None or not trace_id:
+        return
+    try:
+        task = asyncio.get_running_loop().create_task(_enqueue_review(lf, trace_id))
+        _pending.add(task)
+        task.add_done_callback(_pending.discard)
+    except Exception as exc:
+        _warn("review_queue", exc)
+
+
+async def _enqueue_review(lf: Any, trace_id: str) -> None:
+    global _review_queue_id
+    try:
+        async with asyncio.timeout(REVIEW_TIMEOUT_SEC):
+            api = lf.async_api.annotation_queues
+            if _review_queue_id is None:
+                queues = (await api.list_queues(limit=100)).data
+                _review_queue_id = next((q.id for q in queues if q.name == REVIEW_QUEUE), None)
+            if _review_queue_id is None:
+                log.warning(
+                    "사람 평가 대기열이 없어 트레이스를 넣지 않음",
+                    extra={"event": "ai_langfuse_failed", "action": "review_queue_missing"},
+                )
+                return
+            await api.create_queue_item(_review_queue_id, object_id=trace_id, object_type="TRACE")
+    except asyncio.CancelledError as exc:
+        # 종료 처리가 기다리다 취소했다. 빠진 항목을 로그로 알 수 있게 남긴다.
+        _warn("review_queue", exc)
+        raise
+    except Exception as exc:
+        _warn("review_queue", exc)
 
 
 def flush() -> None:

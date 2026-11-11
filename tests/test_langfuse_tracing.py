@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import uuid
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -423,3 +424,140 @@ def test_root_starts_a_new_trace_under_other_instrumentation(exporter):
 def test_root_level_follows_status(exporter, status, level):
     lt.start_root("story_rewrite").end(status=status)
     assert finished(exporter)["story_rewrite"].attributes.get(ATTR + "level") == level
+
+
+class FakeQueues:
+    def __init__(self, queues, fail=None, hang=False):
+        self.queues, self.fail, self.hang = queues, fail, hang
+        self.items = []
+        self.listed = 0
+
+    async def list_queues(self, **_):
+        self.listed += 1
+        if self.fail:
+            raise self.fail
+        if self.hang:
+            await asyncio.sleep(10)
+        return SimpleNamespace(data=self.queues)
+
+    async def create_queue_item(self, queue_id, *, object_id, object_type):
+        self.items.append((queue_id, object_id, object_type))
+
+
+def review_client(monkeypatch, **kwargs):
+    queues = FakeQueues(**kwargs)
+    client = SimpleNamespace(async_api=SimpleNamespace(annotation_queues=queues))
+    monkeypatch.setattr(lt, "_client", client)
+    monkeypatch.setattr(lt, "_ready", True)
+    monkeypatch.setattr(lt, "_review_queue_id", None)
+    return queues
+
+
+def enqueue(*trace_ids):
+    async def run():
+        for trace_id in trace_ids:
+            lt.enqueue_review(trace_id)
+        # 기다리지 않고 돌아오므로 남은 태스크는 종료 처리처럼 따로 기다린다.
+        if lt._pending:
+            await asyncio.wait(set(lt._pending))
+
+    asyncio.run(run())
+
+
+def test_review_queue_receives_the_trace(monkeypatch):
+    queues = review_client(
+        monkeypatch,
+        queues=[
+            SimpleNamespace(id="q-other", name="다른"),
+            SimpleNamespace(id="q1", name=lt.REVIEW_QUEUE),
+        ],
+    )
+    enqueue("trace-a")
+    enqueue("trace-b")
+    assert queues.items == [("q1", "trace-a", "TRACE"), ("q1", "trace-b", "TRACE")]
+    # 대기열 ID는 처음 한 번만 찾는다.
+    assert queues.listed == 1
+
+
+def test_missing_review_queue_only_warns(monkeypatch, caplog):
+    queues = review_client(monkeypatch, queues=[])
+    caplog.set_level(logging.WARNING)
+    enqueue("trace-a")
+    assert queues.items == []
+    assert any(getattr(r, "action", None) == "review_queue_missing" for r in caplog.records)
+
+
+@pytest.mark.parametrize("kwargs", [{"fail": httpx.ConnectError("x")}, {"hang": True}])
+def test_review_queue_failure_does_not_raise(monkeypatch, caplog, kwargs):
+    review_client(monkeypatch, queues=[], **kwargs)
+    monkeypatch.setattr(lt, "REVIEW_TIMEOUT_SEC", 0.1)
+    caplog.set_level(logging.WARNING)
+    enqueue("trace-a")
+    assert any(getattr(r, "action", None) == "review_queue" for r in caplog.records)
+
+
+def test_review_queue_is_skipped_without_client_or_trace(monkeypatch):
+    queues = review_client(monkeypatch, queues=[SimpleNamespace(id="q1", name=lt.REVIEW_QUEUE)])
+    enqueue(None)
+    monkeypatch.setattr(lt, "_client", None)
+    enqueue("trace-a")
+    assert queues.items == []
+
+
+def story_result():
+    return {
+        "story_summary": "제주 해변",
+        "blocks": [
+            {
+                "order_number": 1,
+                "trip_place_id": 5001,
+                "trip_attachment_id": 101,
+                "day_label": "1일차, 해변",
+                "detail_summary": "아침 바다",
+                "memo": "아침에 바다를 봤다.",
+            }
+        ],
+        "verification": {"passed": True, "retry_count": 0},
+    }
+
+
+@pytest.mark.parametrize("succeeds", [True, False])
+def test_completed_story_trace_goes_to_review_queue(exporter, monkeypatch, succeeds):
+    """끝난 스토리 작업만 그 트레이스를 사람 평가 대기열에 넣는다."""
+    from app.core.errors import PipelineError
+    from app.jobs.execution import execute
+    from app.jobs.kafka import RequestReceiver
+    from tests.test_v2_jobs import environment, message, story_request
+
+    queued = []
+    monkeypatch.setattr(lt, "enqueue_review", queued.append)
+
+    async def handler(request, reporter):
+        if not succeeds:
+            raise PipelineError("실패")
+        return story_result()
+
+    async def run():
+        async with environment() as (cfg, a, b, p):
+            await RequestReceiver(a, p).accept(message(cfg, story_request()))
+            job = await a.claim("story", "worker")
+            await execute(a, job.identity, job.owner, handler)
+
+    asyncio.run(run())
+    root = finished(exporter)["story"]
+    assert queued == ([format(root.context.trace_id, "032x")] if succeeds else [])
+
+
+def test_review_queue_cancelled_at_shutdown_is_logged(monkeypatch, caplog):
+    review_client(monkeypatch, queues=[], hang=True)
+    caplog.set_level(logging.WARNING)
+
+    async def run():
+        lt.enqueue_review("trace-a")
+        await asyncio.sleep(0)
+        for task in set(lt._pending):
+            task.cancel()
+        await asyncio.wait(set(lt._pending))
+
+    asyncio.run(run())
+    assert any(getattr(r, "action", None) == "review_queue" for r in caplog.records)

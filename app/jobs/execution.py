@@ -199,6 +199,8 @@ async def execute(store: RedisJobStore, identity: str, owner: str, handler) -> N
             await record_evaluations(store, status, trace.evaluations)
             if status == "COMPLETED":
                 langfuse_tracing.score_evaluations(root.trace_id, trace.evaluations)
+                if record.kind == "story":
+                    langfuse_tracing.enqueue_review(root.trace_id)
     except Exception as exc:
         # 관측 실패가 이미 저장한 작업 결과를 바꾸지 않는다. 취소(CancelledError)는 그대로 전파된다.
         log.warning(
