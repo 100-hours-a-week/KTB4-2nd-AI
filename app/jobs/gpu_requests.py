@@ -18,6 +18,7 @@ from redis.exceptions import RedisError, WatchError
 from app.core.logging import get_logger
 from app.core.tracing import current_trace
 from app.infra.vlm import VLMUnavailable
+from app.observability.langfuse_tracing import slot_wait
 from app.search.context import ModelUnavailable
 
 log = get_logger(__name__)
@@ -142,11 +143,13 @@ class RequestGate:
                     },
                 )
                 raise GateUnavailable("GPU 호출 슬롯을 확보하지 못했습니다.") from None
+            waited = time.monotonic() - started
             if trace := current_trace():
-                trace.add_gpu_wait(time.monotonic() - started)
+                trace.add_gpu_wait(waited)
             # client의 I/O timeout 외에 호출 전체 시간을 제한한다.
-            async with asyncio.timeout(timeout_sec + CALL_TIMEOUT_GRACE_SEC):
-                return await operation()
+            with slot_wait(waited):
+                async with asyncio.timeout(timeout_sec + CALL_TIMEOUT_GRACE_SEC):
+                    return await operation()
         finally:
             # claim 중 응답을 잃어도 같은 토큰을 정리한다. 실패 시 lease가 회수한다.
             try:

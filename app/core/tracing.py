@@ -18,6 +18,8 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.observability.langfuse_tracing import Span
+
 log = logging.getLogger("app.core.tracing")
 
 
@@ -116,8 +118,10 @@ def stage(name: str, *, parent: str | None = None, **fields: Any) -> Iterator[di
     trace = current_trace()
     extra: dict[str, Any] = dict(fields)
     previous = trace.current_stage if trace else None
+    full_name = f"{parent}.{name}" if parent else name
     if trace:
-        trace.current_stage = f"{parent}.{name}" if parent else name
+        trace.current_stage = full_name
+    span = Span(full_name)
     started = time.monotonic()
     result = "success"
     try:
@@ -133,6 +137,7 @@ def stage(name: str, *, parent: str | None = None, **fields: Any) -> Iterator[di
             result = "error"
         raise
     finally:
+        span.end(result, extra)
         if trace:
             trace.current_stage = previous
             trace.add_stage(StageRecord(name, result, time.monotonic() - started, parent), **extra)

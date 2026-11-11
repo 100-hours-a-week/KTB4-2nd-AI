@@ -16,6 +16,7 @@ from redis.exceptions import RedisError
 from app.core.errors import AppError, ErrorCode
 from app.core.logging import get_logger, validation_fields
 from app.infra.vlm import VLMUnavailable
+from app.observability import langfuse_tracing
 from app.schemas.story_rewrite import RewriteBlockResponse, RewriteRequest, RewriteResponse
 from app.story.pipeline import day_label
 from app.story.rewrite_prompts import SUMMARY_LIMIT, RewriteDraft, messages, response_format
@@ -104,9 +105,12 @@ class RewriteService:
     async def _locked(self, key, token, trip_id, request) -> RewriteResponse:
         started = time.monotonic()
         error_code, rule = None, None
+        root = langfuse_tracing.start_root("story_rewrite", trip_id=trip_id, input=request)
+        response = None
         try:
             async with asyncio.timeout(self.timeout_sec):
-                return await self._run(trip_id, request)
+                response = await self._run(trip_id, request)
+                return response
         except TimeoutError:
             error_code = ErrorCode.TIMEOUT
             raise AppError(ErrorCode.TIMEOUT, http_status=504) from None
@@ -140,6 +144,15 @@ class RewriteService:
             )
             raise AppError(ErrorCode.INTERNAL_ERROR) from None
         finally:
+            # 응답도 오류 코드도 없으면 앱 종료 등으로 취소된 것이다.
+            outcome = (
+                str(error_code)
+                if error_code
+                else "success"
+                if response is not None
+                else "cancelled"
+            )
+            root.end(output=response, status=outcome, metadata={"rule": rule})
             # 생성된 글 본문과 사진 키는 남기지 않는다.
             log.info(
                 "분위기 변경 처리",
@@ -158,14 +171,15 @@ class RewriteService:
 
     async def _run(self, trip_id: int, request: RewriteRequest) -> RewriteResponse:
         urls = [await self.urls.resolve(block.analyze_storage_key) for block in request.blocks]
-        turn = await self.vlm.chat(
-            messages(request, trip_id),
-            urls,
-            self.max_tokens,
-            response_format=response_format([b.trip_attachment_id for b in request.blocks]),
-            # 블록 30개는 RunPod 프록시의 무응답 상한(약 100초)을 넘을 수 있다.
-            stream=True,
-        )
+        with langfuse_tracing.call_name("story_rewrite"):
+            turn = await self.vlm.chat(
+                messages(request, trip_id),
+                urls,
+                self.max_tokens,
+                response_format=response_format([b.trip_attachment_id for b in request.blocks]),
+                # 블록 30개는 RunPod 프록시의 무응답 상한(약 100초)을 넘을 수 있다.
+                stream=True,
+            )
         return finalize(turn.content, request)
 
     async def _release(self, key, token) -> None:

@@ -14,6 +14,7 @@ from collections import Counter
 from app.core.errors import PipelineError
 from app.infra.kakao_local import KakaoBudget, KakaoUnavailable
 from app.infra.vlm import ImagePart, TextPart, VLMTransientError, VLMUnavailable
+from app.observability.langfuse_tracing import call_name
 from app.pipeline.workflow.resources import WorkflowResources, WorkflowTimeout, WorkflowUnavailable
 
 # n번째 재시도 전에 RETRY_WAIT_SEC × n초 기다린다(정리 에이전트와 같은 5, 10, 15초).
@@ -74,14 +75,15 @@ class Pod:
                         self._raise_if_failed()
                     self.stats["requests"] += 1
                     try:
-                        turn = await self.vlm.chat(
-                            messages,
-                            urls,
-                            max_tokens,
-                            temperature=0,
-                            stream=True,
-                            extra_body=extra,
-                        )
+                        with call_name(stage or "workflow"):
+                            turn = await self.vlm.chat(
+                                messages,
+                                urls,
+                                max_tokens,
+                                temperature=0,
+                                stream=True,
+                                extra_body=extra,
+                            )
                     except (VLMTransientError, TimeoutError) as exc:
                         if attempt == self.retries:
                             self._fail(exc, stage)

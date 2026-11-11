@@ -31,6 +31,7 @@ from app.jobs.config import JobsSettings
 from app.jobs.models import JobKind, PhotoMetricsRecord
 from app.jobs.process_guard import parent_guard
 from app.jobs.redis_store import RedisJobStore
+from app.observability import langfuse_tracing
 from app.schemas.task import TERMINAL_STATUSES, ErrorBody
 
 log = get_logger(__name__)
@@ -131,7 +132,14 @@ async def execute(store: RedisJobStore, identity: str, owner: str, handler) -> N
         return fields
 
     trace, token = start_trace(record.kind, emit_stage_logs=True)
+    root = langfuse_tracing.start_root(
+        record.kind,
+        trip_id=record.trip_id,
+        input=record.request,
+        metadata={"job_id": record.execution_id},
+    )
     status = "ABORTED"
+    result = None
     try:
         await reporter.check_cancel()
         result = await handler(record.request, reporter)
@@ -169,6 +177,16 @@ async def execute(store: RedisJobStore, identity: str, owner: str, handler) -> N
         if status == "ABORTED":
             log_summary(record.kind, status, trace)
         end_trace(token)
+        root.end(
+            output=result,
+            status=status,
+            metadata={
+                "job_id": record.execution_id,
+                "stages_ms": trace.stage_ms() or None,
+                "model_calls": trace.call_counts(),
+                "gpu_wait_ms": round(trace.gpu_wait_seconds * 1000, 2),
+            },
+        )
     try:
         async with asyncio.timeout(2):
             # 취소 요청이 있으면 저장소가 CANCELED로 바꿔 저장하므로 실제 저장된 상태를 요약에 쓴다.
@@ -179,6 +197,8 @@ async def execute(store: RedisJobStore, identity: str, owner: str, handler) -> N
             await store.observe_stages(record.kind, trace.stages)
             await store.record_peak_memory(record.kind, max_rss_bytes())
             await record_evaluations(store, status, trace.evaluations)
+            if status == "COMPLETED":
+                langfuse_tracing.score_evaluations(root.trace_id, trace.evaluations)
     except Exception as exc:
         # 관측 실패가 이미 저장한 작업 결과를 바꾸지 않는다. 취소(CancelledError)는 그대로 전파된다.
         log.warning(
@@ -389,7 +409,11 @@ async def run_job(
         task.cancel()
         monitor.cancel()
         await asyncio.gather(task, monitor, return_exceptions=True)
-        await redis.aclose()
+        try:
+            await redis.aclose()
+        finally:
+            # 작업마다 프로세스가 끝나므로 남은 Langfuse 기록을 여기서 보낸다.
+            await langfuse_tracing.ashutdown()
 
 
 async def main(identity: str, owner: str) -> None:

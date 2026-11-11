@@ -13,8 +13,11 @@ from typing import Any, Self
 import httpx
 
 from app.core.config import Settings
+from app.core.tracing import current_trace
 from app.infra.vlm import ChatMessage, ChatTurn, ToolCall, VLMTransientError, VLMUnavailable
 from app.observability.calls import log_model_call, usage_fields
+from app.observability.langfuse_tracing import Generation, chat_output, generation_name
+from app.observability.langfuse_tracing import active as langfuse_active
 
 
 class VllmClient:
@@ -91,7 +94,51 @@ class VllmClient:
         """extra_body는 요청 본문에 더할 vLLM 전용 값(예: mm_processor_kwargs)이다.
 
         본문이 이미 가진 키(model, messages, max_tokens, stream 등)는 덮어쓰지 않는다.
+        Langfuse 트레이스 안에서 부르면 호출 1건을 generation으로 남긴다.
         """
+        options = {
+            "tools": tools,
+            "tool_choice": tool_choice,
+            "temperature": temperature,
+            "stream": stream,
+            "extra_body": extra_body,
+        }
+        generation = _start_generation(
+            self._model, messages, image_urls, max_tokens, response_format, options
+        )
+        if generation is None:
+            return await self._chat(messages, image_urls, max_tokens, response_format, **options)
+        try:
+            turn = await self._chat(
+                messages,
+                image_urls,
+                max_tokens,
+                response_format,
+                usage_out=generation.usage,
+                **options,
+            )
+        except BaseException as exc:
+            generation.end(error=exc)
+            raise
+        generation.end(
+            output=chat_output(turn.content, turn.tool_calls, response_format is not None)
+        )
+        return turn
+
+    async def _chat(
+        self,
+        messages: list[ChatMessage],
+        image_urls: list[str],
+        max_tokens: int,
+        response_format: dict[str, Any] | None = None,
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        temperature: float | None = None,
+        stream: bool = False,
+        extra_body: dict[str, Any] | None = None,
+        usage_out: dict[str, Any] | None = None,
+    ) -> ChatTurn:
         if tools is None and tool_choice is not None:
             raise ValueError("도구 없이 tool_choice를 지정할 수 없습니다.")
         if tools is not None and (not isinstance(tools, list) or not tools):
@@ -126,6 +173,8 @@ class VllmClient:
                     raise ValueError("해석할 수 없는 조각")
                 data = response.json()
             usage = data.get("usage") if isinstance(data, dict) else None
+            if usage_out is not None and isinstance(usage, dict):
+                usage_out.update(usage)
             choice = data["choices"][0]
             finish_reason = choice.get("finish_reason")
             message = choice["message"]
@@ -303,6 +352,45 @@ class VllmClient:
 
     async def __aexit__(self, *exc_info: object) -> None:
         await self.aclose()
+
+
+def _start_generation(
+    model: str,
+    messages: list[ChatMessage],
+    image_urls: list[str],
+    max_tokens: int,
+    response_format: dict[str, Any] | None,
+    options: dict[str, Any],
+) -> Generation | None:
+    """Langfuse에 남길 입력은 실제 전송 형식(사진 자리 포함)으로 만든다."""
+    if not langfuse_active():
+        return None
+    try:
+        wire = _wire_messages(messages, image_urls)
+        tools = options["tools"]
+        meta = {
+            "response_format": response_format,
+            "tools": [tool["function"]["name"] for tool in tools] if tools else None,
+            "tool_choice": options["tool_choice"],
+            "extra_body": options["extra_body"],
+            "image_count": len(image_urls),
+        }
+    except (ValueError, KeyError, TypeError, AttributeError):
+        # 형식 오류는 실제 호출이 같은 예외로 알린다.
+        return None
+    trace = current_trace()
+    return Generation.start(
+        name=generation_name(trace.current_stage if trace else None),
+        model=model,
+        wire=wire,
+        params={
+            "max_tokens": max_tokens,
+            "temperature": options["temperature"],
+            "stream": options["stream"],
+            "structured": response_format is not None,
+        },
+        meta={key: value for key, value in meta.items() if value is not None},
+    )
 
 
 def _text(value: object, *, allow_empty: bool = False) -> str:
