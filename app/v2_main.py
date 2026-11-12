@@ -12,7 +12,7 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from app.api.deps import require_api_key
-from app.api.routers import query, story_rewrite
+from app.api.routers import query, similar, story_rewrite
 from app.api.search_bootstrap import rewrite_service, search_service
 from app.api.services.query_service import QueryService
 from app.api.services.runpod_status import RunpodStatus
@@ -200,6 +200,7 @@ def create_app(
         )
 
     app.include_router(query.router)
+    app.include_router(similar.router)
     app.include_router(story_rewrite.router)
     return app
 
