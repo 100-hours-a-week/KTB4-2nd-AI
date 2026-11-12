@@ -285,6 +285,10 @@ def test_workflow_places_gps_inserted_and_named_photos_and_result_passes_contrac
     assert record.place_id == placed[5][0].place_id != placed[1][0].place_id
     assert (placed[4][1].latitude, placed[4][1].longitude) == (CAFE.latitude, CAFE.longitude)
     assert placed[4][1].region_origin is RegionOrigin.INFERRED
+    # 장소 이름: 레코드 폴더는 고른 레코드 이름, 4단계에서 이름을 못 찾은 GPS 폴더는 null
+    # (자리표시 이름 "GPS 장소 1"을 넘기지 않음)
+    assert record.place_name == "정선 찻집"
+    assert placed[1][0].place_name is None
     (left,) = result.unclassified
     assert left.trip_attachment_id == 6 and left.issue is Issue.UNCLEAR_LOCATION
     assert left.place_id is None and left.region_origin is RegionOrigin.UNKNOWN
@@ -305,6 +309,31 @@ def test_workflow_places_gps_inserted_and_named_photos_and_result_passes_contrac
     # 전국 검색과 여행 지역 좌표 20 km 검색
     assert ("찻집", None, None, "accuracy") in kakao.keyword_calls
     assert ("찻집", HOME, 20_000, "accuracy") in kakao.keyword_calls
+
+
+def test_gps_folder_gets_name_found_in_gps_record_step(tmp_path, loop):
+    """4단계에서 GPS 장소 레코드를 고르면 그 이름이 GPS 폴더의 place_name이 된다."""
+    vlm = ScriptedVlm({"choose": {"choice": "1", "reason": "간판"}})
+    result, _ = run_scene(tmp_path, loop, vlm, kakao=FakeKakao(found=[CAFE]))
+    gps_place = next(p for p in result.places if 1 in {a.trip_attachment_id for a in p.attachments})
+    assert gps_place.place_name == "정선 찻집"
+    assert json.loads(result.model_dump_json())["places"][0]["place_name"] == "정선 찻집"
+
+
+@pytest.mark.parametrize(
+    ("record", "expected"),
+    [
+        (None, None),
+        # 4단계에서 이름을 못 찾은 GPS 레코드는 자리표시 이름만 있다
+        ({"id": "gps:0", "name": "GPS 장소 1", "gps": True}, None),
+        ({"id": "gps:0", "name": "정선 찻집", "gps": True, "place_name": "정선 찻집"}, "정선 찻집"),
+        ({"id": "kakao:77", "name": "  정선   5일장 \n"}, "정선 5일장"),
+        ({"id": "kakao:77", "name": "   "}, None),
+        ({"id": "kakao:77", "name": "가" * 60}, "가" * 50),
+    ],
+)
+def test_record_place_name(record, expected):
+    assert organize.record_place_name(record) == expected
 
 
 def test_record_folder_with_only_blurry_photos_is_released(tmp_path, loop):

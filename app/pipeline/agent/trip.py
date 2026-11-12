@@ -270,6 +270,7 @@ def release_unshowable_new_places(photos: list[PhotoState]) -> list[int]:
             continue
         for photo in members:
             photo.place_id = None
+            photo.place_name = None
             photo.latitude = photo.longitude = None
             photo.region_origin = RegionOrigin.UNKNOWN
             released.append(photo.source.trip_attachment_id)
