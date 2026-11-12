@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, Request
 
-from app.api.routers import health, internal, process, query
+from app.api.routers import health, internal, process, query, similar
 from app.api.routers.health import qdrant_ready
 from app.api.services.query_service import QueryService
 from app.core.config import Settings, get_settings
@@ -91,6 +91,7 @@ def create_app(
     app.include_router(internal.router)
     app.include_router(health.router)
     app.include_router(query.router)
+    app.include_router(similar.router)
 
     register_error_handlers(app)
     return app

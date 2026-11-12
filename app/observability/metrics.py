@@ -132,6 +132,8 @@ class Metrics:
         for operation in ["parse", "search"]:
             for outcome in ["success", "fallback", "partial", "error"]:
                 groups[(operation, outcome, "request")] = {}
+        for outcome in ["success", "error"]:
+            groups[("similar", outcome, "request")] = {}
         for field, value in values[0].items():
             parts = field.split("|")
             if len(parts) == 4:

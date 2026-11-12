@@ -3,12 +3,15 @@
 import asyncio
 import time
 
+from app.api.services.search_tracing import TracedSourceVectors, TracedVectors
 from app.core.errors import AppError, ErrorCode
 from app.core.logging import current_request, error_fields, get_logger
 from app.core.tracing import end_trace, start_trace
 from app.observability import langfuse_tracing
 from app.schemas.query import ParseRequest, ParseResponse, SearchRequest, SearchResponse
+from app.schemas.similar import SimilarRequest, SimilarResponse
 from app.search import pipeline
+from app.search import similar as similar_search
 from app.search.context import ModelUnavailable, SearchContext, SearchOptions
 
 log = get_logger(__name__)
@@ -27,6 +30,86 @@ class QueryService:
 
     async def search(self, request: SearchRequest) -> SearchResponse:
         return await self._run("search", request)
+
+    async def similar(self, trip_id: int, request: SimilarRequest) -> SimilarResponse:
+        """저장된 벡터만 읽으므로 GPU 호출 슬롯을 쓰지 않는다. 벡터 검색 상한이 전체 상한이다."""
+        started = time.monotonic()
+        trace, token = start_trace("similar")
+        root = langfuse_tracing.start_root(
+            "similar",
+            trip_id=trip_id,
+            input=request,
+            metadata={"request_id": current_request()},
+        )
+        vectors = self.context.vectors
+        if isinstance(vectors, TracedVectors):
+            vectors = TracedSourceVectors(vectors.inner)
+        output = None
+        outcome = "error"
+        error_code = None
+        failure: dict = {}
+        cancelled = False
+        try:
+            async with asyncio.timeout(self.options.retrieval_timeout_sec):
+                result = SimilarResponse.model_validate(
+                    await similar_search.similar(request, vectors)
+                )
+            ids = [item.trip_attachment_id for item in result.items]
+            allowed = set(request.candidate_attachment_ids) - {request.trip_attachment_id}
+            if not set(ids) <= allowed or len(set(ids)) != len(ids) or len(ids) > request.limit:
+                raise ValueError("유사 사진 결과의 후보 범위·중복·개수 규약 위반")
+            outcome = "success"
+            output = result
+            return result
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        except AppError as exc:
+            error_code = str(exc.code)
+            raise
+        except ModelUnavailable as exc:
+            error_code = str(ErrorCode.MODEL_NOT_READY)
+            raise AppError(ErrorCode.MODEL_NOT_READY) from exc
+        except TimeoutError as exc:
+            error_code = str(ErrorCode.TIMEOUT)
+            raise AppError(ErrorCode.TIMEOUT, http_status=504) from exc
+        except Exception as exc:
+            error_code = str(ErrorCode.INTERNAL_ERROR)
+            failure = error_fields(exc)
+            log.error(
+                "검색 처리 실패",
+                extra={"event": "ai_query_failed", "operation": "similar", **failure},
+            )
+            raise AppError(ErrorCode.INTERNAL_ERROR) from exc
+        finally:
+            end_trace(token)
+            root.end(
+                output=output,
+                status="cancelled" if cancelled else outcome,
+                metadata={"request_id": current_request(), "error_code": error_code},
+            )
+            if not cancelled:
+                for record in trace.stages:
+                    if record.result == "cancelled":
+                        record.result = "timeout"
+            duration = time.monotonic() - started
+            if self.metrics is not None:
+                await self.metrics.query("similar", outcome, duration, stages=trace.stages)
+            log.info(
+                "검색 요청 완료",
+                extra={
+                    "event": "ai_query",
+                    "operation": "similar",
+                    "result": outcome,
+                    "error_code": error_code,
+                    "candidate_count": len(request.candidate_attachment_ids),
+                    "returned_count": len(output.items) if output else None,
+                    "duration_ms": round(duration * 1000, 2),
+                    "stages_ms": trace.stage_ms() or None,
+                    **trace.fields,
+                    **failure,
+                },
+            )
 
     async def _run(
         self, operation: str, request: ParseRequest | SearchRequest

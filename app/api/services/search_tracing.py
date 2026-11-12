@@ -3,6 +3,7 @@
 검색 알고리즘(app.search)은 그대로 두고, 구성 단계에서 의존성만 감싼다.
 단계 이름은 interpret(질의 해석 VLM), embed(질의 임베딩), retrieve(후보 범위 벡터 검색),
 dedup_fetch(결과 안 중복 제거용 벡터 조회), sign_url(답변용 사진 URL 발급), answer(답변 VLM)이다.
+유사 사진 후보는 source_fetch(기준 사진 벡터 조회)와 retrieve를 쓴다.
 같은 단계를 여러 번 부르면 합산된다.
 """
 
@@ -71,6 +72,14 @@ class TracedVectors:
     async def fetch(self, ids):
         # 결과 안 중복 제거용 사진 벡터 조회
         with stage("dedup_fetch"):
+            return await self.inner.fetch(ids)
+
+
+class TracedSourceVectors(TracedVectors):
+    """유사 사진 후보용. 벡터 조회가 중복 제거가 아니라 기준 사진 조회이므로 단계 이름만 바꾼다."""
+
+    async def fetch(self, ids):
+        with stage("source_fetch"):
             return await self.inner.fetch(ids)
 
 
