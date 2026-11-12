@@ -203,9 +203,9 @@ async def test_all_features_use_real_handlers_and_http_clients(tmp_path):
                 == 1
             )
             # 가짜 임베딩은 모든 사진에 같은 벡터를 주므로 스토리는 두 사진을 같은 장면으로 보고
-            # 한 장만 고른다. 스토리는 사진 확인과 집필에서 그 한 장을 두 번 읽고, 질문 답변은
-            # 두 장을 읽는다.
-            assert upstream.calls["vlm_image_read"] == 4
+            # 한 장만 고른다. 스토리는 사진 확인과 집필에서 그 한 장을 두 번 읽고, 질문 답변도
+            # 검색 결과 중복 제거(#192)로 두 장 중 한 장만 읽는다.
+            assert upstream.calls["vlm_image_read"] == 3
             assert upstream.calls["upsert"] and upstream.calls["fetch_vectors"]
             report.update(
                 real_redis=True,
