@@ -2,6 +2,8 @@
 
 import asyncio
 
+import numpy as np
+
 from app.core.tracing import current_trace
 from app.infra.vlm import VLMUnavailable
 from app.schemas.query import (
@@ -16,6 +18,7 @@ from app.search import prompts, times
 from app.search.context import (
     Evidence,
     InvalidModelOutput,
+    ModelUnavailable,
     SearchContext,
     SearchOptions,
 )
@@ -103,6 +106,69 @@ def apply_cutoff(ranked: list[SearchHit], options: SearchOptions) -> list[Search
     return [hit for hit in ranked if hit.score >= threshold]
 
 
+# 촬영 시각순 경로는 중복으로 빠진 자리를 다음 사진으로 채우려고 limit의 이 배수까지 비교
+DEDUP_FILL_FACTOR = 2
+
+
+def drop_duplicates(
+    ids: list[int], vectors: dict[int, np.ndarray], threshold: float
+) -> tuple[list[int], list[list]]:
+    """앞 순서부터 보며 이미 남긴 사진과 코사인이 threshold 이상인 사진 제외
+
+    ids는 점수순이나 촬영 시각순이라 같은 장면이면 앞 사진이 남음
+    벡터가 없거나 노름이 0인 사진은 비교 없이 남김(못 믿으면 지우지 않음)
+    removed는 [제외한 사진, 비슷한 남긴 사진, 코사인]
+    """
+    kept: list[int] = []
+    units: list[tuple[int, np.ndarray]] = []
+    removed: list[list] = []
+    for photo_id in ids:
+        vector = vectors.get(photo_id)
+        norm = float(np.linalg.norm(vector)) if vector is not None else 0.0
+        if norm == 0.0:
+            kept.append(photo_id)
+            continue
+        unit = vector / norm
+        similar = next(
+            (
+                (other, cosine)
+                for other, other_unit in units
+                if (cosine := float(unit @ other_unit)) >= threshold
+            ),
+            None,
+        )
+        if similar is None:
+            kept.append(photo_id)
+            units.append((photo_id, unit))
+        else:
+            removed.append([photo_id, similar[0], round(similar[1], 4)])
+    return kept, removed
+
+
+async def remove_duplicates(
+    ids: list[int], context: SearchContext, options: SearchOptions
+) -> list[int]:
+    """반환 후보 안 비슷한 사진 제거(#192). 벡터 조회 실패는 제거 없이 그대로 반환
+
+    중복 제거는 결과를 보기 좋게 하는 단계라 실패해도 검색 실패로 처리하지 않음
+    """
+    if len(ids) < 2:
+        return ids
+    try:
+        async with asyncio.timeout(options.retrieval_timeout_sec):
+            vectors = await context.vectors.fetch(ids)
+    except (ModelUnavailable, TimeoutError):
+        record_fields(dedup_result="fallback")
+        return ids
+    kept, removed = drop_duplicates(ids, vectors, options.dedup_threshold)
+    record_fields(
+        dedup_result="applied",
+        dedup_threshold=options.dedup_threshold,
+        dedup_removed=removed,
+    )
+    return kept
+
+
 def record_result(order_mode: str, selected: list[SearchHit], **fields) -> None:
     """ai_query 로그에 남길 정렬 경로와 반환 사진 ID
 
@@ -156,11 +222,14 @@ def order_by_taken_at(candidates: list[SearchCandidate], limit: int) -> list[Sea
             item.trip_attachment_id,
         ),
     )[:limit]
+    return rank_scores([item.trip_attachment_id for item in ordered])
+
+
+def rank_scores(ids: list[int]) -> list[SearchHit]:
+    """순위에 따라 감소하는 score, BE가 score 내림차순으로 다시 정렬해도 순서 유지"""
     return [
-        SearchHit(
-            trip_attachment_id=item.trip_attachment_id, score=(len(ordered) - rank) / len(ordered)
-        )
-        for rank, item in enumerate(ordered)
+        SearchHit(trip_attachment_id=photo_id, score=(len(ids) - rank) / len(ids))
+        for rank, photo_id in enumerate(ids)
     ]
 
 
@@ -201,7 +270,12 @@ async def _search(
     # 날짜, 지역, 시간대만 있는 질문은 BE와 시간대 필터로 좁힌 후보 전체가 정답
     # 원문 임베딩 점수는 정답 여부와 무관해 컷오프가 정답을 버림
     if orders_by_taken_at(request, words):
-        ordered_by_time = order_by_taken_at(list(candidates.values()), limit)
+        ordered_ids = [
+            hit.trip_attachment_id
+            for hit in order_by_taken_at(list(candidates.values()), limit * DEDUP_FILL_FACTOR)
+        ]
+        kept = (await remove_duplicates(ordered_ids, context, options))[:limit]
+        ordered_by_time = rank_scores(kept)
         record_result("taken_at", ordered_by_time)
         return SearchResponse(attachments=ordered_by_time)
 
@@ -218,6 +292,9 @@ async def _search(
     unique = {hit.trip_attachment_id: hit for hit in reversed(ranked)}
     ordered = sorted(unique.values(), key=lambda hit: (-hit.score, hit.trip_attachment_id))
     selected = apply_cutoff(ordered, options)[:limit]
+    selected_ids = [hit.trip_attachment_id for hit in selected]
+    kept = set(await remove_duplicates(selected_ids, context, options))
+    selected = [hit for hit in selected if hit.trip_attachment_id in kept]
     # 컷오프 전 순위와 점수, 적용된 기준값. 정답 사진이 기준값 바로 아래에서 잘렸는지 확인
     record_result(
         "vector",
