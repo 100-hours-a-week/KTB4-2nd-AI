@@ -14,6 +14,8 @@ from zoneinfo import ZoneInfo
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_serializer, model_validator
 
 KST = ZoneInfo("Asia/Seoul")
+# 백엔드 폴더 이름 상한(50자)과 같게 둔다.
+PLACE_NAME_MAX_LENGTH = 50
 
 
 def to_kst(value: datetime | None) -> datetime | None:
@@ -113,6 +115,12 @@ class PlaceAttachment(BaseModel):
 class Place(BaseModel):
     place_id: str = Field(description="응답 안에서만 유효, p1 형식")
     matched_trip_place_id: int | None = Field(default=None, description="v2 재처리, v1은 null")
+    place_name: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=PLACE_NAME_MAX_LENGTH,
+        description="AI가 찾은 장소 이름, 못 찾았으면 null이고 백엔드가 역지오코딩",
+    )
     latitude: float
     longitude: float
     first_taken_at: AwareDatetime | None = None

@@ -81,6 +81,7 @@ def finalize_photos(
     장소에는 대표 후보가 최소 한 장 있어야 한다. 모두 제외됐다면 입력 가정 위반으로
     실패하며 흐림 사진을 자동 복원하지 않는다. 장소 좌표는 제외 전 구성원의 구면 평균,
     시작과 종료 시각은 폴더에 남는 사진의 확정 시각 범위다. v1 매칭 ID는 항상 None이다.
+    장소 이름은 정리 단계가 사진에 둔 place_name이고, 없으면 None이라 백엔드가 역지오코딩한다.
     """
     by_id = {photo.source.trip_attachment_id: photo for photo in photos}
     if len(by_id) != len(photos):
@@ -127,9 +128,11 @@ def finalize_photos(
             representative_id = select_representative(candidates)
             latitude, longitude = _center(members)
             times = [photo.taken_at for photo in candidates if photo.taken_at is not None]
+            place_name = next((p.place_name for p in members if p.place_name), None)
             places.append(
                 Place(
                     place_id=place_id,
+                    place_name=place_name,
                     latitude=latitude,
                     longitude=longitude,
                     first_taken_at=min(times) if times else None,

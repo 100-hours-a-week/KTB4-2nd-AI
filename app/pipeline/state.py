@@ -50,6 +50,8 @@ class PhotoState:
     region_origin: RegionOrigin = RegionOrigin.UNKNOWN
     embedding: NDArray[np.float32] | None = field(default=None, repr=False, compare=False)
     place_id: str | None = None
+    # 정리 단계가 찾은 장소 이름. 같은 place_id의 사진은 같은 값을 갖고, 못 찾으면 None
+    place_name: str | None = None
     issue: Issue | None = None
     duplicate_of_attachment_id: int | None = None
     evaluation: int | None = None

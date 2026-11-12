@@ -7,7 +7,8 @@
 제안
 → 7 묶음 검토 → 8 큰 묶음 이름 → 9 다수결 배정 → 10 남은 묶음 이름 → 11 정리 → 12 미분류 재배정 →
 13 최종 판정.
-13단계 뒤 결과를 사진 상태(place_id, 좌표, 출처, 미분류 사유)로 옮기는 부분(apply_folders)은
+13단계 뒤 결과를 사진 상태(place_id, 장소 이름, 좌표, 출처, 미분류 사유)로 옮기는 부분
+(apply_folders)은
 실험에 없고
 서비스 결과 계약에 맞추려고 더했다.
 """
@@ -26,7 +27,13 @@ from app.pipeline.workflow import steps
 from app.pipeline.workflow.client import Places, Pod
 from app.pipeline.workflow.resources import WorkflowResources, WorkflowTimeout
 from app.pipeline.workflow.trip import Trip, View, build_views, gps_record, haversine, load_font
-from app.schemas.process import KST, Issue, ProcessRequest, RegionOrigin
+from app.schemas.process import (
+    KST,
+    PLACE_NAME_MAX_LENGTH,
+    Issue,
+    ProcessRequest,
+    RegionOrigin,
+)
 
 BIG = 5  # 8단계 큰 묶음 기준 사진 수
 MAX_CARDS = 26  # 9단계 카드 A~Z
@@ -336,11 +343,14 @@ async def organize(
     for g in sup:
         if found.get(g):
             cls[g] = fr(g)
+            # name은 카드 글자 구분용 자리표시자를 덮어쓰므로, 실제로 찾은 이름은 place_name에
+            # 따로 둔다.
             grec[g] = dict(
                 grec[g],
                 name=found[g]["name"],
                 category=found[g].get("category", ""),
                 address=found[g].get("address", ""),
+                place_name=found[g]["name"],
             )
     log["gpsname"] = {
         "places": len(sup),
@@ -470,6 +480,20 @@ async def organize(
 
 
 # ---------- 13단계와 서비스 사진 상태 반영(실험에 없음)
+def record_place_name(record: dict | None) -> str | None:
+    """폴더 레코드에서 결과로 넘길 장소 이름. GPS 레코드는 4단계에서 찾은 이름(place_name)만 쓴다.
+
+    공백을 하나로 줄이고 결과 계약의 길이 상한에 맞춰 자른다. 비면 None이다.
+    """
+    if not record:
+        return None
+    raw = record.get("place_name") if record.get("gps") else record.get("name")
+    if not isinstance(raw, str):
+        return None
+    name = " ".join(raw.split())[:PLACE_NAME_MAX_LENGTH].strip()
+    return name or None
+
+
 def apply_folders(fv, folders, photos: list[PhotoState]) -> dict:
     """좌표가 있는 폴더(GPS 사진이 있거나 장소 레코드가 있음)만 장소로 두고 나머지는 위치 미분류로
     보낸다.
@@ -479,6 +503,8 @@ def apply_folders(fv, folders, photos: list[PhotoState]) -> dict:
     기존 서비스 규칙).
     - 레코드 폴더의 사진은 레코드 좌표를 받는다.
     장소 ID는 폴더의 가장 작은 사진 ID 순서로 p1부터 매긴다.
+    폴더 레코드에 실제 장소 이름이 있으면 사진의 place_name에 둔다. GPS 레코드는 4단계에서 이름을
+    찾은 경우만이고, 자리표시 이름("GPS 장소 1")은 넘기지 않는다.
     """
     kept = []
     for f in folders:
@@ -490,13 +516,16 @@ def apply_folders(fv, folders, photos: list[PhotoState]) -> dict:
             kept.append((members, has_gps, f["record"]))
     kept.sort(key=lambda item: min(p.source.trip_attachment_id for p in item[0]))
     placed: set[int] = set()
-    record_folders = 0
+    record_folders = named_folders = 0
     for index, (members, has_gps, record) in enumerate(kept):
         place_id = f"p{index + 1}"
+        place_name = record_place_name(record)
+        named_folders += place_name is not None
         anchors = [p for p in members if p.source.has_gps]
         anchors.sort(key=lambda p: p.source.trip_attachment_id)
         for photo in members:
             photo.place_id = place_id
+            photo.place_name = place_name
             photo.issue = None
             if photo.source.has_gps:
                 photo.latitude, photo.longitude = photo.source.latitude, photo.source.longitude
@@ -513,6 +542,7 @@ def apply_folders(fv, folders, photos: list[PhotoState]) -> dict:
     for photo in photos:
         if photo.source.trip_attachment_id not in placed:
             photo.place_id = None
+            photo.place_name = None
             photo.issue = Issue.UNCLEAR_LOCATION
             if photo.source.has_gps:
                 # 지역 밖으로 뺀 GPS 사진은 LOCATING의 기간 밖 GPS 사진처럼 원래 좌표를 달고 나간다.
@@ -524,6 +554,7 @@ def apply_folders(fv, folders, photos: list[PhotoState]) -> dict:
     return {
         "places": len(kept),
         "record_places": record_folders,
+        "named_places": named_folders,
         "unclassified": len(photos) - len(placed),
     }
 
@@ -575,7 +606,8 @@ def run_workflow(
     report: Callable[[int], None],
     check_cancel: Callable[[], None],
 ) -> dict:
-    """사진 상태에 워크플로우 결과(place_id, 좌표, 출처, 위치 미분류)를 반영하고 집계를 돌려준다.
+    """사진 상태에 워크플로우 결과(place_id, 장소 이름, 좌표, 출처, 위치 미분류)를 반영하고
+    집계를 돌려준다.
 
     images는 모든 사진의 분석용 사본 bytes. 모델 호출이 끝날 때마다 report(끝난 호출 수)를 부른다.
     취소와 시간 예산은 결과를 기다리는 동안 이 스레드에서 확인한다.
