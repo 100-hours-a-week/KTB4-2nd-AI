@@ -1,172 +1,63 @@
 # 여담 AI 서버
 
-여행 사진 정리와 검색 및 스토리 생성을 위한 AI 서버입니다. BE와의 계약은 팀 위키의 "모델 API 설계"를 따릅니다.
+여행 사진을 장소별 폴더로 자동 정리하고, 자연어로 사진을 찾거나 질문하며, 고른 사진으로 여행 스토리를 만드는 서비스 여담의 AI 서버
 
-## 개발 담당과 코드 경계
+## 주요 기능
 
-Grant는 공통 서버와 스토리, 전체 서비스 연결을 담당합니다. Kael은 검색과 사진 정리 알고리즘, 임베딩 및 모델 서버를 담당합니다. 파일별 리뷰 담당자는 [.github/CODEOWNERS](.github/CODEOWNERS)에 정의합니다. 공통 설정과 스키마 및 의존성 변경은 함께 검토합니다.
-
-```text
-app/
-├── api/          외부 HTTP 요청 처리
-├── jobs/         작업 상태와 실행 관리
-├── worker/       사진 정리 파이프라인 실행
-├── pipeline/     사진 정리 알고리즘
-├── search/       검색 파이프라인
-├── story/        스토리 파이프라인
-├── embedding/    공용 임베딩 계약과 HTTP 클라이언트 구현 위치
-└── engines/      기존 로컬 SigLIP2와 테스트용 엔진
-docker/
-├── Dockerfile    기존 통합 이미지
-├── jobs/         v2 API와 정리 실행기의 공용 이미지 및 로컬 연결 설정
-├── embedding/    독립 임베딩 vLLM 서버의 실행 설정
-└── generation/   RunPod 생성용 vLLM 실행 설정을 관리할 위치
-```
-
-`app/worker/`는 작업을 실행하는 Python 코드이고 `docker/embedding/`은 벡터를 생성하는 별도 서버 구성입니다. 검색과 사진 정리는 같은 임베딩 서버를 호출합니다. 임베딩 서버는 여행의 작업 상태나 Qdrant 저장 및 클러스터링을 담당하지 않습니다.
-
-| 위치 | 담당자 | 수정할 내용 |
-| --- | --- | --- |
-| `app/api/` | Grant | HTTP 인증, 요청과 응답, 검색 서비스 연결 |
-| `app/jobs/` | Grant | 작업 상태와 실행 제어, 워커 호출과 감시. Kafka와 공유 상태 저장소의 연결도 이 경계에서 구현 |
-| `app/worker/`, `app/worker_main.py` | Grant | 파이프라인 실행, 진행률 보고와 취소 연결, 워커 기동 |
-| `app/story/` | Grant | 스토리 사진 선별, 사실 정리, 생성과 검증 |
-| `app/search/` | Kael | 질의 해석, 후보 검색, 근거 선택과 답변 생성 |
-| `app/embedding/` | Kael | 검색과 사진 정리의 공용 임베딩 계약, HTTP 클라이언트 구현 |
-| `docker/embedding/` | Kael | 공유 임베딩 vLLM 서버의 모델과 실행 설정 |
-| `docker/generation/` | Kael | RunPod 생성용 vLLM의 실행 설정과 단독 호출 검증 |
-| `app/engines/`, `app/pipeline/` | Kael | 기존 로컬 엔진 유지, 사진 정리와 클러스터링, 모델별 임계값 |
-| `app/infra/qdrant.py` | Kael | 컬렉션 관리, 벡터 저장과 조회, 후보 범위 검색 구현 |
-| `app/infra/vllm_client.py`, `app/infra/images.py` | Grant | 생성용 VLM 통신과 이미지 접근 |
-| `app/main.py`, 배포 연결 설정 | Grant | 각 기능의 실제 의존성 연결과 앱 수명 관리, 통합 검증 |
-
-Kael은 AWS 임베딩 vLLM과 RunPod 생성용 vLLM의 실행 설정 및 단독 호출을 검증합니다. AWS 임베딩 호출은 Kael이 이미지와 텍스트 입력, 벡터 차원 및 정규화까지 함께 관리합니다. Grant는 제공된 임베딩과 벡터 검색 구현을 서비스에 연결합니다.
-
-### 함께 유지할 인터페이스
-
-- 검색은 `SearchContext`의 `VlmClient`, `TextEmbedder`, `CandidateSearcher`, `ImageResolver`를 사용합니다. 검색 프롬프트와 출력 검증은 `app/search/`에서 구현합니다.
-- `EmbeddingEngine`과 `TextEmbedder`는 `app/embedding/contracts.py`에 정의합니다. 기존 `app.engines.base.EmbeddingEngine`과 `app.search.context.TextEmbedder` import도 유지합니다. 이미지 계약은 기존 동기 정리 코드와 호환되고 텍스트 계약은 비동기 검색 코드와 호환됩니다.
-- 생성용 VLM은 공통 `chat()`을 사용하고 스토리 프롬프트와 검증은 `app/story/`에서 구현합니다. 임베딩 호출은 생성용 `chat()`과 구분합니다.
-- 사진 정리는 `run(request, ctx, on_progress, is_cancelled)`를 통해 실행합니다. 정리 알고리즘은 Kafka나 작업 상태 저장소를 직접 다루지 않고 진행률 콜백과 취소 확인 함수를 사용합니다.
-- 공통 인터페이스를 변경할 때는 호출하는 쪽과 구현하는 쪽을 함께 확인합니다. 각 담당자는 기능 테스트를 작성하며, BE부터 모델과 저장소까지의 통합 검증은 Grant가 주도합니다.
-
-### 현재 구현과 배포 범위
-
-`app/jobs/`에는 v2의 Redis 상태 관리와 Kafka 접수 및 결과 발행, 독립 실행기가 있습니다. `app/v2_main.py`가 v2 API 진입점입니다. 기존 메모리 기반 v1 작업 관리는 기존 진입점에서 유지합니다. 여행 정리와 스토리 생성 함수 및 검색 HTTP를 실제 클라이언트에 연결했으며, 외부 서버를 사용한 스테이징 검증은 별도로 수행합니다. 실행 명령과 환경 변수는 [공통 작업 서버 실행 안내](docker/jobs/README.md)를 참고합니다.
-
-`docker/embedding/`에는 독립 임베딩 서버용 Compose 설정이 있습니다. v2는 Qwen 이미지 및 텍스트 임베딩 HTTP 클라이언트를 사용하고, Qdrant 컬렉션을 기존 SigLIP2 벡터와 구분합니다. 모델 및 이미지 버전과 GPU 성능은 Kael이 검증하며 AWS에서의 실제 연결은 배포 후 확인합니다.
-
-v2의 배치 기준은 아래와 같습니다. 현재 배포가 완료됐다는 뜻은 아닙니다.
-
-| 구성요소 | 배치와 실행 조건 |
+| 기능 | 처리 흐름 |
 | --- | --- |
-| ai-api | Fargate에서 두 개 이상의 복제본과 오토스케일링 사용. 스토리는 복제본 전체에서 최대 4건 실행 |
-| 임베딩 vLLM | GPU EC2 g6.xlarge 1대에서 실행하며 검색과 정리가 공유 |
-| 정리 실행기 | 같은 EC2의 별도 CPU 컨테이너 1개. ai-api와 같은 애플리케이션 이미지를 사용하고 실행 명령을 구분 |
-| Qdrant | 같은 EC2에서 실행하며 데이터를 호스트 EBS에 저장. 인스턴스 교체 시 볼륨 유지와 재연결은 클라우드 확인 필요 |
-| AI Redis | 별도 컨테이너. 영속화는 클라우드 검토 중이며 v2에서는 데이터 유실로 인한 작업 유실을 알려진 한계로 관리 |
-| 생성용 vLLM | RunPod 1 Pod. 설정 위치와 담당 범위는 [생성 서버 설정](docker/generation/README.md) 참고 |
+| 사진 자동 정리 | 업로드 사진을 임베딩하고 흐림, 중복을 판정한 뒤 촬영 위치와 시각으로 장소별 폴더 구성. 위치 정보 없는 사진은 LangGraph 정리 에이전트가 유사 사진 찾기, 장소 검색 도구를 호출해 장소 추정 |
+| 자연어 사진 검색 | LLM은 질문에서 날짜, 시간대, 장소 표현만 JSON으로 추출하고 상대 날짜 계산과 조건 판정은 코드가 처리. 후보를 거른 뒤 이미지, 텍스트 임베딩 유사도로 순위를 매기고 하한과 1위 대비 비율로 반환 여부 결정, 정답 없는 질문은 거절 |
+| 여행 스토리 생성 | 품질 필터와 장소별 배분으로 사진을 고르고 VLM이 한 번에 집필한 뒤 사실 검증 |
 
-AWS 컨테이너는 다섯 종류이며 실제 개수는 API 복제본 수에 따라 달라집니다. ai-api와 정리 실행기가 공유할 이미지는 임베딩 vLLM 이미지와 구분합니다. 여러 API는 같은 Redis의 상태와 취소 요청 및 실행 슬롯을 사용합니다. API 종료 유예와 실패 결과 전달 규칙은 [v2 배포 안내](docker/v2/README.md)를 따릅니다.
+## 구성
 
-### 정리 실행기의 구현 조건
-
-- Redis 대기열을 꺼내는 루프를 하나만 실행하고, 정리 작업 한 건을 끝낸 뒤 다음 작업을 가져옵니다. 배포 중 실행기가 겹치는 경우와 작업을 꺼낸 뒤 프로세스가 종료되는 경우도 검증합니다.
-- `app/pipeline/run.py`의 최대 16장 순차 임베딩을 유지합니다. HTTP 클라이언트도 배치를 병렬 전송하지 않습니다. 이는 정리 요청의 적체를 제한하는 조건이며 검색 지연의 상한을 보장하지 않습니다. 검색과 정리를 함께 실행해 지연을 측정합니다.
-- 정리 실행기의 CPU 사용 상한은 2 vCPU로 설정할 예정입니다. 배포 도구의 CPU 가중치와 상한을 구분하고, vLLM 및 Qdrant의 CPU와 메모리 여유를 검증합니다.
-- vLLM 우선순위 스케줄링은 v2 범위에서 제외하고 구현 후 성능 개선 항목으로 남깁니다.
-- Redis 등록 실패를 접수 성공으로 처리하지 않습니다. API나 실행기 재시작에 대한 처리와 Redis 데이터 자체의 유실 한계를 구분합니다.
-
-`app/jobs/runner.py`에 Redis 소비 루프를 구현했으며, `docker/jobs/`에 공용 이미지와 역할별 명령 및 로컬 CPU 상한 설정이 있습니다. 실제 AWS 작업 정의와 배포 자원 적용은 별도 검증이 필요합니다. 기존 `app/worker_main.py`는 HTTP로 작업을 받고 로컬 엔진을 사용하는 v1 경로입니다. v1 여행을 v2에서도 유지할지는 BE 확인이 필요하며, 그 결과에 따라 새 모델로 벡터를 다시 생성하는 백필의 범위와 담당자를 정합니다.
-
-기존 `docker/Dockerfile`과 아래 로컬 실행 명령은 기존 SigLIP2 및 통합 구성을 유지합니다. main에서 이미지가 만들어져도 운영 배포를 뜻하지 않으며, V2 이미지는 스테이징 통합 검증 후 배포 여부를 결정합니다.
-
-## 독립 임베딩 서버 설정
-
-NVIDIA GPU와 Docker GPU 지원이 준비된 호스트에서 사용합니다. `docker/embedding/.env.example`을 같은 폴더의 `.env`로 복사하고 검증한 이미지, 모델 revision, 모델명과 인증키를 입력합니다. 이 설정은 임베딩 서버 하나만 실행하며 API나 정리 실행기를 시작하지 않습니다.
-
-```sh
-docker compose --env-file docker/embedding/.env -f docker/embedding/compose.yaml config --quiet
-docker compose --env-file docker/embedding/.env -f docker/embedding/compose.yaml up -d
+```mermaid
+flowchart LR
+    BE["백엔드"] -- "Kafka 정리, 스토리 요청" --> API["ai-api<br>FastAPI"]
+    BE -- "HTTP 검색" --> API
+    API -- "작업 적재" --> R[("AI Redis")]
+    R --> RUN["정리 실행기"]
+    RUN -- "사진 다운로드" --> S3[("S3")]
+    RUN --> EMB["임베딩 vLLM<br>Qwen3-VL-Embedding-2B, L4"]
+    API --> EMB
+    RUN --> Q[("Qdrant")]
+    API --> Q
+    API -- "질의 해석, 답변, 스토리" --> GEN["생성 vLLM<br>Gemma 4 31B, RunPod A40"]
+    RUN -- "장소 추정 에이전트" --> GEN
+    API -- "Kafka 결과 발행" --> BE
 ```
 
-기본 주소는 같은 호스트에서 확인하는 `http://127.0.0.1:8003/v1`입니다. API와 정리 실행기에서 접근할 내부 주소와 네트워크 접근 범위는 클라우드와 조율합니다. 모델별 전처리, 벡터 차원과 정규화 설정을 맞추고, 검색과 사진 배치가 함께 들어올 때의 처리량도 확인해야 합니다.
+- 업로드 요청이 AI 결과가 나올 때까지 연결을 384.6초(nginx 제한의 64%) 점유하던 v1 구조를 Kafka 이벤트 기반 비동기 처리로 전환, 중복 결과는 BE가 실행 ID로 거르도록 합의
+- 정리 실행기, 임베딩 vLLM, Qdrant는 GPU EC2 한 대, 생성 vLLM은 RunPod
 
-설정 참고: [vLLM Docker 실행](https://docs.vllm.ai/en/stable/deployment/docker/), [Compose GPU 설정](https://docs.docker.com/compose/how-tos/gpu-support/).
+## 평가 체계
 
-## 로컬 실행
+- 정리: 3개 기기(iPhone, 갤럭시, 디지털카메라) 사진 200장에 정답 장소를 직접 라벨링, B-cubed F1과 ARI로 자동 채점
+- 검색: 개인 사진 검색 벤치마크 PhotoBench의 질의 분류를 차용한 7개 유형 51문항 테스트셋(정답 없는 질문 포함), 순위(nDCG@10), 반환(F1), 거절(Reject-F1) 분리 측정
+- 재현: 고정 채점 스크립트로 변경마다 같은 데이터와 조건에서 재측정, 임계값은 별도 개발셋에서만 선택
 
-```
-uv sync
-cp .env.example .env
-uv run scripts/fetch_model.py
-docker run -p 6333:6333 -v ./data/qdrant:/qdrant/storage qdrant/qdrant:v1.19.1
-uv run uvicorn app.worker_main:app --port 8002
-uv run uvicorn app.main:app --port 8000
-```
+## 성능 개선 결과
 
-`fetch_model.py`는 임베딩 가중치를 `models/.raw/`에 받아 vision 타워만 bf16으로 변환한 0.9GB를 `models/siglip2`에 둠. git에는 없음
-
-## 검사
-
-```
-uv run pytest
-uv run ruff check . && uv run ruff format --check .
-```
-
-## 표준 명령
-
-CI 워크플로와 사람이 같은 명령을 씀. 워크플로는 이 표의 명령을 그대로 실행
-
-| 단계 | 명령 | PR | main |
+| 항목 | 변경 | 결과 | 측정 조건 |
 | --- | --- | --- | --- |
-| 의존성 | `uv sync --frozen` | ✓ | ✓ |
-| 린트 | `uv run ruff check .` | ✓ | |
-| 포맷 | `uv run ruff format --check .` | ✓ | |
-| 테스트 | `uv run pytest` | ✓ | |
-| 가중치 캐시 키 | `uv run scripts/fetch_model.py --cache-key` | ✓ | ✓ |
-| 가중치 다운로드 | `uv run scripts/fetch_model.py` | ✓ 캐시 미스 시 | ✓ 캐시 미스 시 |
-| 모델 실행 검증 | `uv run scripts/runtime_check.py` | ✓ | |
-| 이미지 빌드 | `docker buildx build --platform linux/amd64 -f docker/Dockerfile -t ghcr.io/100-hours-a-week/yeodam-ai-worker:sha-$GITHUB_SHA .` | ✓ push 없음 | ✓ |
-| 이미지 push | `docker push ghcr.io/100-hours-a-week/yeodam-ai-worker:sha-$GITHUB_SHA` | | ✓ |
+| 위치 정보 없는 사진 | LangGraph 정리 에이전트 도입 | 미분류 71장 → 1장, B-cubed F1 0.637 → 0.960 | 스테이징, 200장 1회 |
+| 정리 대기 시간 | 작업 시작 비용 제거, 업로드 중 임베딩, 판정 지표 사전 계산 | AI 대기 33.2초 → 3.6초, B-cubed F1 0.980 유지 | 200장, 에이전트 도입 전 파이프라인 |
+| 검색 품질 | 시간대 조건 처리, 반환 기준 재선정 | 검색 F1 0.34 → 0.55, 거절 F1 0.15 → 0.60 | 테스트셋 51문항 |
+| 질의 해석 지연 | vLLM 투기적 디코딩 MTP(k=2) | 질의 해석 p50 2.75초 → 1.73초, 동시 4건 처리량 71.0 → 166.5 tok/s, 검색 지표 변화 없음 | A40, 51문항 3회 |
+| 사용자 정리 부담 | 위치 불명 사진에도 흐림, 중복 판정 적용 | 사용자가 직접 정리할 사진 73장 → 48장 | 200장 오프라인 |
 
-- 가중치 캐시는 `models/siglip2` 디렉터리, 키는 `--cache-key` 출력(`siglip2-so400m-naflex-<revision 12자>-bf16-vision`). revision은 `scripts/fetch_model.py`의 `MODELS`에 고정, dtype이나 `--full`이 바뀌면 키도 바뀜
-- `runtime_check.py`는 엔진 적재, 1장 임베딩, Qdrant 연결을 확인. 워커 엔트리와 엔진 클래스가 머지된 뒤 추가
-- 이미지 태그는 `sha-{전체 커밋 해시}`. 클라우드 CD는 이 태그를 pull만 하고 다시 빌드하지 않음
+## 기술 스택
 
-## 컨테이너 기동 확인
-
-```
-docker run --rm -p 8000:8000 -v ./data:/data \
-  -e API_KEY=local -e S3_BUCKET=<버킷> -e FAKE_PIPELINE=1 \
-  ghcr.io/100-hours-a-week/yeodam-ai-worker:sha-<해시>
-curl -s localhost:8000/health
-```
-
-기동 약 60초 뒤 `/health`가 `{"status": "ok", ...}` 200. 그전에는 503 `starting`(모델 적재 중)이나 `degraded`(워커나 Qdrant 미응답). `FAKE_PIPELINE=1`이면 진짜 모델 대신 가짜 엔진으로 접수부터 완료까지 확인 가능
-
-## 로그
-
-컨테이너 stdout에 한 줄 JSON. 수집과 CloudWatch 전송은 클라우드가 구성
-
-공통 필드는 `timestamp`, `level`, `service`, `logger`, `message`, `event`, `result`, `request_id`, `trip_id`, `job_id`, `duration_ms`, `failure_stage`, `error_code`, `release`이며 해당하지 않으면 `null`
-
-| 환경 변수 | 기본값 | 용도 |
-| --- | --- | --- |
-| `LOG_LEVEL` | `INFO` | 운영과 부하 테스트는 `INFO`. 오류를 재현하는 짧은 구간에만 `DEBUG`로 올리고 확인 뒤 되돌림 |
-| `RELEASE` | `unknown` | 배포 식별자. 클라우드가 이미지 SHA를 런타임 환경 변수로 주입 |
-
-관측 이벤트
-
-| `event` | 기록 위치 |
+| 영역 | 사용 |
 | --- | --- |
-| `ai_service_startup` | api와 worker 기동 |
-| `ai_job` | api, 작업 접수와 종료. 작업당 `started` 한 번과 최종 한 번 |
-| `ai_job_dispatch` | api, 워커 위임 결과 |
-| `ai_worker_execution` | worker, 파이프라인 실행 전체 |
-| `ai_pipeline_step` | worker, 단계 전환 |
-| `ai_callback` | worker, 콜백 최종 결과 |
+| 모델 | Gemma 4 31B(생성), Qwen3-VL-Embedding-2B(임베딩) |
+| 서빙 | vLLM, FastAPI, AWS(Fargate, EC2 g6.xlarge), RunPod |
+| 에이전트 | LangGraph |
+| 데이터 | Qdrant, Redis, Kafka, S3 |
+| 관측 | CloudWatch Logs Insights, Prometheus |
 
-단계 이름은 `download`, `embedding`, `clock_correction`, `locating`, `clustering`, `filtering`, `finalizing`
+## 문서
 
-요청 식별자는 `X-Request-ID` 헤더로 받고 없으면 생성. api 응답 헤더로 되돌려주며 워커와 콜백까지 같은 값으로 전파
+- [팀 위키](https://github.com/100-hours-a-week/KTB4-2nd-wiki/wiki)
+- [AI 개발 블로그, 사진 정리 속도 개선 시리즈](https://medium.com/yeodam-tech)
